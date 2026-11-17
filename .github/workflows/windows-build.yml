@@ -1,0 +1,42 @@
+name: Windows app build (manual or push)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'build_windows.bat'
+      - '.github/workflows/windows-build.yml'
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          python -m pip install pytest
+          python -m pytest -q
+      - name: Build isolated GUI
+        shell: pwsh
+        run: |
+          python -m pip install pyinstaller
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data 'app/engine_bridge.mjs;app' app/main.py
+          $nodePath = (Get-Command node).Source
+          Copy-Item $nodePath dist/MABStudio/node.exe
+          $nodeLicense = Join-Path (Split-Path $nodePath -Parent) 'LICENSE'
+          if (Test-Path $nodeLicense) { Copy-Item $nodeLicense dist/MABStudio/NODE_LICENSE.txt }
+          if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE missing' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MABStudio-Windows-Preview
+          path: dist/MABStudio/**
+          retention-days: 14
