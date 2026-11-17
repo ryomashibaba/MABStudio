@@ -31,5 +31,9 @@ def verify_packaged_runtime() -> dict:
     base = Path(bundle).resolve() / 'app' / 'education_runtime'
     if not (base / 'bridge.mjs').is_file() or not (base / 'node_modules' / 'socket-be' / 'package.json').is_file():
         raise StudioError('配布EXEのEducation読み取り専用部品がありません。完全な配布フォルダが必要です。')
+    # A published onedir build includes a manifest generated ONLY after the
+    # private Node, SocketBE import and read-only self-test have run at build.
+    from app.release_audit import verify_manifest
+    audit = verify_manifest(package_dir)
     return {'mode': 'PACKAGED_ONEDIR', 'packagedRuntimeVerified': True,
-            'worldContacts': 0, 'worldWrites': 0}
+            **audit, 'worldContacts': 0, 'worldWrites': 0}

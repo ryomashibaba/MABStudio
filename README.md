@@ -5,6 +5,13 @@
 2026-11-17時点の **Windows向け開発プレビュー**。既存MAB V11研究とは独立。追加課金0円を前提。**Minecraft Educationへの施工は未実装・無効**。
 
 
+## 2026-11-17 配布ランタイム整合性の追加検証（v0.3継続）
+
+- Windowsビルドは、同梱 `node.exe`（22以降）、Node権限モード、Education読取ブリッジの5コマンド自己試験、SocketBE 2.8.0のモジュール読込を**配布フォルダ内の実体で**確認し、失敗時は配布を停止する。
+- ビルドに成功した場合だけ `dist\MABStudio\RUNTIME_MANIFEST.json` を生成し、EXE、同梱Node、ライセンス通知、MAB接続コード、Educationランタイム各ファイルのSHA-256を保存する。EXE起動時にファイル欠損・差し替え・依存内容の追加を検出したら、安全停止する。この仕組みは**偶発的な破損検出**であり、デジタル署名、ソフトウェア供給元の真正性、第三者ライセンス審査を代替しない。
+- Linux環境でNode.js 22を用いた配布監査の実行経路を確認（SocketBEはテストダブル）。さらに固定MAB B143の原本をGitHubから確認して実SHA-256 `537aa9e4...` に一致させ、Linux/Xvfbで全回帰 **122 PASS / 0 SKIP / 0 FAIL**。この固定B143ファイルは配布ZIPに含めず、ユーザー初回起動時に検証済みSHAで取得する。
+- **Windows EXEの本当の起動・Windows Actions実行・真正SocketBEの配布状態・真正Ollama/LM Studioによる未知指示・Minecraft Education実機は依然未確認。** 現環境から完了を主張せず、Windows側で一括受入検証する。Minecraftワールド書込機能は追加していない。
+
 ## 2026-11-17 Windows配布の起動安定化（v0.3継続）
 
 - `start_windows.bat` は **ビルド済み `dist\MABStudio\MABStudio.exe` を優先起動**する。配布版利用時にはPythonやPATH上のNode.jsを使わない。EXEがないソース開発環境だけ従来の`py -3 -m app.main`等へフォールバックする。単体の`MABStudio.exe`だけでは動かないため、**`dist\MABStudio`フォルダ全体**を配置する。

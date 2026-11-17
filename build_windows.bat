@@ -21,6 +21,8 @@ for /f "delims=" %%i in ('where node') do (
   goto :done
 )
 :done
+rem Audit the *copied* private Node and SocketBE; publish only with a verified manifest.
+".venv-build\Scripts\python.exe" -m app.release_audit "dist\MABStudio" || goto :error
 echo Result: dist\MABStudio\MABStudio.exe
 exit /b 0
 :error

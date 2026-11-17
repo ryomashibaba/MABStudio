@@ -65,6 +65,12 @@ jobs:
           if (!(Test-Path $nodeLicense)) { throw 'Node.js license missing: release blocked' }
           Copy-Item $nodeLicense dist/MABStudio/NODE_LICENSE.txt
           if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE_MISSING' }
+      - name: Audit actual bundled Node.js and SocketBE, write runtime manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m app.release_audit dist/MABStudio
+          if ($LASTEXITCODE -ne 0) { throw 'RUNTIME_MANIFEST_AUDIT_FAILED' }
       - name: Launch real packaged EXE and render 917 verified B143 voxels
         shell: pwsh
         run: |

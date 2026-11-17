@@ -4,10 +4,11 @@ Static checks are not Windows EXE evidence; Windows Actions must separately
 build and launch the actual onedir executable.
 """
 import sys
+import json
 from pathlib import Path
 import shutil
 import pytest
-from app import core, release_runtime
+from app import core, release_runtime, release_audit
 
 
 def test_source_checkout_does_not_claim_portable_bundle(monkeypatch):
@@ -49,11 +50,19 @@ def test_frozen_app_requires_license_bridge_and_transport(tmp_path, monkeypatch)
     (internal / 'engine_bridge.mjs').write_text('// dummy')
     with pytest.raises(core.StudioError, match='読み取り専用部品'):
         release_runtime.verify_packaged_runtime()
-    (internal / 'education_runtime' / 'bridge.mjs').write_text('// dummy')
+    from app.education import education_bridge_script
+    (internal / 'education_runtime' / 'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (internal / 'education_runtime' / 'package.json').write_text(json.dumps({'dependencies': {'socket-be':'2.8.0'}}))
     (internal / 'education_runtime' / 'node_modules' / 'socket-be').mkdir(parents=True)
-    (internal / 'education_runtime' / 'node_modules' / 'socket-be' / 'package.json').write_text('{}')
+    (internal / 'education_runtime' / 'node_modules' / 'socket-be' / 'package.json').write_text(json.dumps({'version':'2.8.0','license':'MIT'}))
+    with pytest.raises(core.StudioError, match='整合性記録'):
+        release_runtime.verify_packaged_runtime()
+    manifest=release_audit.build_manifest(dist, exercise=False)
+    (dist / release_audit.MANIFEST).write_text(json.dumps(manifest))
     report = release_runtime.verify_packaged_runtime()
     assert report['packagedRuntimeVerified'] is True
+    assert report['bundleManifestVerified'] is True
+    assert report['criticalAssets'] >= 7
     assert report['worldWrites'] == report['worldContacts'] == 0
     assert core.node_binary() == str(dist / 'node.exe')
 
@@ -92,3 +101,64 @@ def test_broken_packaged_gui_displays_error_instead_of_console_traceback(monkeyp
                         lambda title, message: shown.append((title, message)))
     assert main.main() == 1
     assert shown and '配布用部品が不足' in shown[0][1]
+
+
+def test_bundle_modification_and_missing_socketbe_file_rejected(tmp_path, monkeypatch):
+    from app.education import education_bridge_script
+    dist = _frozen(monkeypatch, tmp_path)
+    (dist / 'node.exe').write_bytes(b'private node executable for unit test')
+    (dist / 'NODE_LICENSE.txt').write_text('local license placeholder')
+    internal = dist / '_internal' / 'app'
+    (internal / 'engine_bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/engine_bridge.mjs').read_bytes())
+    transport = internal / 'education_runtime'
+    (transport / 'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (transport / 'package.json').write_text(json.dumps({'dependencies':{'socket-be':'2.8.0'}}))
+    (transport / 'node_modules/socket-be').mkdir(parents=True)
+    (transport / 'node_modules/socket-be/package.json').write_text(json.dumps({'version':'2.8.0'}))
+    manifest=release_audit.build_manifest(dist, exercise=False)
+    (dist / release_audit.MANIFEST).write_text(json.dumps(manifest))
+    assert release_runtime.verify_packaged_runtime()['bundleManifestVerified']
+    (dist / 'node.exe').write_bytes(b'altered private Node.exe')
+    with pytest.raises(core.StudioError, match='変更されています'):
+        release_runtime.verify_packaged_runtime()
+    (dist / 'node.exe').write_bytes(b'private node executable for unit test')
+    (transport / 'node_modules/socket-be/entry.mjs').write_text('// unexpected addition')
+    with pytest.raises(core.StudioError, match='構成がビルド時と異なります'):
+        release_runtime.verify_packaged_runtime()
+    (transport / 'node_modules/socket-be/entry.mjs').unlink()
+    (transport / 'node_modules/socket-be/package.json').write_text(json.dumps({'version':'2.9.0'}))
+    with pytest.raises(core.StudioError):
+        release_runtime.verify_packaged_runtime()
+
+
+def test_windows_build_runs_private_node_audit_before_exe_launch():
+    base = Path(__file__).resolve().parents[1]
+    bat = (base / 'build_windows.bat').read_text(encoding='utf-8').lower()
+    ci = (base / '.github/workflows/windows-build.yml').read_text(encoding='utf-8').lower()
+    assert 'python.exe" -m app.release_audit "dist\\mabstudio"' in bat
+    assert ci.index('python -m app.release_audit dist/mabstudio') < ci.index('launch real packaged exe')
+
+
+def test_release_audit_checks_private_node_permission_and_socket_import(tmp_path, monkeypatch):
+    from app.education import education_bridge_script
+    import subprocess
+    dist=tmp_path/'MABStudio'; (dist / '_internal/app/education_runtime/node_modules/socket-be').mkdir(parents=True)
+    (dist / 'MABStudio.exe').write_bytes(b'x')
+    (dist / 'node.exe').write_bytes(b'x')
+    (dist / 'NODE_LICENSE.txt').write_bytes(b'x')
+    (dist / '_internal/app/engine_bridge.mjs').write_bytes(b'x')
+    transport=dist / '_internal/app/education_runtime'
+    (transport/'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (transport/'package.json').write_text(json.dumps({'dependencies':{'socket-be':'2.8.0'}}))
+    (transport/'node_modules/socket-be/package.json').write_text(json.dumps({'version':'2.8.0'}))
+    calls=[]
+    def fake_run(cmd, **kw):
+        calls.append((cmd,kw))
+        return subprocess.CompletedProcess(cmd,0,'v22.16.0\n' if cmd[1:] == ['--version'] else 'PASS\n','')
+    monkeypatch.setattr(release_audit.subprocess,'run',fake_run)
+    audit=release_audit.build_manifest(dist,exercise=True)
+    assert audit['nodeVersionAtBuild']=='v22.16.0'
+    assert len(calls)==4
+    assert any('--permission' in args for args,_ in calls)
+    assert any('--self-test' in args for args,_ in calls)
+    assert any('socket-be' in ' '.join(args) for args,_ in calls)
