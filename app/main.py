@@ -15,6 +15,7 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
+from app.project_io import export_verified_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
@@ -55,7 +56,9 @@ class Studio(tk.Tk):
         self.place_xyz.trace_add('write', self._on_anchor_changed)
         self._poll_after = self.after(120, self._poll)
         self._startup_after = self.after(2000, self._startup)
-        self._check_after = self.after(15*60*1000, self._periodic_check)
+        # Reviewed engine updates are not automatically installable. Do not
+        # interrupt users with periodic remote checks; manual check stays available.
+        self._check_after = None
 
     def destroy(self):
         # Tk.after callbacks must not run after GUI disposal; shutdown an active
@@ -207,26 +210,57 @@ class Studio(tk.Tk):
 
     def _startup(self):
         self._update_engine_label()
-        # First launch: automatically install ONLY the SHA-pinned, code-hash-
-        # verified B143. Failed/offline installs leave the manual retry button.
-        # Do not auto-install moving branches, world adapters or model packages.
+        # Open an existing, independently recompiled SOURCE project automatically
+        # on ordinary startup. No provider inference or world access.
         if self.manager.active_path:
-            self.refresh_models()
-            self.after(9000, lambda: self.check_update(silent=True))
+            self._restore_last_session()
         else:
             def ready(_):
-                self._invalidate_scene()
                 self._update_engine_label()
                 self.caption.set('安全確認済みB143の初期導入完了。建築を指示できます。')
-                self.refresh_models()
+                self._restore_last_session()
             self._start('初回起動：固定B143を安全確認して導入中',
                         lambda: self.manager.install(BASELINE_SHA), ready, quiet=True)
 
-    def _periodic_check(self):
-        if not self.busy and self.pending_revision is None and self.manager.active_path:
-            self.check_update(silent=True)
-        if not self._closed:
-            self._check_after = self.after(15*60*1000,self._periodic_check)
+    def _restore_last_session(self):
+        """Reopen the last approved design without changing history or world.
+
+        A corrupt or incompatible last snapshot is held, never silently
+        reconstructed or overwritten. The local model list is still available.
+        """
+        engine = self.manager.active_path
+        if engine is None:
+            return
+        def work():
+            try:
+                saved = self.history.head()
+                if saved is None:
+                    return None, None, None
+                compiled = run_bridge(engine, saved['design'])
+                if (compiled['sourceSha256'] != saved['sourceSha256'] or
+                        compiled['geometrySha256'] != saved['geometrySha256']):
+                    raise StudioError('保存時と現在のSOURCEが一致しません')
+                return saved, compiled, None
+            except (StudioError, OSError, ValueError, KeyError, TypeError) as exc:
+                return None, None, str(exc)[:220]
+        def done(result):
+            saved, compiled, problem = result
+            if problem:
+                self.caption.set('前回の設計は安全に開けませんでした。履歴を変更していません: '+problem)
+            elif saved is not None:
+                self.current_snapshot = saved
+                self.design = saved['design']
+                self.scene = compiled
+                self.delta = None
+                self.pending_revision = None
+                self._sync_preview_outputs(self.design, self.scene)
+                self.view_mode.set('建築のみ')
+                self._refresh_view()
+                self._refresh_buttons()
+                self.export_btn.configure(state='normal')
+                self.caption.set('前回の建築「'+self.design['title']+'」をSOURCE再検証して復元（ワールド未変更）')
+            self.refresh_models()
+        self._start('前回のSOURCE建築を安全に再開中（推論・施工なし）', work, done, quiet=True)
 
     def _update_engine_label(self):
         sha=self.manager.active_sha
@@ -602,6 +636,21 @@ class Studio(tk.Tk):
         self._start('本物のMABでサンプル設計をSOURCE検証中',
                     lambda: run_bridge(engine, doc), done)
 
+    def _sync_preview_outputs(self, design, scene, provider='SAVED_SOURCE', model=''):
+        """Keep legacy preview exports aligned with the ACTIVE approved view.
+
+        Never exports a draft, a Minecraft operation or an unverified world state.
+        These preview files are not a construction journal/authorization.
+        """
+        out_dir = self.manager.root/'outputs'
+        atomic_json(out_dir/'latest-design.json', design)
+        atomic_json(out_dir/'latest-scene.json', scene)
+        atomic_json(out_dir/'latest-receipt.json', {
+            'appVersion':'0.3.0','createdAt':datetime.now(timezone.utc).isoformat(),
+            'engineCommit':self.manager.active_sha,'sourceSha256':scene['sourceSha256'],
+            'geometrySha256':scene['geometrySha256'],'provider':provider,'model':model,
+            'readiness':'NOT_PREPARED','worldWrites':0})
+
     def _display_design(self, design, scene, provider, model, qualifier, *, operation='new'):
         if operation == 'revision':
             previous = self.current_snapshot
@@ -618,14 +667,7 @@ class Studio(tk.Tk):
         self.delta = delta
         self.scene = scene
         self.design = design
-        out_dir = self.manager.root/'outputs'
-        atomic_json(out_dir/'latest-design.json', design)
-        atomic_json(out_dir/'latest-scene.json', scene)
-        atomic_json(out_dir/'latest-receipt.json', {
-            'appVersion':'0.3.0','createdAt':datetime.now(timezone.utc).isoformat(),
-            'engineCommit':self.manager.active_sha,'sourceSha256':scene['sourceSha256'],
-            'geometrySha256':scene['geometrySha256'],'provider':provider,'model':model,
-            'readiness':'NOT_PREPARED','worldWrites':0})
+        self._sync_preview_outputs(design, scene, provider, model)
         self._refresh_view()
         self._refresh_buttons()
         self.caption.set(f'{scene.get("title", "建築")} | {scene["stats"]["voxels"]:,}セル'
@@ -742,6 +784,7 @@ class Studio(tk.Tk):
             self.current_snapshot=data
             self.design=data['design']
             self.scene=data['scene']
+            self._sync_preview_outputs(self.design, self.scene)
             self.delta=None
             self.view_mode.set('建築のみ')
             self._refresh_view()
@@ -771,6 +814,7 @@ class Studio(tk.Tk):
             self.current_snapshot=old
             self.design=old['design']
             self.scene=scene
+            self._sync_preview_outputs(self.design, self.scene)
             self.delta=None
             self._refresh_view()
             self._refresh_buttons()
@@ -839,6 +883,7 @@ class Studio(tk.Tk):
             self.current_snapshot=snapshot
             self.design=snapshot['design']
             self.scene=snapshot['scene']
+            self._sync_preview_outputs(self.design, self.scene)
             self.delta=None
             self.terrain=None
             self.terrain_report=None
@@ -853,13 +898,36 @@ class Studio(tk.Tk):
                         revision_id,verify=lambda d:run_bridge(engine,d),expected_head_id=expected),done)
 
     def export_design(self):
-        if not self.scene:
+        """Export the currently visible APPROVED model, never a stale latest file."""
+        if self.scene is None or self.design is None or self.busy:
             return
-        # Existing verified files only: export is app-output, never MakeCode/world writes.
-        target=self.manager.root/'outputs'
-        self.status.set('保存済み: '+str(target/'latest-design.json')+' / latest-scene.json')
-        messagebox.showinfo('保存先','検証済みデータを保存しています。\n'+str(target)+
-                            '\n\nこれはMinecraftへ直接インポートするファイルではありません。')
+        if self.pending_revision is not None:
+            messagebox.showwarning('修正案は未承認', '承認済みの設計だけを保存できます。')
+            return
+        engine = self.manager.active_path
+        if engine is None:
+            messagebox.showwarning('MAB未導入','確認済みB143エンジンが必要です。')
+            return
+        name = ''.join(c for c in self.design.get('id','building') if c.isascii() and
+                       (c.isalnum() or c in '-_'))[:45] or 'building'
+        filename = filedialog.asksaveasfilename(
+            title='表示中の承認済みSOURCE設計をJSON保存（Minecraft施工ファイルではありません）',
+            defaultextension='.json', initialfile=name+'-source.json',
+            filetypes=[('SOURCE JSON', '*.json')])
+        if not filename:
+            return
+        # Copy bound source/geometry on GUI thread, verify with real MAB worker.
+        design = json.loads(json.dumps(self.design, ensure_ascii=False))
+        source_sha = self.scene['sourceSha256']
+        geometry_sha = self.scene['geometrySha256']
+        def work():
+            return export_verified_source(filename, design, source_sha,
+                                          geometry_sha, lambda d:run_bridge(engine,d))
+        def done(path):
+            self.status.set('画面の承認済みSOURCEを検証して保存しました（Minecraft未変更）: '+str(path))
+            messagebox.showinfo('SOURCE JSON保存完了',
+                '保存先: '+str(path)+'\n\nMAB設計JSONのみです。Minecraft施工許可やワールドの復元にはなりません。')
+        self._start('表示中の承認済み設計をSOURCE再検証してJSON保存',work,done)
 
 
 def main():
