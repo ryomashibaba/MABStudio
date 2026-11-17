@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 import time
 
+from app.release_runtime import verify_packaged_runtime
 from app.core import (BASELINE_SHA, EngineManager, ModelTransportError,
                       StudioError, ask_llm, atomic_json, compatibility_check,
                       run_bridge)
@@ -56,6 +57,8 @@ def run_acceptance(argv: list[str]) -> int:
     try:
         if not ns.model.strip() or not ns.prompt.strip() or len(ns.prompt) > 2000:
             raise StudioError('受入テストのモデル名または日本語指示が無効です')
+        report['stage'] = 'PACKAGED_RUNTIME'
+        report['bundle'] = verify_packaged_runtime()
         report['stage'] = 'PINNED_ENGINE'
         if ns.engine:
             engine = Path(ns.engine).resolve()

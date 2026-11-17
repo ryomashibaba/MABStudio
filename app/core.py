@@ -126,16 +126,19 @@ def _sandbox_node_args(node: str, engine: Path, inp: Path, out: Path) -> list[st
 
 def node_binary() -> str:
     # Windows distribution includes its own node.exe; developers may use PATH.
-    places = []
     if getattr(sys, "frozen", False):
-        places.append(Path(sys.executable).resolve().parent / "node.exe")
-    places.append(Path(__file__).resolve().parent / "node.exe")
-    for p in places:
-        if p.is_file():
-            return str(p)
+        # A released EXE must NEVER silently rely on a developer's PATH Node.
+        # Otherwise CI can pass while the distributed zip is nonfunctional.
+        bundled = Path(sys.executable).resolve().parent / "node.exe"
+        if not bundled.is_file():
+            raise StudioError("配布EXEのnode.exeがありません。dist\\MABStudioフォルダを丸ごと展開してください。")
+        return str(bundled)
+    local = Path(__file__).resolve().parent / "node.exe"
+    if local.is_file():
+        return str(local)
     node = shutil.which("node")
     if not node:
-        raise StudioError("Node.jsが見つかりません。配布版EXEには同梱予定です。")
+        raise StudioError("Node.js 22以降が見つかりません。開発用ソース実行にはNode.jsが必要です。")
     return node
 
 

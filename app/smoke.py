@@ -9,6 +9,7 @@ import traceback
 
 from app.core import atomic_json, compatibility_check, node_binary, run_bridge
 from app.examples import example_library
+from app.release_runtime import verify_packaged_runtime
 
 
 def run_smoke(studio_class, args: list[str]) -> int:
@@ -26,6 +27,7 @@ def run_smoke(studio_class, args: list[str]) -> int:
         with tempfile.TemporaryDirectory(prefix='mabstudio-release-smoke-') as d:
             os.environ['LOCALAPPDATA'] = d
             engine = Path(ns.smoke_engine).resolve()
+            report['bundle'] = verify_packaged_runtime()
             report['nodeBinary'] = str(node_binary())
             report['engineCompatibility'] = compatibility_check(engine)
             # Actual verified engine, actual source compiler, actual Tk Canvas.

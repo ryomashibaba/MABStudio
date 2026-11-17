@@ -1025,7 +1025,22 @@ def main():
         # writes; GUI and optional real pinned B143 are checked in isolation.
         from app.smoke import run_smoke
         return run_smoke(Studio, sys.argv[1:])
-    Studio().mainloop()
+    # No silent traceback in a --windowed packaged application.  A missing
+    # private Node or bridge must be visible instead of depending on PATH.
+    try:
+        from app.release_runtime import verify_packaged_runtime
+        verify_packaged_runtime()
+        Studio().mainloop()
+    except (StudioError, OSError, ValueError) as exc:
+        try:
+            from tkinter import messagebox as startup_messagebox
+            startup_messagebox.showerror('MAB Studioを起動できません', str(exc)[:500])
+        except (tk.TclError, RuntimeError):
+            # PyInstaller --windowed may set sys.stderr to None; do not raise
+            # a second exception while handling a startup failure.
+            if sys.stderr is not None:
+                print('MAB Studio startup failed: ' + str(exc)[:500], file=sys.stderr)
+        return 1
     return 0
 
 if __name__ == '__main__':
