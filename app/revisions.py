@@ -144,6 +144,60 @@ class RevisionStore:
             raise StudioError('プロジェクト履歴の紐付けが不正です')
         return item
 
+    def list_saved(self, limit: int = 100) -> list[dict]:
+        """Browse prior immutable revisions, including older *projects*.
+
+        A new design starts a different project in this legacy store. Earlier
+        snapshots remain available but the old UI exposed only the last head.
+        This read-only view does not trust directory names or record metadata
+        without checking their content SHA and SOURCE safety invariants.
+        """
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise StudioError('履歴一覧の表示上限が不正です')
+        directory = self.folder / 'revisions'
+        if not directory.is_dir():
+            return []
+        paths = [p for p in directory.glob('*.json')
+                 if p.is_file() and not p.is_symlink() and HEX32.fullmatch(p.stem)]
+        paths.sort(key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)
+        current = self._read_index()
+        results=[]
+        for path in paths[:limit]:
+            # A damaged record must not be offered as a selectable candidate.
+            # Show other valid projects without changing damaged files.
+            try:
+                item = self.read_revision(path.stem)
+            except (StudioError, OSError, ValueError, TypeError, KeyError):
+                continue
+            results.append({
+                'revisionId': item['revisionId'], 'projectId': item['projectId'],
+                'title': item['design']['title'], 'operation': item['operation'],
+                'geometrySha256': item['geometrySha256'],
+                'isCurrent': bool(current and current.get('head') == item['revisionId']),
+            })
+        return results
+
+    def open_saved(self, revision_id: str, *, verify=None, expected_head_id: str | None = None) -> dict:
+        """Switch local design pointer only after re-compilation by real MAB.
+
+        SOURCE undo / project selection is NOT Minecraft world rollback.
+        """
+        if verify is None:
+            raise StudioError('保存済み設計の再検証が必要です')
+        current=self._read_index()
+        head_id=current['head'] if current is not None else None
+        if head_id != expected_head_id:
+            raise StudioError('履歴の更新競合を検出しました')
+        target = self.read_revision(revision_id)
+        scene = verify(target['design'])
+        if (scene['sourceSha256'] != target['sourceSha256'] or
+                scene['geometrySha256'] != target['geometrySha256']):
+            raise StudioError('旧設計のSOURCEが保存時と一致しないため、切替を中止しました')
+        # Retain every immutable revision; only active project/head pointer moves.
+        atomic_json(self.index, {'schema': PROJECT_SCHEMA,
+                                 'project': target['projectId'], 'head': revision_id})
+        return target
+
     def commit(self, design: dict, scene: dict, *, engine_commit: str,
                operation: str = 'new', previous_id: str | None = None) -> dict:
         _cells(scene)

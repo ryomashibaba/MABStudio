@@ -104,3 +104,14 @@ Windows EXE版にはビルド工程でSocketBEをアプリ内の隔離フォル�
 - 衝突0でも、未読取・範囲外が残れば「建築可能」や「施工可能」とは表示しない。地形の配色・境界面表示は、ブロック状態、衝突、他のプレイヤーの更新、実Minecraftの配置認証を意味しない。
 
 **検証状況：** Linux Xvfb上のGUIと模擬ワールドリーダー・安全なZIPコピー、読み取り専用Nodeコマンドの試験を実施。真正Minecraft Education 26.33の実エクスポート `.mcworld` は未提供、Amuletの実API接続・Windows EXE・ゲーム内同期・実モデルは引き続き未実証。Windows配布版EXEにAmuletは未同梱であり、依存ライブラリがない環境ではブロック読取を実行せず明示的に停止する。**真正B143の9試験は専用ソースを与えられない環境ではSKIPであってPASSではない。**
+
+## 2026-11-17 継続工程 — ローカルAIの構造化応答と旧建築の再オープン
+
+**MAB本体・既存プロジェクト・Minecraftワールドの変更なし。** 最新の追加機能は、Studio側に限定した次の2点。
+
+1. **Ollama／LM StudioのJSON Schema構造化出力**：B143の許可フィールド・型・形状・材料・上限などをローカル推論APIに伝達する。Ollamaは `/api/chat` の `format`、LM Studioは `/v1/chat/completions` の `response_format` を利用する。サーバーが構造化形式を明示的に拒否した場合に限り従来のJSONモードへ1回だけフォールバックする。400が返っても、モデル未ロードなど**形式未対応以外のエラーなら再送しない**。通信失敗時にGUIが2回の重い推論を自動実行しないよう変更。途中終了（`done_reason: length` / `finish_reason: length`）を成功扱いしない。公式仕様: [Ollama](https://github.com/ollama/ollama/blob/main/docs/capabilities/structured-outputs.mdx)、[LM Studio](https://lmstudio.ai/docs/developer/openai-compat/structured-output)。
+2. **「過去の建築一覧」ボタン**：`projects/revisions/*.json` に元から残っていた別プロジェクトのSOURCEスナップショットを最大100件一覧表示。ファイルSHA・保存設計の安全条件を検査し、不正なものを開く候補に含めない。選択時に確認済みB143で`sourceSha256`と`geometrySha256`を再検証してからアクティブ履歴ポインタのみ切り替える。過去のスナップショットの削除・上書きなし。これは**Studio内部の設計選択**であり、Minecraftワールドの復元ではない。
+
+ローカルテスト：**85 PASS / 9 SKIP**（Linux/Xvfb、Python 3.13、Node 22。後者9件は真正固定B143実体がこの環境にないため未実行）。HTTPモックサーバーの送信制約・互換性フォールバック・トークン打切り・エラー再試行拒否、SOURCE履歴の改変拒否、実Tkinter画面の旧建築選択をテスト済み。**真正ローカルモデルの未知の日本語建築指示、WindowsネイティブEXE、Minecraft Education実機、実 `.mcworld` は未実証**。JSON形式の安定化は建築の美しさや日本語意味理解の保証ではない。
+
+MAB Studioの使い方は従来どおり。モデルの一覧を表示できるだけでは推論の実行を証明しない。初回にモデルサーバーを起動後、必要なモデルを指定して「AIで設計して3Dプレビュー」を実行する。前の建物を再開したい場合は右上の「過去の建築一覧」で対象の履歴を選択する。配布前のWindows実機・本人確認はまとめて実施する。

@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
-    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError,
+    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError,
     ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
@@ -165,6 +165,8 @@ class Studio(tk.Tk):
         self.restore_btn.pack(side='left',padx=(0,6))
         self.load_btn=ttk.Button(tools,text='前回の設計を開く',command=self.load_saved_design)
         self.load_btn.pack(side='left')
+        self.browse_btn=ttk.Button(tools,text='過去の建築一覧',command=self.browse_saved_designs)
+        self.browse_btn.pack(side='left',padx=(6,0))
         reviewbar = ttk.Frame(right)
         reviewbar.pack(fill='x', pady=(0,7))
         self.approve_draft_btn=ttk.Button(reviewbar,text='AI修正案を承認（設計のみ）',
@@ -297,6 +299,7 @@ class Studio(tk.Tk):
         self.revise_btn.configure(state='normal' if self.design and self.manager.active_path and ready else 'disabled')
         self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
+        self.browse_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
@@ -566,6 +569,8 @@ class Studio(tk.Tk):
                     design = ask_llm(provider, model, prompt, error, previous_design=previous)
                     scene = run_bridge(engine, design)
                     return design, scene, attempt
+                except ModelTransportError:
+                    raise  # avoid a second long inference on server failure
                 except StudioError as e:
                     error = str(e)
             raise StudioError('AIの設計を2回検証しましたが、MAB SOURCEが拒否しました: ' + error)
@@ -650,6 +655,8 @@ class Studio(tk.Tk):
                                     previous_design=prev, revision_base=original)
                     scene = run_bridge(engine, draft)
                     return draft, scene, attempt
+                except ModelTransportError:
+                    raise  # connectivity/HTTP failures do not merit a repeat
                 except StudioError as exc:
                     error = str(exc)
             raise StudioError('AI修正候補がMAB SOURCE検証に通りませんでした: '+error)
@@ -761,6 +768,80 @@ class Studio(tk.Tk):
             self.export_btn.configure(state='normal')
             self.caption.set('保存された設計を真正MABで再検証しました。Minecraftの施工記録ではありません')
         self._start('保存した履歴を真正MABで再検証中',work,done)
+
+    def browse_saved_designs(self):
+        """Pick any verified previous SOURCE snapshot, including older projects."""
+        if self.pending_revision is not None or self.busy:
+            return
+        def done(items):
+            if not items:
+                messagebox.showinfo('保存済み設計', '安全に読み出せる保存済み設計はありません。')
+                return
+            dialog=tk.Toplevel(self)
+            dialog.title('過去の建築一覧 — SOURCE履歴のみ')
+            dialog.geometry('760x420')
+            dialog.transient(self)
+            dialog.grab_set()
+            ttk.Label(dialog, text='保存済みの設計を選んで開く（最大100件）。Minecraftワールドは変更しません。',
+                      wraplength=720).pack(padx=14,pady=(12,8),anchor='w')
+            frame=ttk.Frame(dialog,padding=(12,0,12,8))
+            frame.pack(fill='both',expand=True)
+            frame.columnconfigure(0,weight=1)
+            frame.rowconfigure(0,weight=1)
+            table=ttk.Treeview(frame,columns=('title','operation','revision'),show='headings',selectmode='browse')
+            for name,width,label in [('title',390,'建築名'),('operation',100,'履歴種類'),('revision',190,'履歴ID')]:
+                table.heading(name,text=label)
+                table.column(name,width=width)
+            bar=ttk.Scrollbar(frame,orient='vertical',command=table.yview)
+            table.configure(yscrollcommand=bar.set)
+            table.grid(row=0,column=0,sticky='nsew')
+            bar.grid(row=0,column=1,sticky='ns')
+            ids=set()
+            for item in items:
+                rid=item['revisionId']
+                ids.add(rid)
+                title=('● ' if item['isCurrent'] else '') + item['title']
+                table.insert('', 'end',iid=rid,values=(title[:90],item['operation'],rid[:16]+'…'))
+            if items:table.selection_set(items[0]['revisionId'])
+            def select(*_):
+                selection=table.selection()
+                if not selection or selection[0] not in ids:return
+                rid=selection[0]
+                dialog.grab_release()
+                dialog.destroy()
+                self._open_saved_revision(rid)
+            buttons=ttk.Frame(dialog,padding=(12,0,12,12))
+            buttons.pack(fill='x')
+            ttk.Button(buttons,text='選択した設計を開く',command=select).pack(side='left')
+            ttk.Button(buttons,text='キャンセル',command=dialog.destroy).pack(side='right')
+            table.bind('<Double-1>',select)
+        self._start('過去の建築履歴を読み込み中（ワールド操作なし）',
+                    lambda:self.history.list_saved(),done)
+
+    def _open_saved_revision(self, revision_id: str):
+        if self.busy or self.pending_revision is not None:return
+        engine=self.manager.active_path
+        if engine is None:
+            messagebox.showwarning('MAB未導入','先に確認済みエンジンを導入してください。')
+            return
+        previous=self.history.head()
+        expected=previous['revisionId'] if previous is not None else None
+        def done(snapshot):
+            self.current_snapshot=snapshot
+            self.design=snapshot['design']
+            self.scene=snapshot['scene']
+            self.delta=None
+            self.terrain=None
+            self.terrain_report=None
+            self.pending_revision=None
+            self.view_mode.set('建築のみ')
+            self._refresh_view()
+            self._refresh_buttons()
+            self.export_btn.configure(state='normal')
+            self.caption.set('過去の設計「'+self.design['title']+'」を真正MABで照合して開きました（ワールド未変更）')
+        self._start('保存済みSOURCEを真正MABで検証して開く',
+                    lambda:self.history.open_saved(
+                        revision_id,verify=lambda d:run_bridge(engine,d),expected_head_id=expected),done)
 
     def export_design(self):
         if not self.scene:

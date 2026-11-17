@@ -16,6 +16,7 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+import urllib.error
 import zipfile
 
 REPO = "ryomashibaba/MinecraftAIBuilder"
@@ -365,6 +366,79 @@ Minecraftワールド座標、実行可能なコマンド、プログラム、UR
 """
 
 
+# Schema is a transport/output constraint, NOT a replacement for the pinned B143
+# validateDesign/compileDesign/verifyCompiled authority. Some local models cannot
+# generate grammar-constrained JSON; the API wrapper handles explicit 400/422
+# incompatibility below without claiming semantic or architectural success.
+B143_JSON_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["schema", "id", "title", "brief", "designOnly", "bounds", "elements"],
+    "properties": {
+        "schema": {"const": SCHEMA},
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,47}$"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 100},
+        "brief": {"type": "string", "minLength": 1, "maxLength": 500},
+        "designOnly": {"const": True},
+        "bounds": {
+            "type": "object", "additionalProperties": False,
+            "required": ["width", "height", "depth"],
+            "properties": {
+                "width": {"type": "integer", "minimum": 8, "maximum": 128},
+                "height": {"type": "integer", "minimum": 8, "maximum": 96},
+                "depth": {"type": "integer", "minimum": 8, "maximum": 128},
+            },
+        },
+        "elements": {
+            "type": "array", "minItems": 1, "maxItems": 160,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["id", "shape", "mode"],
+                "properties": {
+                    "id": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$"},
+                    "shape": {"type": "string", "enum": ["box", "ellipsoid", "cylinder"]},
+                    "mode": {"type": "string", "enum": ["add", "cut"]},
+                    "material": {"type": "string", "enum": ["stone", "concrete", "metal", "glass", "wood", "glow", "accent"]},
+                    "origin": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 128}, "minItems": 3, "maxItems": 3},
+                    "size": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 128}, "minItems": 3, "maxItems": 3},
+                    "center": {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 128}, "minItems": 3, "maxItems": 3},
+                    "radii": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 64}, "minItems": 3, "maxItems": 3},
+                    "axis": {"type": "string", "enum": ["x", "y", "z"]},
+                    "radius": {"type": "integer", "minimum": 1, "maximum": 64},
+                    "length": {"type": "integer", "minimum": 1, "maximum": 128},
+                    "shell": {"type": "integer", "minimum": 0, "maximum": 4},
+                },
+            },
+        },
+    },
+}
+
+
+class ModelTransportError(StudioError):
+    """A server/transport failure; do not repeat expensive model inference."""
+
+
+def _model_response(url: str, payload: dict, timeout: int) -> dict:
+    req = urllib.request.Request(url,
+        json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json', 'User-Agent': 'MABStudio/0.3'})
+    try:
+        with LOCAL_HTTP.open(req, timeout=timeout) as res:
+            raw = res.read(MAX_RESPONSE + 1)
+    except urllib.error.HTTPError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise ModelTransportError('ローカルAIサーバーとの通信に失敗しました: ' + str(exc)[:200]) from exc
+    if len(raw) > MAX_RESPONSE:
+        raise StudioError('LLMの応答が大きすぎます')
+    try:
+        reply = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise StudioError('ローカルLLMサーバーが不正なJSON応答を返しました') from exc
+    if not isinstance(reply, dict):
+        raise StudioError('ローカルLLMサーバーの応答形式が不正です')
+    return reply
+
+
 def llm_models(provider: str, timeout: int = 5) -> list[str]:
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの種類が不正です")
@@ -402,28 +476,53 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             task += "\n修正する前回の設計JSON: " + prior[:12000]
         task += "\n元の建築意図を保ち、エラーだけ直した完全なJSONを返してください。"
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
-    if provider == "Ollama":
-        url = OLLAMA_BASE + "/api/chat"
-        payload = {"model": model, "messages": messages, "stream": False, "format": "json",
-                   "options": {"temperature": 0.3, "num_predict": 4500}}
+    if provider == 'Ollama':
+        url = OLLAMA_BASE + '/api/chat'
+        payload = {'model': model, 'messages': messages, 'stream': False,
+                   'format': B143_JSON_SCHEMA,
+                   'options': {'temperature': 0.3, 'num_predict': 4500}}
+        fallback = {**payload, 'format': 'json'}
     else:
-        url = LM_STUDIO_BASE + "/v1/chat/completions"
-        payload = {"model": model, "messages": messages, "temperature": 0.3, "max_tokens": 4500, "stream": False}
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data, headers={"Content-Type": "application/json", "User-Agent": "MABStudio/0.1"})
+        url = LM_STUDIO_BASE + '/v1/chat/completions'
+        payload = {'model': model, 'messages': messages, 'temperature': 0.3,
+                   'max_tokens': 4500, 'stream': False,
+                   'response_format': {
+                       'type': 'json_schema',
+                       'json_schema': {'name': 'mab_b143_design', 'schema': B143_JSON_SCHEMA},
+                   }}
+        fallback = {**payload, 'response_format': {'type': 'json_object'}}
     try:
-        with LOCAL_HTTP.open(req, timeout=timeout) as r:
-            answer = r.read(MAX_RESPONSE + 1)
-    except (OSError, TimeoutError) as e:
-        raise StudioError(f"{provider} に接続できません: {e}") from e
-    if len(answer) > MAX_RESPONSE:
-        raise StudioError("LLMの応答が大きすぎます")
-    try:
-        data = json.loads(answer)
-    except json.JSONDecodeError as exc:
-        raise StudioError("ローカルLLMサーバーから不正なJSON応答を受け取りました") from exc
-    content = (data.get("message", {}).get("content", "") if provider == "Ollama"
-               else data.get("choices", [{}])[0].get("message", {}).get("content", ""))
-    if not isinstance(content, str):
-        raise StudioError("LLMの出力が文字列ではありません")
+        reply = _model_response(url, payload, timeout)
+    except urllib.error.HTTPError as exc:
+        # HTTP 400 can also mean an unknown model, insufficient resources, or
+        # invalid prompt. Never double-infer just because the status is 400.
+        try:
+            message = exc.read(4096).decode('utf-8', 'replace').lower()
+        except (OSError, UnicodeError):
+            message = ''
+        structured_rejected = exc.code in (400, 422) and any(
+            token in message for token in ('response_format', 'json_schema',
+                                            'structured output', 'unsupported format',
+                                            'invalid format', 'grammar'))
+        if not structured_rejected:
+            raise ModelTransportError(f'{provider}からHTTP {exc.code}を受信しました。モデル/サーバーを確認してください') from exc
+        # Fall back only if the server actually identifies schema/grammar
+        # incompatibility; never repeat a failed inference for unrelated 400s.
+        try:
+            reply = _model_response(url, fallback, timeout)
+        except urllib.error.HTTPError as fallback_error:
+            raise ModelTransportError(f'{provider}がJSON出力を受け付けません (HTTP {fallback_error.code})') from fallback_error
+    if provider == 'Ollama':
+        if reply.get('done_reason') == 'length':
+            raise StudioError('AIの生成がトークン上限で中断されました。短い建築指示にしてください')
+        content = reply.get('message', {}).get('content', '')
+    else:
+        choices = reply.get('choices')
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise StudioError('LM Studioの回答候補がありません')
+        if choices[0].get('finish_reason') == 'length':
+            raise StudioError('LM Studioの出力がトークン上限で中断されました。短い建築指示にしてください')
+        content = choices[0].get('message', {}).get('content', '')
+    if not isinstance(content, str) or not content.strip():
+        raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
     return parse_llm_json(content)

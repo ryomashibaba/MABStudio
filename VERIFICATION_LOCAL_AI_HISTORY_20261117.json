@@ -1,0 +1,28 @@
+{
+  "schema": "mab-studio-phase5-local-ai-history-verification-v1",
+  "basedOnCommit": "fe10a99f828dbb77a8bc2374869e3aba0e67c5d4",
+  "date": "2026-11-17",
+  "testCommand": "env -u DISPLAY xvfb-run -a python -m pytest -q -rs",
+  "testEnvironment": "Linux, Python 3.13.5, Node.js 22.16.0, Xvfb virtual display",
+  "testResults": {"passed": 85, "skipped": 9, "failed": 0},
+  "skippedReason": "Pinned B143 module not available in current offline runtime; no substitution for genuine B143 tests",
+  "newProvenCapabilities": [
+    "Fake local HTTP endpoint: schema-shaped requests for Ollama and LM Studio",
+    "Explicit unsupported-schema HTTP400 triggers one JSON-mode fallback",
+    "Generic HTTP400/HTTP500 does not silently retry inference",
+    "Token-limit finish causes refusal, not success",
+    "Immutable SOURCE history enumeration with tampered-record rejection",
+    "Real Tkinter popup chooses an older different project, reconfirms source geometry and switches active pointer"
+  ],
+  "newNotProven": [
+    "Real model inference or architectural quality",
+    "Windows native EXE build and startup",
+    "Education WebSocket live connection or world block readback",
+    "Real Education mcworld file decoding",
+    "Any Minecraft construction, repair or rollback"
+  ],
+  "worldContacts": 0,
+  "worldWrites": 0,
+  "mainRepoModified": false,
+  "versionChanged": false
+}
