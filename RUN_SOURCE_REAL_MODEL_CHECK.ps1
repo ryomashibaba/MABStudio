@@ -64,8 +64,8 @@ try {
     }
     $stage = 'RUN_ONE_SOURCE_ACCEPTANCE'
     Write-Host ('Verified loaded model: ' + $model)
-    Write-Host 'Testing new compact design format without rebuilding the EXE.'
-    & $python -m app.acceptance_cli --acceptance --console-progress --provider $provider --model $model --report $report
+    Write-Host 'Testing compact design and saving the SOURCE-verified result to a NEW Studio project.'
+    & $python -m app.acceptance_cli --acceptance --console-progress --save-to-studio --provider $provider --model $model --report $report
     $code = $LASTEXITCODE
     if (!(Test-Path -LiteralPath $report -PathType Leaf)) { throw 'REPORT_NOT_WRITTEN' }
     $data = Get-Content -Raw -Encoding UTF8 -LiteralPath $report | ConvertFrom-Json
@@ -73,6 +73,11 @@ try {
     Write-Host ('Real model outcome: ' + $data.outcome)
     if ($data.error) { Write-Host ('Error: ' + $data.error) }
     if ($data.source.voxelCount) { Write-Host ('B143 cells: ' + $data.source.voxelCount) }
+    if ($data.studioProject.saved) {
+        Write-Host 'SOURCE-verified design saved as a NEW local Studio project. No Minecraft changes.'
+        Write-Host ('Project revision: ' + $data.studioProject.revisionId)
+        Write-Host 'Close and reopen MAB Studio to view this design, then use Japanese AI revisions.'
+    }
     Write-Host ('Report: ' + $report)
     if ($code -ne 0 -or $data.outcome -cne 'PASS_SOURCE_AND_GUI_ONLY') { exit 1 }
     exit 0

@@ -1,8 +1,10 @@
 """Single-run local Windows acceptance: an actual endpoint request -> B143 -> Tk canvas.
 
-Never talks to Minecraft, never saves a candidate as a user project and never
-claims semantic/aesthetic merit from source validity. Never auto-selects or loads
-an arbitrary installed model; operator explicitly supplies provider and model.
+Never talks to Minecraft and never claims semantic/aesthetic merit from source
+validity. Successful real-model results may be saved as a NEW, source-only Studio
+project only with --save-to-studio; the existing history is never deleted.
+Never auto-selects or loads an arbitrary installed model; operator explicitly
+supplies provider and model.
 """
 from __future__ import annotations
 
@@ -54,6 +56,47 @@ def inspect_candidate_shape_fields(design: dict) -> dict:
             'geometryValidatedByThisReport': False, 'modelContentSaved': False}
 
 
+def save_verified_design_in_studio(*, root: Path, design: dict, scene: dict,
+                                   engine_commit: str, verified_against: dict | None = None) -> dict:
+    """Preserve an already-compiled actual SOURCE result in a new local project.
+
+    This only saves a source design; it NEVER approves construction, performs
+    Minecraft I/O or changes earlier immutable revision snapshots.  The caller
+    must have explicitly opted in and must already have verified the design
+    against the pinned MAB compiler.  If another Studio instance has changed
+    the active head during inference, refuse to replace that user's selection.
+    """
+    from app.revisions import RevisionStore
+    from app.core import StudioError
+
+    if not isinstance(scene, dict) or scene.get('designOnly') is not True or scene.get('readiness') != 'NOT_PREPARED':
+        raise StudioError('施工不可のSOURCE検証結果だけを履歴へ保存できます')
+    if (scene.get('worldContacts') != 0 or scene.get('worldCoordinates') is not None or
+            scene.get('BuildPlan', {}).get('operations') != [] or
+            scene.get('stats', {}).get('constructionApproved') is not False):
+        raise StudioError('施工ゲートが閉じていない設計は保存しません')
+    if not isinstance(design, dict) or design.get('designOnly') is not True:
+        raise StudioError('AI設計がSOURCE設計専用ではありません')
+    if verified_against is not None and (
+            scene.get('sourceSha256') != verified_against.get('sourceSha256') or
+            scene.get('geometrySha256') != verified_against.get('geometrySha256')):
+        raise StudioError('再検証時のSOURCEと生成済みモデルが一致しません')
+    store = RevisionStore(root / 'projects')
+    # The head observed before inference is passed explicitly. A manual Studio
+    # edit while the model runs must not be silently superseded.
+    initial_head = verified_against.get('expectedStudioHead') if verified_against else None
+    current = store.head()
+    current_id = current['revisionId'] if current else None
+    if current_id != initial_head:
+        raise StudioError('生成中にStudioの履歴が変更されました。元の設計を保持して保存を中止しました')
+    item = store.commit(design, scene, engine_commit=engine_commit, operation='new')
+    return {'saved': True, 'projectId': item['projectId'],
+            'revisionId': item['revisionId'], 'sourceSha256': item['sourceSha256'],
+            'geometrySha256': item['geometrySha256'], 'sourceOnly': True,
+            'constructionApproved': False, 'worldWrites': 0,
+            'humanQualityReview': 'PENDING'}
+
+
 def run_acceptance(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description='MAB Studio actual local-model acceptance (no Minecraft calls)')
     parser.add_argument('--acceptance', action='store_true', required=True)
@@ -63,6 +106,8 @@ def run_acceptance(argv: list[str]) -> int:
     parser.add_argument('--report', required=True)
     parser.add_argument('--console-progress', action='store_true',
                         help='Source acceptance: print counts, never model content')
+    parser.add_argument('--save-to-studio', action='store_true',
+                        help='On genuine SOURCE + GUI PASS, store the design as a new Studio project')
     parser.add_argument('--test-double', action='store_true',
                         help='Explicit localhost CI fixture, never a real LLM acceptance result')
     parser.add_argument('--fixture-port', type=int, default=None,
@@ -81,6 +126,7 @@ def run_acceptance(argv: list[str]) -> int:
         'promptSha256': hashlib.sha256(ns.prompt.encode('utf-8')).hexdigest(),
         'sourceValid': False,
         'guiRendered': False,
+        'studioProject': {'saved': False},
         'actualProviderRequestAttempted': False,
         'testDoubleUsed': bool(ns.test_double),
         'testDoubleRequestAttempted': False,
@@ -102,6 +148,8 @@ def run_acceptance(argv: list[str]) -> int:
             raise StudioError('テスト用応答は明示的なOllamaテスト設定とポートのみ許可します')
         if not ns.test_double and (ns.fixture_port is not None or ns.model == 'CI_TEST_DOUBLE'):
             raise StudioError('CIの模擬AIを真正ローカルLLMとして実行することは禁止です')
+        if ns.save_to_studio and (ns.test_double or ns.engine is not None):
+            raise StudioError('Studioへの保存は固定エンジンを使用した真正モデルの受入試験だけに許可します')
         if not ns.model.strip() or not ns.prompt.strip() or len(ns.prompt) > 2000:
             raise StudioError('受入テストのモデル名または日本語指示が無効です')
         report['stage'] = 'PACKAGED_RUNTIME'
@@ -121,6 +169,13 @@ def run_acceptance(argv: list[str]) -> int:
             report['engineInstallation'] = 'EXISTING_OR_NEWLY_PINNED_MODULE'
         receipt = compatibility_check(engine)
         report['engine'] = {'commit': BASELINE_SHA, 'smokeGeometrySha256': receipt['geometrySha256']}
+        # Capture the active head BEFORE the expensive inference. Saving at the
+        # end is refused if another app/CLI changed it in the meantime.
+        expected_studio_head = None
+        if ns.save_to_studio:
+            from app.revisions import RevisionStore
+            active = RevisionStore(manager.root / 'projects').head()
+            expected_studio_head = active['revisionId'] if active else None
         report['stage'] = 'LOCAL_MODEL_REQUEST'
         # Exactly ONE explicit inference for diagnostic predictability. Retry is
         # separately available in ordinary GUI design, not hidden in this test.
@@ -192,6 +247,17 @@ def run_acceptance(argv: list[str]) -> int:
         report['guiRendered'] = True
         report['guiCanvasItems'] = items
         report['previewMode'] = 'GREEDY_SURFACE_MESH'
+        if ns.save_to_studio:
+            report['stage'] = 'STUDIO_PROJECT_SAVE'
+            # This persistence is source-only. The next normal Studio launch
+            # re-opens and recompiles the latest project automatically.
+            saved = save_verified_design_in_studio(
+                root=manager.root, design=design, scene=scene,
+                engine_commit=BASELINE_SHA,
+                verified_against={**report['source'],
+                                  'expectedStudioHead': expected_studio_head})
+            report['studioProject'] = saved
+            report['candidateFieldDiagnostics']['modelContentSaved'] = True
         report['outcome'] = ('PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' if ns.test_double
                              else 'PASS_SOURCE_AND_GUI_ONLY')
         report['stage'] = 'COMPLETE'
