@@ -6,6 +6,7 @@ on:
       - 'app/**'
       - 'tests/**'
       - 'build_windows.bat'
+      - 'app/node_packaging.py'
       - 'RUN_WINDOWS_ACCEPTANCE.*'
       - '.github/workflows/windows-build.yml'
 
@@ -59,11 +60,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m pip install pyinstaller
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data 'app/engine_bridge.mjs;app' --add-data 'app/education_runtime;app/education_runtime' app/main.py
-          $nodePath = (Get-Command node).Source
-          Copy-Item $nodePath dist/MABStudio/node.exe
-          $nodeLicense = Join-Path (Split-Path $nodePath -Parent) 'LICENSE'
-          if (!(Test-Path $nodeLicense)) { throw 'Node.js license missing: release blocked' }
-          Copy-Item $nodeLicense dist/MABStudio/NODE_LICENSE.txt
+          python -m app.node_packaging dist/MABStudio
+          if ($LASTEXITCODE -ne 0) { throw 'NODE_PACKAGING_AND_LICENSE_FAILED' }
           if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE_MISSING' }
       - name: Audit actual bundled Node.js and SocketBE, write runtime manifest
         shell: pwsh
@@ -90,6 +88,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $env:RUNNER_TEMP 'mab-windows-acceptance-test-double.json'
+          $exePath = (Resolve-Path './dist/MABStudio/MABStudio.exe').Path
           $fixtureReady = Join-Path $env:RUNNER_TEMP 'mab-fixture-port.json'
           $fixture = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('-m', 'tests.windows_acceptance_fixture', '--port', '0', '--ready-file', ('"'+$fixtureReady+'"')) -PassThru -WindowStyle Hidden
           try {

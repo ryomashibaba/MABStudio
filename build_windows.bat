@@ -10,17 +10,9 @@ if not exist ".venv-build\Scripts\python.exe" (
 rem Package the specific SocketBE 2.8.0 transport only for the opt-in read probe.
 call prepare_education_readonly.bat || goto :error
 ".venv-build\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data "app\engine_bridge.mjs;app" --add-data "app\education_runtime;app\education_runtime" app\main.py || goto :error
-where node >nul 2>nul || (echo Node.js is needed for packaged edition & exit /b 1)
-for /f "delims=" %%i in ('where node') do (
-  copy /Y "%%i" "dist\MABStudio\node.exe" >nul
-  if not exist "%%~dpiLICENSE" (
-    echo Node.js license missing. Distribution cannot proceed.
-    goto :error
-  )
-  copy /Y "%%~dpiLICENSE" "dist\MABStudio\NODE_LICENSE.txt" >nul || goto :error
-  goto :done
-)
-:done
+rem Node.js Windows installers may omit a sibling LICENSE file.  Fetch the
+rem official matching-version notice when needed; fail closed on error.
+".venv-build\Scripts\python.exe" -m app.node_packaging "dist\MABStudio" || goto :error
 rem Audit the *copied* private Node and SocketBE; publish only with a verified manifest.
 ".venv-build\Scripts\python.exe" -m app.release_audit "dist\MABStudio" || goto :error
 echo Result: dist\MABStudio\MABStudio.exe

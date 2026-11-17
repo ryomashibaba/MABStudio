@@ -183,3 +183,14 @@ then launch `RUN_WINDOWS_NATIVE_QA.bat` once. It still uses an isolated work are
 and emits `WINDOWS_NATIVE_QA.json` with a stage-specific failure reason. Passing
 Linux regression tests cannot certify the native Windows build: that still
 requires a Windows run. No model inference or Minecraft world writes occur.
+
+
+### Windows native QA: Node.js license packaging hotfix (2026-11-17)
+
+The normal Node.js Windows installation may have `node.exe` without a sibling `LICENSE`.
+The build now copies its locally installed Node.js binary and either its colocated
+LICENSE notice or the exact release tag's official `LICENSE` from
+`https://raw.githubusercontent.com/nodejs/node/vX.Y.Z/LICENSE`. It fails closed
+if no credible license notice can be retrieved. The independent runtime manifest
+continues to hash the copied binary and notice. No license check is bypassed.
+The `RUN_WINDOWS_NATIVE_QA.bat` acceptance entry point is unchanged.
