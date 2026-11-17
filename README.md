@@ -292,3 +292,23 @@ and the unchanged world-write/BuildPlan safety gates. No automatic retries.
 
 These changes are source-tested on Linux; Windows PowerShell 5.1 behavior is
 not claimed until the updated script is executed there.
+
+### B143 `TITLE_OR_BRIEF` metadata-only hotfix (2026-11-17)
+
+Real LM Studio Gemma 4 inference reached `REAL_MAB_SOURCE_VERIFICATION` but
+returned `B143_TITLE_OR_BRIEF`. That receipt does **not** include the original
+model JSON, so the specific invalid field remains unknown. Studio now checks
+model-authored `title`/`brief` (JavaScript UTF-16 limits and B143 forbidden
+characters) before the unchanged pinned B143 compiler. For invalid labels it
+normalizes controls/angle brackets, bounds their lengths, or derives **only**
+missing labels from the real user instruction (or existing approved revision).
+Spatial geometry, element IDs, mode and materials are never touched. A
+content-free `metadataAdjustments` summary goes into the source acceptance
+JSON. Missing or invalid geometry continues to fail with B143's own error.
+No automatic second inference is performed by the source acceptance script.
+
+On Windows, extract this source ZIP to a new folder and run
+`RUN_SOURCE_REAL_MODEL_CHECK.bat` with one LM Studio model already loaded.
+Do not rerun `RUN_WINDOWS_NATIVE_QA.bat`; the prebuilt EXE is not patched by
+this source-only hotfix. A passing SOURCE/GUI acceptance is still not proof of
+architecture aesthetics, user-intent fidelity or Minecraft construction.

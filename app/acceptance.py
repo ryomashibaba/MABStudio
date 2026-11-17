@@ -111,8 +111,12 @@ def run_acceptance(argv: list[str]) -> int:
             progress.last_time = llm_started
             if ns.console_progress:
                 print('[LOCAL MODEL] One inference started; no automatic retry.', flush=True)
+            def metadata_received(receipt: dict) -> None:
+                # Never persist original model text or user prompt.
+                report['metadataAdjustments'] = receipt
             design = ask_llm(ns.provider, ns.model, ns.prompt,
-                             on_progress=progress if ns.console_progress else None)
+                             on_progress=progress if ns.console_progress else None,
+                             on_metadata=metadata_received)
         finally:
             # Keep elapsed time even when the model errors or hits a token limit;
             # otherwise the real-model diagnostic cannot distinguish those cases.

@@ -387,6 +387,85 @@ def parse_llm_json(text: str) -> dict:
     return d
 
 
+def _valid_b143_metadata(value: object, limit: int) -> bool:
+    """Match B143 strictName, including JavaScript UTF-16 string length."""
+    return (isinstance(value, str)
+            and 1 <= len(value.encode('utf-16-le', errors='surrogatepass')) // 2 <= limit
+            and not re.search(r'[\x00-\x1f<>\ud800-\udfff]', value))
+
+
+def _metadata_single_line(text: str) -> str:
+    # Only textual labels: geometry, element IDs, bounds and material are untouched.
+    return (re.sub(r'[\x00-\x1f]+', ' ', text).replace('<', '＜')
+            .replace('>', '＞').strip())
+
+
+def _limit_utf16(text: str, limit: int) -> str:
+    # B143 uses JS string.length (UTF-16 units), not Python code-point length.
+    output, count = [], 0
+    for char in text:
+        if 0xD800 <= ord(char) <= 0xDFFF:
+            continue  # malformed stand-alone surrogate from the model
+        length = 2 if ord(char) > 0xFFFF else 1
+        if count + length > limit:
+            break
+        output.append(char)
+        count += length
+    return ''.join(output)
+
+
+def repair_generated_metadata(design: dict, user_prompt: str,
+                              revision_base: dict | None = None) -> tuple[dict, dict]:
+    """Bounded, deterministic *metadata-only* repair of a model draft.
+
+    Does not infer or modify spatial geometry. A missing/invalid text label is
+    grounded in the user's actual prompt (or the approved revision's label).
+    Returns a machine-readable, content-free repair receipt for transparency.
+    True B143 is still the only validator and its rejection is never bypassed.
+    """
+    if not isinstance(design, dict):
+        raise StudioError('LLMの設計形式が正しくありません')
+    updated = dict(design)
+    changes: dict[str, list[str]] = {}
+    issues: dict[str, str] = {}
+    for field, limit in (('title', 100), ('brief', 500)):
+        original = updated.get(field)
+        if _valid_b143_metadata(original, limit):
+            continue
+        if field not in updated or original is None:
+            issues[field] = 'MISSING_OR_NULL'
+        elif not isinstance(original, str):
+            issues[field] = 'WRONG_TYPE'
+        elif not original.strip():
+            issues[field] = 'EMPTY_STRING'
+        elif re.search(r'[\x00-\x1f<>\ud800-\udfff]', original):
+            issues[field] = 'FORBIDDEN_CHARACTERS'
+        else:
+            issues[field] = 'EXCEEDS_UTF16_LIMIT'
+        actions = []
+        if isinstance(original, str) and original.strip():
+            candidate = original
+        elif revision_base is not None and _valid_b143_metadata(revision_base.get(field), limit):
+            candidate = revision_base[field]
+            actions.append('restored_from_approved_source')
+        else:
+            candidate = user_prompt
+            actions.append('derived_from_user_prompt')
+        cleaned = _metadata_single_line(candidate)
+        if cleaned != candidate:
+            actions.append('removed_forbidden_formatting')
+        bounded = _limit_utf16(cleaned, limit)
+        if bounded != cleaned:
+            actions.append('limited_to_b143_text_length')
+        if not _valid_b143_metadata(bounded, limit):
+            raise StudioError('生成された'+field+'を安全に補正できませんでした')
+        updated[field] = bounded
+        changes[field] = actions or ['normalized_label']
+    return updated, {'metadataOnly': True, 'fields': changes,
+                     'originalIssues': issues,
+                     'geometryUnchanged': True, 'worldWrites': 0}
+
+
 COMMON_SYSTEM_PROMPT = """あなたはMinecraftAIBuilder B143の設計JSON生成器です。
 ユーザーの日本語の建築意図を保持した概念建築を生成します。
 出力はB143設計JSONオブジェクト1個のみ。前置き・Markdown・思考過程・解説は不要です。
@@ -408,6 +487,7 @@ INITIAL_GENERATION_GUIDANCE = """【初回設計】
 外観のシルエット、建築的特徴、複数階の床と入口を優先する。4階建てなら4階を保つ。
 窓列や装飾帯はbox/cut/shellでまとめ、同種の窓を1個ずつ書き並べない。
 タイトルは48文字以内、説明は120文字以内、要素IDは24文字以内。
+titleとbriefは必ず1行の普通の文字列とし、省略・改行・<・>は禁止。
 生成予算を使い切る前にJSONを閉じる。完全なB143 JSONだけを返す。
 """
 
@@ -799,7 +879,8 @@ def llm_models(provider: str, timeout: int = 5) -> list[str]:
 
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
-            revision_base: dict | None = None, on_progress=None) -> dict:
+            revision_base: dict | None = None, on_progress=None,
+            on_metadata=None) -> dict:
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの接続先が不正です")
     if not model or len(model) > 180 or not user_prompt.strip() or len(user_prompt) > 2000:
@@ -897,4 +978,15 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         content = choices[0].get('message', {}).get('content', '')
     if not isinstance(content, str) or not content.strip():
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
-    return parse_llm_json(content)
+    draft = parse_llm_json(content)
+    # Model servers may accept JSON Schema but still produce invalid display
+    # metadata. Do not spend another costly inference fixing a missing title.
+    # Only text labels are repaired; the real B143 compiler checks everything.
+    repaired, receipt = repair_generated_metadata(draft, user_prompt, revision_base)
+    if receipt['fields']:
+        if on_metadata is not None:
+            on_metadata(receipt)
+        if on_progress is not None:
+            on_progress('AI設計のタイトル/説明のみB143形式へ調整しました。'
+                        '建物形状は変更していません（SOURCE未検証）')
+    return repaired
