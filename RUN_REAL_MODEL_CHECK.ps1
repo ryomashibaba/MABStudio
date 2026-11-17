@@ -60,6 +60,7 @@ try {
             }
         )
         $summary.loadedLlmCount = $loadedCandidates.Count
+        $summary.loadedInstanceIds = @($loadedCandidates | ForEach-Object { [string]$_.id })
         $summary.savedModel = $model
         $exact = @($loadedCandidates | Where-Object {
             $_.id -ceq $model -or $_.key -ceq $model
@@ -74,7 +75,8 @@ try {
             # One loaded LLM is unambiguous; never select from installed-only models.
             $inferenceModel = [string]$loadedCandidates[0].id
             $summary.modelSelectionMethod = 'ONLY_ONE_ACTUALLY_LOADED_LLM'
-            $summary.modelSelectionNote = 'Saved GUI model differed from the sole loaded LLM; no model was loaded or reconfigured.'
+            $summary.modelSelectionNote = 'WARNING: saved GUI model differs from the sole loaded LLM. The existing loaded LLM was used without loading or reconfiguring any model.'
+            Write-Warning ('Saved GUI model ' + $model + ' differs from loaded LLM ' + $inferenceModel + '. This diagnostic will test ONLY that already-loaded model.')
         } elseif ($loadedCandidates.Count -eq 0) {
             throw 'LM_STUDIO_NO_LOADED_LLM: LM Studio server is running but no LLM instance is loaded. Load the desired model in LM Studio first; picking it in Studio is not enough.'
         } else {
@@ -138,12 +140,23 @@ try {
         throw 'VERIFIED_ARCHIVE_EXE_MISSING'
     }
     $summary.stage = 'ONE_REAL_MODEL_REQUEST'
-    $summary.realInference = 'ATTEMPTED'
+    $summary.realInference = 'NOT_ATTEMPTED'
     $requestClock = [System.Diagnostics.Stopwatch]::StartNew()
     # Use acceptance.py's existing Japanese diagnostic brief (no shell Unicode quoting).
     # Model strings were strictly checked above before passing as process arguments.
     $arguments = '--acceptance --provider "' + $provider + '" --model "' + $inferenceModel + '" --report "' + $reportPath + '"'
-    $proc = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $extracted -Wait -PassThru
+    # Bound the wait: even a stuck GUI, transport or runtime must not hang forever.
+    # Kill ONLY the temporary acceptance EXE that this script started.
+    $proc = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $extracted -PassThru
+    $summary.realInference = 'PROCESS_STARTED_INFERENCE_UNCONFIRMED'
+    if (!$proc.WaitForExit(1200000)) {
+        $requestClock.Stop()
+        $summary.elapsedSeconds = [math]::Round($requestClock.Elapsed.TotalSeconds,2)
+        $summary.stage = 'ACCEPTANCE_PROCESS_TIMEOUT'
+        try { $proc.Kill() } catch { }
+        try { [void]$proc.WaitForExit(5000) } catch { }
+        throw 'ACCEPTANCE_PROCESS_TIMEOUT: the one real-model acceptance exceeded 20 minutes; no second request was started.'
+    }
     $requestClock.Stop()
     $summary.elapsedSeconds = [math]::Round($requestClock.Elapsed.TotalSeconds,2)
     $summary.exitCode = $proc.ExitCode
@@ -151,19 +164,35 @@ try {
         throw 'REAL_MODEL_REPORT_NOT_CREATED'
     }
     $receipt = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $summary.realInference = 'REQUEST_ATTEMPTED'
+    $summary.realInference = 'RECEIPT_READ_INFERENCE_UNCONFIRMED'
     $summary.stage = [string]$receipt.stage
     $summary.outcome = [string]$receipt.outcome
+    # Validate the receipt identity and construction boundaries BEFORE success.
+    # A normal PRE-REQUEST failure must retain its real stage/error, not be
+    # overwritten by a misleading 'receipt inconsistent' message.
+    if ($receipt.schema -cne 'mab-studio-local-ai-gui-acceptance-v1' -or
+        $receipt.provider -cne $provider -or $receipt.model -cne $inferenceModel -or
+        $receipt.testDoubleUsed -or $receipt.worldWrites -ne 0 -or
+        $receipt.worldContacts -ne 0 -or $receipt.minecraftEducationTested -or
+        $receipt.constructionApproved -or @($receipt.BuildPlan.operations).Count -ne 0) {
+        throw 'GENUINE_MODEL_RECEIPT_INCONSISTENT'
+    }
     if ($receipt.sourceValid) { $summary.voxels = $receipt.source.voxelCount }
     if ($null -ne $receipt.providerRequestSeconds) { $summary.modelSeconds = $receipt.providerRequestSeconds }
     if ($receipt.failureClass) { $summary.failureClass = [string]$receipt.failureClass }
     if ($receipt.error) { $summary.error = [string]$receipt.error }
-    if ($receipt.testDoubleUsed -or !$receipt.actualProviderRequestAttempted) {
-        throw 'GENUINE_MODEL_RECEIPT_INCONSISTENT'
-    }
-    if ($proc.ExitCode -ne 0 -or $summary.outcome -cne 'PASS_SOURCE_AND_GUI_ONLY') {
+    if (!$receipt.actualProviderRequestAttempted) {
+        $summary.realInference = 'NOT_ATTEMPTED'
+        $summary.outcome = 'FAIL'
+        if (!$summary.error) { $summary.error = 'The verified EXE stopped before it called the selected provider.' }
+    } elseif ($proc.ExitCode -ne 0 -or $summary.outcome -cne 'PASS_SOURCE_AND_GUI_ONLY') {
+        $summary.realInference = 'REQUEST_ATTEMPTED'
         if (!$summary.error) { $summary.error = 'Real model request, source validation or Tk preview failed.' }
+    } elseif (!$receipt.sourceValid -or !$receipt.guiRendered -or $receipt.stage -cne 'COMPLETE') {
+        $summary.realInference = 'REQUEST_ATTEMPTED'
+        throw 'GENUINE_MODEL_SUCCESS_PROOF_INCOMPLETE'
     } else {
+        $summary.realInference = 'REQUEST_ATTEMPTED'
         $summary.stage = 'COMPLETE'
     }
 } catch {

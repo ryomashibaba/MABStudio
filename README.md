@@ -238,7 +238,7 @@ require rebuilding an already-passed Windows EXE; replace only the PS1 script.
 
 
 The script reads `%LOCALAPPDATA%\MABStudio\preferences.json`, verifies
-that **exactly the selected model is loaded** through read-only provider APIs,
+the actual currently loaded model through read-only provider APIs,
 then finds the latest successful `WINDOWS_NATIVE_QA.json` and verifies its ZIP
 SHA-256. It extracts that already-built EXE temporarily, sends exactly one
 real-model building request using `--acceptance`, and saves a JSON report under
@@ -253,3 +253,17 @@ seconds. Do not confuse this with proof of Japanese intent understanding or
 architectural visual quality. This check uses the existing fixed Japanese
 diagnostic prompt from `app.acceptance.DEFAULT_PROMPT`; normal custom
 Japanese creation remains in the GUI.
+
+### Real-model check: bounded wait and accurate failure evidence
+
+The existing `RUN_REAL_MODEL_CHECK.bat` does not rebuild the EXE. The checker
+limits the one acceptance process to 20 minutes and terminates only the
+acceptance process it started if it exceeds that bound. Model selection records
+loaded instance IDs; if the saved choice differs from the sole loaded LM Studio
+model, the mismatch is printed before inference. A failure *before* contacting
+the provider is reported as NOT_ATTEMPTED, not as a genuine inference failure.
+A successful receipt must match provider/model, approved-source and Tk proof,
+and the unchanged world-write/BuildPlan safety gates. No automatic retries.
+
+These changes are source-tested on Linux; Windows PowerShell 5.1 behavior is
+not claimed until the updated script is executed there.
