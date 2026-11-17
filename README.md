@@ -78,3 +78,16 @@ Education WebSocket接続は、既存B134の検証済み実装を流用する方
 公式ワールドエクスポート方法: https://edusupport.minecraft.net/hc/en-us/articles/360047555391-Import-Export-and-Manage-Worlds
 
 Amulet旧API参考: https://amulet-core.readthedocs.io/en/stable/getting_started/blocks/basic_block_example.html
+
+## Educationの直接読み取り（追加・テストワールド限定）
+
+Studioの「Educationから直接読取（5照合）」は**設計・施工とは独立した実験用読み取り**です。既存のMAB B134のSocketBE 2.8.0/5件の`testforblock`契約を利用し、指定したオーク階段1個について試します。MAB本体の建築計画・SOURCE施工変換は使わず、MAB本体は改変しません。実機Minecraft Educationでのこの新経路の動作は**未検証**です。
+
+Windows EXE版にはビルド工程でSocketBEをアプリ内の隔離フォルダに含めます。Pythonソース版の初回利用時だけ、利用者が明示的に`prepare_education_readonly.bat`を実行してください（`app/education_runtime/`以外にnpmパッケージを導入しません）。SocketBE 2.8.0はMITライセンスですが、正式配布前に同梱依存関係の通知を確認してください。追加課金は不要です。
+
+1. **専用テストワールド**で既存のオーク階段1個のXYZを確認し、Studio右上の「予定位置 XYZ」に入力します。
+2. 「Educationから直接読取（5照合）」を押し、確認画面を読みます。**一度にStudioまたはB134のどちらかだけ**8000番ポートを利用できます。
+3. ゲーム内で `/wsserver 127.0.0.1:8000` を実行後、チャットで `!mab-read` を送ります。
+4. Studioは`testforblock`5照合の応答をB134互換JSONとしてアプリデータの`diagnostics/education`に保存します。`UNKNOWN`や未確定を推測で上書きしません。待機は約2分半で終了し、画面から停止できます。
+
+これは*指定された1地点での読み取りコマンド応答*に過ぎず、ワールドID・ブロックの独立認証、周辺地形一括読取、施工可能性、Minecraft衝突認証を意味しません。`setblock`/`fill`などの施工経路は含まず、ワールドのRollbackも提供しません。通常の建築作業は引き続き設計のみ（`NOT_PREPARED`、9 BLOCKED、`BuildPlan.operations=[]`）です。EXEのWindows実機検証と真正Minecraft接続はまだ未実施です。

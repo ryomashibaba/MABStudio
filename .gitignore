@@ -9,3 +9,6 @@ local-data/
 *.zip
 
 .venv-build/
+
+app/education_runtime/node_modules/
+app/education_runtime/package-lock.json

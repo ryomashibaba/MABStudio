@@ -7,7 +7,9 @@ if not exist ".venv-build\Scripts\python.exe" (
   py -3 -m venv .venv-build || goto :error
 )
 ".venv-build\Scripts\python.exe" -m pip install --disable-pip-version-check pyinstaller || goto :error
-".venv-build\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data "app\engine_bridge.mjs;app" app\main.py || goto :error
+rem Package the specific SocketBE 2.8.0 transport only for the opt-in read probe.
+call prepare_education_readonly.bat || goto :error
+".venv-build\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data "app\engine_bridge.mjs;app" --add-data "app\education_runtime;app\education_runtime" app\main.py || goto :error
 where node >nul 2>nul || (echo Node.js is needed for packaged edition & exit /b 1)
 for /f "delims=" %%i in ('where node') do (
   copy /Y "%%i" "dist\MABStudio\node.exe" >nul

@@ -1,0 +1,29 @@
+{
+  "schema": "mab-studio-education-readonly-verification-v1",
+  "date": "2026-11-17",
+  "inheritsVersion": "MAB Studio v0.3 continuation",
+  "scope": "Windows Studio GUI and test-world-only read-only Education transport",
+  "localAutomated": {
+    "command": "xvfb-run -a python -m pytest -q -rs",
+    "passed": 65,
+    "skipped": 9,
+    "failed": 0,
+    "skipReason": "nine genuine B143 integration fixtures need externally verified source directory; not silently counted PASS"
+  },
+  "nodeOfflineSelfTest": "PASS: five exact testforblock commands; mock world; no write operation",
+  "pythonNodeOfflineIntegration": "PASS: test SocketBE stub plus B134 JSON strict schema check, cancellation, tamper, missing dependency",
+  "guiStartupVisualInspection": "PASS on Linux Xvfb, new Education button visible and existing preview visible",
+  "nodeBridgeSourceSha256": "d4f12875c8826bea6f6243d0952d0fd7c98d6351960ebb29d28d6b640030ce27",
+  "runtimeDependency": "socket-be@2.8.0 only installed by explicit isolated preparation or Windows packaging CI; npm network install NOT_RUN in this environment",
+  "windowsExeBuild": "NOT_RUN",
+  "windowsNativeGUI": "NOT_RUN",
+  "minecraftEducationLiveConnect": "NOT_RUN",
+  "actualEducationReadback": "NOT_RUN",
+  "construction": "NOT_IMPLEMENTED",
+  "sourceWorldWrites": 0,
+  "buildPlanOperations": [],
+  "worldRollback": "NOT_IMPLEMENTED",
+  "protection": "Only testforblock; 127.0.0.1:8000; explicit !mab-read; no SOURCE command translation; readonly only; status UNKNOWN on ambiguity",
+  "notRepresentedAsPassed": ["Native EXE", "real local LLM", "Education live connection", "world construction", "world rollback"],
+  "mabRepositoryModified": false
+}

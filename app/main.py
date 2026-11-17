@@ -1,6 +1,7 @@
 """MAB Studio Windows GUI. Offline-first, test-world only. No world-writing calls."""
 from __future__ import annotations
 import json
+import gc
 from pathlib import Path
 from datetime import datetime, timezone
 import queue
@@ -15,7 +16,7 @@ from app.core import (
 )
 from app.preview import VoxelPreview
 from app.diagnostics import check_local_setup, readiness_text
-from app.education import import_b134_readback
+from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
 from app.revisions import RevisionStore, compare_scenes, diff_preview_scene
 from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_scene
@@ -38,6 +39,9 @@ class Studio(tk.Tk):
         self.current_snapshot = None
         self.delta = None
         self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
+        self._education_running = False
+        self._education_cancel = threading.Event()
+        self._closed = False
         self.terrain = None
         self.terrain_archive = None
         self.terrain_report = None
@@ -48,9 +52,29 @@ class Studio(tk.Tk):
         self.model = tk.StringVar(value='')
         self.branch = tk.StringVar(value=self.manager.state.get('tracked_branch', DEFAULT_BRANCH))
         self._make_ui()
-        self.after(120, self._poll)
-        self.after(2000, self._startup)
-        self.after(15*60*1000, self._periodic_check)
+        self._poll_after = self.after(120, self._poll)
+        self._startup_after = self.after(2000, self._startup)
+        self._check_after = self.after(15*60*1000, self._periodic_check)
+
+    def destroy(self):
+        # Tk.after callbacks must not run after GUI disposal; shutdown an active
+        # read-only listener without editing any world state.
+        if self._closed:
+            return
+        self._closed = True
+        self._education_cancel.set()
+        for attr in ('_poll_after','_startup_after','_check_after'):
+            handle=getattr(self,attr,None)
+            if handle is not None:
+                try:self.after_cancel(handle)
+                except tk.TclError:pass
+        # Free Tk Variable wrappers on the GUI thread rather than allowing
+        # Python's GC to finalize them later from a local-AI worker thread.
+        for attr,value in tuple(self.__dict__.items()):
+            if isinstance(value,tk.Variable):
+                setattr(self,attr,None)
+        gc.collect()
+        super().destroy()
 
     def _make_ui(self):
         style = ttk.Style(self)
@@ -157,6 +181,16 @@ class Studio(tk.Tk):
         self.import_terrain_btn=ttk.Button(terrainbar,text='.mcworldを読み取る',command=self.import_terrain)
         self.import_terrain_btn.pack(side='left')
         ttk.Button(terrainbar,text='B134読取結果',command=self.import_education_diagnostic).pack(side='left',padx=(8,0))
+        educationbar = ttk.Frame(right)
+        educationbar.pack(fill='x', pady=(0,7))
+        self.edu_live_btn=ttk.Button(educationbar,text='Educationから直接読取（5照合）',
+                                     command=self.start_education_readonly)
+        self.edu_live_btn.pack(side='left',padx=(0,6))
+        self.edu_stop_btn=ttk.Button(educationbar,text='読取待機を停止',
+                                     command=self.stop_education_readonly,state='disabled')
+        self.edu_stop_btn.pack(side='left')
+        ttk.Label(educationbar,text='1か所のオーク階段・testforblock限定・施工しません',
+                  foreground='#a0522d').pack(side='left',padx=(9,0))
         self.preview=VoxelPreview(right)
         self.preview.pack(fill='both',expand=True)
         self.caption=tk.StringVar(value='表示待ち：AIモデル・エンジンが準備できたら生成できます。')
@@ -185,7 +219,8 @@ class Studio(tk.Tk):
     def _periodic_check(self):
         if not self.busy and self.pending_revision is None and self.manager.active_path:
             self.check_update(silent=True)
-        self.after(15*60*1000,self._periodic_check)
+        if not self._closed:
+            self._check_after = self.after(15*60*1000,self._periodic_check)
 
     def _update_engine_label(self):
         sha=self.manager.active_sha
@@ -202,6 +237,9 @@ class Studio(tk.Tk):
     def _start(self, title, fn, callback=None, quiet=False):
         if self.busy:
             return
+        # Prevent finalizers of previously closed Tk variables from executing
+        # in this worker; Tcl is main-thread-affine.
+        gc.collect()
         self.busy=True
         self.status.set(title)
         self._update_engine_label()
@@ -218,7 +256,11 @@ class Studio(tk.Tk):
             while True:
                 kind,title,result,callback,quiet=self.pending_events.get_nowait()
                 self.busy=False
+                if title.startswith('Education直接読取'):
+                    self._education_running=False
                 if kind=='error':
+                    if title.startswith('Education直接読取') and '接続待機を中止しました' in str(result):
+                        quiet=True
                     if quiet and title.startswith('GitHub'):
                         self.status.set('GitHub更新確認はオフラインです。導入済みエンジンは使えます。')
                     else:
@@ -233,7 +275,8 @@ class Studio(tk.Tk):
                 self._update_engine_label()
         except queue.Empty:
             pass
-        self.after(120,self._poll)
+        if not self._closed:
+            self._poll_after = self.after(120,self._poll)
 
     def _invalidate_scene(self):
         self.scene = None
@@ -252,6 +295,8 @@ class Studio(tk.Tk):
         self.load_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
+        self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
 
     def _coords(self):
         try:
@@ -298,6 +343,49 @@ class Studio(tk.Tk):
                     self.status.set(str(exc))
         else:
             self.preview.show(self.scene)
+
+    def start_education_readonly(self):
+        """User-initiated test-world transport. Never performs Minecraft writes."""
+        if self.busy or self._education_running:
+            return
+        try:
+            pos=parse_probe_coordinates(self.place_xyz.get().replace(',',' '))
+        except StudioError as exc:
+            messagebox.showerror('読取位置の確認',str(exc))
+            return
+        if not messagebox.askyesno('Educationの安全な読取',
+                '専用テストワールドの既存オーク階段を確認します。\n'
+                f'指定 XYZ: {pos[0]} {pos[1]} {pos[2]}\n\n'
+                '読み取り専用testforblockを最大5件送信します。\n'
+                '建築、削除、ワールドデータの編集は行いません。\n'
+                'Minecraft実機の状態認証や施工許可にはなりません。\n\n'
+                '読み取り待機を開始しますか？'):
+            return
+        self._education_cancel.clear()
+        self._education_running=True
+        def done(report):
+            label=report['outcome']
+            value=report['provisionalStateValue']
+            messagebox.showinfo('Education読み取り診断（未認証）',
+                f'対象XYZ: {report["coords"]}\n'
+                f'結果: {label}\n方向候補: {value if value is not None else "不明"}\n'
+                f'保存先: {report["readbackPath"]}\n\n'
+                '照合は設計・建築認証ではありません。\nワールド書き込み0。')
+            self.status.set('Education読取診断を保存しました（状態は独立認証していません）。')
+        self._start('Education直接読取：指定階段5照合を待機中',
+                    lambda:run_education_readonly(pos,stop=self._education_cancel),done,quiet=False)
+        self.status.set('Educationで /wsserver 127.0.0.1:8000 を実行 → チャットに !mab-read （テストワールドのみ）')
+        messagebox.showinfo('Minecraft Educationでの操作',
+            '1. 専用テストワールドを開いてください。\n'
+            '2. ゲーム内コマンド: /wsserver 127.0.0.1:8000\n'
+            '3. 接続後、チャットに !mab-read と送ってください。\n\n'
+            '接続タイムアウトは約2分半。既存B134等の8000番ポートを使うソフトは終了してください。\n'
+            '※ 自動操作・施工はありません。いつでも「読取待機を停止」できます。')
+
+    def stop_education_readonly(self):
+        if self._education_running:
+            self._education_cancel.set()
+            self.status.set('Education読取の停止を要求しました。ワールドは変更しません。')
 
     def import_education_diagnostic(self):
         # Existing B134 connector does the real read-only WebSocket probing.

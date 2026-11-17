@@ -1,0 +1,10 @@
+{
+  "name": "mab-studio-education-readonly-transport",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Opt-in loopback-only Minecraft Education read-only testforblock probe",
+  "dependencies": {
+    "socket-be": "2.8.0"
+  }
+}
