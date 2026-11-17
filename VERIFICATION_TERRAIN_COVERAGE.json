@@ -1,0 +1,32 @@
+{
+  "schema": "mab-studio-local-development-evidence-v1",
+  "date": "2026-11-17",
+  "baseCommit": "531e1b32b2c9cbfb3c2915d45e66ad849be8168a",
+  "scope": "app-owned exported-world preview evidence classification and GUI safeguards",
+  "testEnvironment": "Linux Python 3.13 + Xvfb + Node 22",
+  "commands": [
+    "xvfb-run -a python -m pytest -q -rs",
+    "node app/education_runtime/bridge.mjs --self-test",
+    "git diff --check"
+  ],
+  "pythonTests": {"passed": 71, "skipped": 9, "failed": 0, "skippedReason": "Exact SHA-pinned B143 source not available locally for nine real-engine tests"},
+  "nodeReadonlySelfTest": {"result": "PASS", "allowlistedQueries": 5, "worldWrites": 0},
+  "implemented": [
+    "cell-accurate known-solid, known-air, unreadable and out-of-sample report",
+    "tamper-resistant bounded partition check",
+    "red/purple/yellow/gray 3D preview warnings without world writes",
+    "auto-sized vertical bias around building foundation",
+    "planned placement anchor separated from sampling center",
+    "immediate invalidation of stale terrain overlay after anchor changes"
+  ],
+  "notRun": [
+    "Windows native EXE build and launch",
+    "genuine Minecraft Education export block parse",
+    "Amulet compatibility against Education 26.33",
+    "genuine Ollama or LM Studio inference",
+    "Minecraft world placement, modification, readback and rollback"
+  ],
+  "worldWrites": 0,
+  "mabRepositoryModified": false,
+  "sourceOnlyConstructionAuthority": false
+}

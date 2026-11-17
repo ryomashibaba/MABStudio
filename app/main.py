@@ -52,6 +52,7 @@ class Studio(tk.Tk):
         self.model = tk.StringVar(value='')
         self.branch = tk.StringVar(value=self.manager.state.get('tracked_branch', DEFAULT_BRANCH))
         self._make_ui()
+        self.place_xyz.trace_add('write', self._on_anchor_changed)
         self._poll_after = self.after(120, self._poll)
         self._startup_after = self.after(2000, self._startup)
         self._check_after = self.after(15*60*1000, self._periodic_check)
@@ -177,7 +178,10 @@ class Studio(tk.Tk):
         terrainbar = ttk.Frame(right)
         terrainbar.pack(fill='x', pady=(0,7))
         ttk.Label(terrainbar,text='予定位置 XYZ').pack(side='left')
-        ttk.Entry(terrainbar,textvariable=self.place_xyz,width=18).pack(side='left',padx=(6,6))
+        self.anchor_entry = ttk.Entry(terrainbar,textvariable=self.place_xyz,width=18)
+        self.anchor_entry.pack(side='left',padx=(6,6))
+        self.anchor_entry.bind('<FocusOut>', lambda _event: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
+        self.anchor_entry.bind('<Return>', lambda _event: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
         self.import_terrain_btn=ttk.Button(terrainbar,text='.mcworldを読み取る',command=self.import_terrain)
         self.import_terrain_btn.pack(side='left')
         ttk.Button(terrainbar,text='B134読取結果',command=self.import_education_diagnostic).pack(side='left',padx=(8,0))
@@ -310,6 +314,15 @@ class Studio(tk.Tk):
         except ValueError as exc:
             raise StudioError('予定位置は X Y Z の整数3個で入力してください') from exc
 
+    def _on_anchor_changed(self, *_):
+        # Editing the anchor must immediately retire the old overlay. Otherwise
+        # users could mistake an old position's terrain for the newly typed XYZ.
+        if self._closed or self.terrain is None or self.view_mode.get()!='地形＋建築':
+            return
+        self.terrain_report = None
+        self.preview.show(self.scene)
+        self.status.set('予定位置を変更しました。古い地形の重ね合わせを解除しました。新しい位置では.mcworldを再読取してください。')
+
     def _refresh_view(self):
         if not self.scene:
             self.preview.show(None)
@@ -336,8 +349,12 @@ class Studio(tk.Tk):
                 try:
                     merged, self.terrain_report = create_overlay_scene(self.terrain, active_scene, self._coords())
                     self.preview.show(merged)
-                    self.status.set('実地形との重なり候補: ' + str(self.terrain_report['potentialTerrainIntersections']) +
-                                    'セル / 不明な地形セル: ' + str(self.terrain_report['unreadableCells']) + '（未施工）')
+                    r=self.terrain_report
+                    self.status.set('地形照合（未施工）：既存ブロック重複候補 '+str(r['potentialTerrainIntersections'])+
+                                    ' / 確認済み空気 '+str(r['projectedKnownAir'])+
+                                    ' / 読取不能 '+str(r['projectedUnreadable'])+
+                                    ' / 読取範囲外 '+str(r['projectedOutsideSample'])+
+                                    ' / 位置を確認できないセル '+str(r['projectedLegacyUnverified']))
                 except StudioError as exc:
                     self.preview.show(self.scene)
                     self.status.set(str(exc))
@@ -413,13 +430,29 @@ class Studio(tk.Tk):
                                               filetypes=[('Minecraft World','*.mcworld')])
         if not filename:
             return
-        try: center = self._coords()
+        try: anchor = self._coords()
         except StudioError as e:
             messagebox.showerror('予定位置XYZ',str(e)); return
+        # Prefer observing foundation and the above-ground building over
+        # spending half the vertical sample on blocks beneath the foundation.
+        # MAX_SAMPLE_VOLUME and the 32-cell per-axis cap remain unchanged.
+        if self.scene is not None:
+            bounds = self.scene['bounds']
+            width = bounds['maxX']-bounds['minX']+1
+            depth = bounds['maxZ']-bounds['minZ']+1
+            story_height = bounds['maxY']-bounds['minY']+1
+            sample_size = min(32,max(24,width,depth))
+            sample_height = min(32,max(24,story_height+4))
+            scan_center=(anchor[0],anchor[1]+sample_height//2-4,anchor[2])
+        else:
+            sample_size=24
+            sample_height=24
+            scan_center=anchor
         def work():
             metadata = inspect_mcworld(filename)
             try:
-                terrain = read_mcworld_terrain(metadata, center, size=24, height=24)
+                terrain = read_mcworld_terrain(metadata, scan_center,
+                    size=sample_size, height=sample_height, planned_anchor=anchor)
                 return metadata, terrain, None
             except StudioError as exc:
                 return metadata, None, str(exc)
@@ -435,6 +468,7 @@ class Studio(tk.Tk):
                 self._refresh_view()
                 self.caption.set('実地形スナップショット: ' + metadata['worldName'] +
                                  ' / 既知ブロック: ' + str(len(terrain['cells'])) +
+                                 ' / 読取領域: ' + str(terrain['size']) +
                                  ' / 未読取: ' + str(terrain['unknown']) + '（Minecraft未変更）')
         self._start('安全なコピーから.mcworld地形を解析中', work, done)
 
