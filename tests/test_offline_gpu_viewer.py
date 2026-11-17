@@ -108,3 +108,15 @@ def test_actual_gpu_viewer_javascript_contract_with_node():
                          cwd=str(root), capture_output=True, text=True, timeout=15)
     assert run.returncode == 0, (run.stdout + run.stderr)
     assert 'PASS_GPU_VIEWER_JS_MESH_AND_CONTROLS' in run.stdout
+
+
+def test_gpu_viewer_far_away_source_and_portrait_framing_with_node():
+    """Check actual shader inputs and view-projection against remote SOURCE bounds."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js unavailable')
+    root = Path(__file__).resolve().parents[1]
+    run = subprocess.run([node, str(root / 'tests/gpu_viewer_js_smoke.cjs'), '--precision-stress'],
+                         cwd=str(root), capture_output=True, text=True, timeout=15)
+    assert run.returncode == 0, (run.stdout + run.stderr)
+    assert 'PASS_GPU_VIEWER_PRECISION_AND_PORTRAIT_FRAMING' in run.stdout

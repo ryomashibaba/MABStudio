@@ -57,7 +57,9 @@
   const center=[(bounds.minX+bounds.maxX+1)/2,(bounds.minY+bounds.maxY+1)/2,(bounds.minZ+bounds.maxZ+1)/2];
   const sizes=[bounds.maxX-bounds.minX+1,bounds.maxY-bounds.minY+1,bounds.maxZ-bounds.minZ+1];
   const radius=Math.max(1,Math.hypot(...sizes)/2);
-  let yaw=0.78,pitch=0.39,scale=1.0,projection='perspective',target=center.slice(),slice=null;
+  // Render near the origin, even when the SOURCE uses far-away world coordinates.
+  // This avoids loss of single-block detail in WebGL float32 transforms.
+  let yaw=0.78,pitch=0.39,scale=1.0,projection='perspective',target=[0,0,0],slice=null;
   let shown=0,quads=0;
   const clamp=(x,lo,hi)=>Math.max(lo,Math.min(hi,x));
   function colorFor(mat) {
@@ -66,7 +68,9 @@
   }
   const colorCache=new Map();
   function getColor(mat) { if(!colorCache.has(mat)) colorCache.set(mat,colorFor(mat));return colorCache.get(mat); }
-  function addVertex(targetArr,p,n,c){targetArr.push(...p,...n,...c);}
+  function addVertex(targetArr,p,n,c){
+    targetArr.push(p[0]-center[0],p[1]-center[1],p[2]-center[2],...n,...c);
+  }
   function appendQuad(arr, corners, normal, col) {
     const order=[0,1,2,0,2,3];
     for(const i of order) addVertex(arr,corners[i],normal,col);
@@ -172,12 +176,22 @@
   }
   let queued=false;
   function requestDraw(){if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;try{render();}catch(err){fail(String(err.message).slice(0,350));}});}
+  // A tall, narrow window needs a larger camera distance than a wide window.
+  // Keep the entire bounding sphere visible regardless of viewport aspect ratio.
+  function framing(aspect){
+    const halfFovY=Math.PI/8;
+    const halfFovX=Math.atan(Math.tan(halfFovY)*aspect);
+    return {
+      distance:radius/Math.sin(Math.min(halfFovY,halfFovX))*1.23/scale,
+      orthoHalf:radius*1.18/Math.min(1,aspect)/scale,
+    };
+  }
   function render(){
     const aspect=resize();
-    const distance=radius/(Math.sin(Math.PI/8))*1.23/scale;
+    const {distance,orthoHalf}=framing(aspect);
     const eye=[target[0]+distance*Math.sin(yaw)*Math.cos(pitch),target[1]+distance*Math.sin(pitch),target[2]+distance*Math.cos(yaw)*Math.cos(pitch)];
     const far=Math.max(100,distance+radius*12);
-    const proj=projection==='perspective'?perspective(Math.PI/4,aspect,0.05,far):ortho(radius*1.18/scale,aspect,0.05,far);
+    const proj=projection==='perspective'?perspective(Math.PI/4,aspect,0.05,far):ortho(orthoHalf,aspect,0.05,far);
     gl.uniformMatrix4fv(uniforms.uProj,false,proj);gl.uniformMatrix4fv(uniforms.uView,false,lookAt(eye,target));
     gl.clearColor(0.065,0.103,0.166,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);gl.disable(gl.CULL_FACE);
@@ -186,7 +200,7 @@
     gl.disable(gl.BLEND);
     if(mainBuffer){gl.uniform1f(uniforms.uAlpha,1);gl.uniform1f(uniforms.uUnlit,0);bindBuffer(mainBuffer);gl.drawArrays(gl.TRIANGLES,0,mainVertices);}
   }
-  function reset(){yaw=0.78;pitch=0.39;scale=1;target=center.slice();requestDraw();}
+  function reset(){yaw=0.78;pitch=0.39;scale=1;target=[0,0,0];requestDraw();}
   function chooseProjection(value){
     projection=value;
     for(const val of ['perspective','orthographic']){$(val).classList.toggle('active',val===value);$(val).setAttribute('aria-pressed',String(val===value));}
@@ -218,8 +232,9 @@
     const dx=ev.clientX-drag.x,dy=ev.clientY-drag.y;
     if(!drag.pan){yaw=drag.yaw-dx*0.008;pitch=clamp(drag.pitch+dy*0.006,-1.45,1.45);}
     else{
-      const distance=radius/(Math.sin(Math.PI/8))*1.23/scale;
-      const worldPerPixel=(projection==='perspective'?2*distance*Math.tan(Math.PI/8):radius*1.18*2/scale)/Math.max(1,canvas.clientHeight);
+      const aspect=canvas.width/Math.max(1,canvas.height);
+      const {distance,orthoHalf}=framing(aspect);
+      const worldPerPixel=(projection==='perspective'?2*distance*Math.tan(Math.PI/8):orthoHalf*2)/Math.max(1,canvas.clientHeight);
       const right=[Math.cos(yaw),0,-Math.sin(yaw)];
       const up=[-Math.sin(pitch)*Math.sin(yaw),Math.cos(pitch),-Math.sin(pitch)*Math.cos(yaw)];
       target=drag.target.map((v,i)=>v-dx*worldPerPixel*right[i]+dy*worldPerPixel*up[i]);
