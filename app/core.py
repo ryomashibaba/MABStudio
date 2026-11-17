@@ -560,26 +560,58 @@ MAX_MODEL_ELEMENTS = 18
 # Compact output is a first-proposal transport boundary, not a new MAB
 # architecture engine. Full B143 source (including richer revisions) is still
 # checked by the unchanged pinned MAB validate/compile/verify functions.
-MODEL_GENERATION_SCHEMA = {
-    **B143_JSON_SCHEMA,
-    "properties": {
-        **B143_JSON_SCHEMA["properties"],
-        "title": {**B143_JSON_SCHEMA["properties"]["title"], "maxLength": 48},
-        "brief": {**B143_JSON_SCHEMA["properties"]["brief"], "maxLength": 120},
-        "elements": {
-            **B143_JSON_SCHEMA["properties"]["elements"],
-            "maxItems": MAX_MODEL_ELEMENTS,
-            "items": {
-                **B143_JSON_SCHEMA["properties"]["elements"]["items"],
-                "properties": {
-                    **B143_JSON_SCHEMA["properties"]["elements"]["items"]["properties"],
-                    "id": {**B143_JSON_SCHEMA["properties"]["elements"]["items"]["properties"]["id"],
-                           "maxLength": 24},
-                },
+def _shape_specific_output_schema(*, max_elements: int, compact: bool) -> dict:
+    """Describe B143's actual shape/mode *syntax* to constrained decoders.
+
+    A source `add` needs a material; a `cut` may NOT contain material or
+    shell. Each shape needs different coordinates. This is an OUTPUT grammar,
+    not a source compiler, spatial validator or construction authorization.
+    B143 remains the sole authority for coordinates, work/voxel limits and
+    geometry. `anyOf` arms are disjoint by shape+mode.
+    """
+    base = B143_JSON_SCHEMA['properties']
+    raw = B143_JSON_SCHEMA['properties']['elements']['items']['properties']
+    identity = {**raw['id']}
+    if compact:
+        identity['maxLength'] = 24
+    shapes = {
+        'box': ('origin', 'size'),
+        'ellipsoid': ('center', 'radii'),
+        'cylinder': ('origin', 'axis', 'radius', 'length'),
+    }
+    variants = []
+    for shape, coordinates in shapes.items():
+        for mode in ('add', 'cut'):
+            required = ['id', 'shape', 'mode', *coordinates]
+            props = {
+                'id': identity,
+                'shape': {'const': shape},
+                'mode': {'const': mode},
+                **{key: raw[key] for key in coordinates},
+            }
+            if mode == 'add':
+                required.append('material')
+                props['material'] = raw['material']
+                props['shell'] = raw['shell']
+            variants.append({'type': 'object', 'additionalProperties': False,
+                             'required': required, 'properties': props})
+    return {
+        **B143_JSON_SCHEMA,
+        'properties': {
+            **base,
+            'title': {**base['title'], 'maxLength': 48 if compact else 100},
+            'brief': {**base['brief'], 'maxLength': 120 if compact else 500},
+            'elements': {
+                'type': 'array', 'minItems': 1, 'maxItems': max_elements,
+                'items': {'anyOf': variants},
             },
         },
-    },
-}
+    }
+
+
+MODEL_GENERATION_SCHEMA = _shape_specific_output_schema(
+    max_elements=MAX_MODEL_ELEMENTS, compact=True)
+
 # Long local GGUF inferences can need several minutes; while streaming, these
 # limits apply to idle reads and the complete request, not the total first-byte
 # to last-byte HTTP buffering delay of a non-streaming reply.
@@ -630,10 +662,13 @@ def _output_budget(provider: str, model: str, messages: list[dict]) -> tuple[int
     context = _loaded_lm_studio_context(model) if provider == 'LM Studio' else None
     if context is None:
         return DEFAULT_OUTPUT_TOKENS, None
-    # Conservative headroom for instructions, schema, generation bookkeeping and
-    # tokenization differences. This is only an estimate, not a tokenizer.
-    request_chars = len(json.dumps({'messages': messages,
-                                   'schema': MODEL_GENERATION_SCHEMA}, ensure_ascii=False))
+    # Conservative headroom for actual chat instructions and tokenization
+    # differences. This is only an estimate, not a tokenizer.
+    # A constrained decoder consumes the JSON Schema as a grammar, not as
+    # chat history text. Do not charge its six alternative object definitions
+    # against the model's input tokens; only the actual messages are sent to
+    # the chat prompt. Keep generous headroom for system and tokenizer costs.
+    request_chars = len(json.dumps({'messages': messages}, ensure_ascii=False))
     reserve = max(1800, (request_chars + 1) // 2 + 480)
     remaining = context - reserve
     if remaining < 800:
@@ -919,12 +954,9 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             f'【修正専用】既存の全要素・title・briefを保持できる最大{max_elements}要素。\n'
             '修正指示に必要な箇所以外のSOURCEを保持し、省略なく完全なJSONを返す。'
         )
-    generation_schema = MODEL_GENERATION_SCHEMA if revision_base is None else {
-        **B143_JSON_SCHEMA,
-        'properties': {**B143_JSON_SCHEMA['properties'],
-                       'elements': {**B143_JSON_SCHEMA['properties']['elements'],
-                                    'maxItems': max_elements}},
-    }
+    generation_schema = (MODEL_GENERATION_SCHEMA if revision_base is None
+                         else _shape_specific_output_schema(max_elements=max_elements,
+                                                            compact=False))
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]
     output_budget, context_length = _output_budget(provider, model, messages)
     if provider == 'Ollama':

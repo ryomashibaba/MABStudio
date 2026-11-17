@@ -15,9 +15,43 @@ import time
 from app.release_runtime import verify_packaged_runtime
 from app.core import (BASELINE_SHA, EngineManager, ModelTransportError,
                       StudioError, ask_llm, atomic_json, compatibility_check,
-                      run_bridge)
+                      run_bridge, MODEL_GENERATION_SCHEMA)
 
 DEFAULT_PROMPT = '海辺の小さな天文観測所。地上階の入口、窓、屋上の丸い展望ドームを備えた独創的な建物を設計して。'
+
+
+def inspect_candidate_shape_fields(design: dict) -> dict:
+    """Privacy-preserving *syntactic hints*, never B143 validation/repair.
+
+    The original model answer is not persisted.  B143 remains the authority
+    for exact shapes, dimensions, support, materials, complexity and safety.
+    """
+    items = design.get('elements') if isinstance(design, dict) else None
+    if not isinstance(items, list):
+        return {'elementCount': None, 'hints': [{'kind': 'ELEMENTS_NOT_ARRAY'}],
+                'modelContentSaved': False}
+    hints = []
+    arms = MODEL_GENERATION_SCHEMA['properties']['elements']['items']['anyOf']
+    for index, element in enumerate(items[:160]):
+        if not isinstance(element, dict):
+            hints.append({'index': index, 'kind': 'ELEMENT_NOT_OBJECT'})
+            continue
+        variant = next((arm for arm in arms
+                        if arm['properties']['shape']['const'] == element.get('shape')
+                        and arm['properties']['mode']['const'] == element.get('mode')), None)
+        if variant is None:
+            hints.append({'index': index, 'kind': 'SHAPE_OR_MODE_UNKNOWN'})
+            continue
+        missing = sorted(set(variant['required']) - set(element))
+        extra = sorted(set(element) - set(variant['properties']))
+        if missing or extra:
+            hints.append({'index': index, 'kind': 'FIELD_CONTRACT_MISMATCH',
+                          'missingKeys': missing, 'unexpectedKeyCount': len(extra)})
+        if len(hints) >= 12:
+            break
+    return {'elementCount': len(items), 'hints': hints,
+            'checkedShapeFieldPresenceOnly': True,
+            'geometryValidatedByThisReport': False, 'modelContentSaved': False}
 
 
 def run_acceptance(argv: list[str]) -> int:
@@ -124,6 +158,9 @@ def run_acceptance(argv: list[str]) -> int:
             if original_base is not None:
                 core.OLLAMA_BASE = original_base
         report['stage'] = 'REAL_MAB_SOURCE_VERIFICATION'
+        # This records only field names and element indices for a failed local
+        # model candidate. No prompts, model JSON, coordinates or materials.
+        report['candidateFieldDiagnostics'] = inspect_candidate_shape_fields(design)
         scene = run_bridge(engine, design)
         if scene['stats']['voxels'] < 1:
             raise StudioError('MABが空の設計を返しました')

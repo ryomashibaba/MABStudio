@@ -107,5 +107,5 @@ def test_revision_does_not_shrink_existing_40_element_design(monkeypatch):
         assert '最大48' in seen[0]['messages'][0]['content']
         assert constraint['properties']['title']['maxLength']==100
         assert constraint['properties']['brief']['maxLength']==500
-        assert constraint['properties']['elements']['items']['properties']['id'].get('maxLength') is None
+        assert all(v['properties']['id'].get('maxLength') is None for v in constraint['properties']['elements']['items']['anyOf'])
         assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems']==160

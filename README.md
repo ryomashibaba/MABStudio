@@ -1,3 +1,14 @@
+## 2026-11-17 — B143形状別JSON生成契約の改善（v0.3継続）
+
+真正Gemma 4のSOURCE受入が `B143_TITLE_OR_BRIEF` に到達した後、タイトル・説明の限定補正だけでなく、次の失敗要因を予防するためにAI出力SchemaとB143の形状ごとの契約を照合した。旧Schemaは形状固有の座標や `add` の `material` を要求せず、`cut` に不正な `material` を許容していた。
+
+- AI出力Schemaを `box` / `ellipsoid` / `cylinder` × `add` / `cut` の**6つの排他的な選択肢**へ変更。各形状の必要座標、`add`の必須材質、`cut`の材質・shell禁止、余計なキーの禁止を指定。初回は18要素、既存SOURCE修正では元の規模に応じた最大160要素を維持。
+- LM Studioの構造化出力Schemaは文法制約として渡されるため、その全文をチャットの入力トークンとして二重計上しないよう出力予算の概算を調整。出力枠・モデルのロード設定・VRAMを無断変更せず、途中終了は引き続き採用しない。
+- SOURCEが失敗した場合に、**要素番号・必須キー不足・余計なキーの件数のみ**を `candidateFieldDiagnostics` に記録。指示文、生成JSON、未知キーの内容、座標、材質は保存しない。構文上のヒントであり、独立したSOURCE合否判定ではない。
+- 固定SHAの真正B143で6種類の形状契約の実コンパイルを確認。Linux仮想Tk画面と回帰テスト **194 PASS / 0 SKIP / 0 FAIL**。**真正Gemma 4での新Schemaによる生成成功は未確認**。受入成功や建築品質の改善を主張しない。
+
+WindowsではこのZIPを別フォルダへ展開し、既存のロード済みモデルを使って `RUN_SOURCE_REAL_MODEL_CHECK.bat` を1回実行できる。PyInstallerの再実行やワールド操作は不要。これはWindows EXEそのものを更新するものではなく、受入成功後にのみ既存EXEへの反映を検討する。
+
 ## 2026-11-17 — LM Studio 6209-token genuine-model stop: source-only retest
 
 The Windows REAL_MODEL_CHECK reached the already loaded Gemma but failed at
