@@ -21,6 +21,8 @@ MANIFEST = 'RUNTIME_MANIFEST.json'
 BASE_FILES = (
     'MABStudio.exe', 'node.exe', 'NODE_LICENSE.txt',
     '_internal/app/engine_bridge.mjs',
+    '_internal/app/gpu_viewer_assets/viewer.html',
+    '_internal/app/gpu_viewer_assets/viewer.js',
 )
 RUNTIME_FOLDER = '_internal/app/education_runtime'
 MAX_ASSETS = 4000

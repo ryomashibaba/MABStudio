@@ -16,6 +16,7 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
+from app.gpu_viewer import open_offline_preview, GPUViewerError
 from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
@@ -129,6 +130,23 @@ class Studio(tk.Tk):
             self._large_preview = None
             self._large_preview_window = None
 
+    def open_gpu_preview(self):
+        """Open a read-only, offline, GPU-backed view of the CURRENT preview."""
+        if self.busy or not self.preview.scene:
+            messagebox.showinfo('高精細3D', '表示する設計がありません。先に設計を開いてください。')
+            return
+        try:
+            open_offline_preview(self.preview.scene, self.manager.root,
+                                 cut_level=self.preview.cut_level)
+            self.status.set('高精細3Dビューアを開きました。SOURCE・Minecraftワールドは変更していません。')
+        except (GPUViewerError, OSError, ValueError) as exc:
+            messagebox.showerror('高精細3Dを開けません', str(exc))
+
+    def _preview_updated(self):
+        self._sync_large_preview()
+        if hasattr(self, 'gpu_view_btn'):
+            self.gpu_view_btn.configure(state='normal' if self.preview.scene and not self.busy else 'disabled')
+
     def _make_ui(self):
         """Creation-first desktop layout. Technical controls live in a separate window."""
         c = {'bg': '#f3f6fb', 'panel': '#ffffff', 'ink': '#13253d',
@@ -239,7 +257,10 @@ class Studio(tk.Tk):
         top = ttk.Frame(right, style='Panel.TFrame')
         top.pack(fill='x', pady=(0, 10))
         ttk.Label(top, text='3Dプレビュー', style='Section.TLabel').pack(side='left')
-        ttk.Button(top, text='3Dを大きく表示', command=self.open_large_preview,
+        self.gpu_view_btn = ttk.Button(top, text='高精細3D（GPU）', command=self.open_gpu_preview,
+                                       style='Primary.TButton', state='disabled')
+        self.gpu_view_btn.pack(side='right', padx=(7, 0))
+        ttk.Button(top, text='軽量3Dを拡大', command=self.open_large_preview,
                    style='Quiet.TButton').pack(side='right', padx=(7, 0))
         self.export_btn = ttk.Button(top, text='設計を保存', command=self.export_design,
                                      style='Quiet.TButton', state='disabled')
@@ -275,7 +296,7 @@ class Studio(tk.Tk):
         self.preview = VoxelPreview(right)
         self._large_preview_window = None
         self._large_preview = None
-        self.preview.on_scene_changed = self._sync_large_preview
+        self.preview.on_scene_changed = self._preview_updated
         self.preview.pack(fill='both', expand=True)
         sectionbar = ttk.Frame(right, style='Panel.TFrame')
         sectionbar.pack(fill='x', pady=(9, 3))
@@ -509,6 +530,7 @@ class Studio(tk.Tk):
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
+        self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled')
         self.unload_btn.configure(state='normal' if not self.busy and bool(self.model.get().strip()) else 'disabled')
         self.models_btn.configure(state='normal' if not self.busy else 'disabled')
         self.model_box.configure(state='normal' if not self.busy else 'disabled')

@@ -17,9 +17,19 @@ def test_source_checkout_does_not_claim_portable_bundle(monkeypatch):
         'mode': 'SOURCE', 'packagedRuntimeVerified': False}
 
 
+def _copy_gpu_assets(dist):
+    """Simulated release includes the same read-only bundled GPU assets."""
+    source=Path(__file__).resolve().parents[1]/'app'/'gpu_viewer_assets'
+    target=dist/'_internal'/'app'/'gpu_viewer_assets'
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ('viewer.html', 'viewer.js'):
+        (target/name).write_bytes((source/name).read_bytes())
+
+
 def _frozen(monkeypatch, tmp_path):
     dist = tmp_path / 'dist' / 'MABStudio'
     (dist / '_internal' / 'app' / 'education_runtime').mkdir(parents=True)
+    _copy_gpu_assets(dist)
     exe = dist / 'MABStudio.exe'
     exe.write_bytes(b'dummy EXE')
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
@@ -147,6 +157,7 @@ def test_release_audit_checks_private_node_permission_and_socket_import(tmp_path
     (dist / 'node.exe').write_bytes(b'x')
     (dist / 'NODE_LICENSE.txt').write_bytes(b'x')
     (dist / '_internal/app/engine_bridge.mjs').write_bytes(b'x')
+    _copy_gpu_assets(dist)
     transport=dist / '_internal/app/education_runtime'
     (transport/'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
     (transport/'package.json').write_text(json.dumps({'dependencies':{'socket-be':'2.8.0'}}))
