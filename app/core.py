@@ -397,6 +397,7 @@ JSONオブジェクトだけを出力してください。前置きやMarkdown�
 materialは stone, concrete, metal, glass, wood, glow, accent の7種。
 整数、各要素がbounds内、elements最大160、縦軸はy。全体積50万以下。概念建築のみ。
 構造の美観を優先し、外装・屋根・窓・入口・内装を可能な範囲で工夫。
+建築の必要な要素は省略せず、要素IDと説明文を簡潔にし、JSON以外にトークンを使わない。
 Minecraftワールド座標、実行可能なコマンド、プログラム、URLを出力しない。
 """
 
@@ -450,6 +451,88 @@ B143_JSON_SCHEMA = {
 
 class ModelTransportError(StudioError):
     """A server/transport failure; do not repeat expensive model inference."""
+
+
+class ModelOutputLimitError(StudioError):
+    """The model ended before its full JSON. Never retry with the same limits."""
+
+
+# This is an OUTPUT ceiling, not a guarantee of capacity. LM Studio can have a
+# smaller loaded context window. In that case we reduce the output allowance
+# without silently changing or reloading the user's model (which costs VRAM).
+DEFAULT_OUTPUT_TOKENS = 6400
+MAX_OUTPUT_TOKENS = 8000
+
+
+def _loaded_lm_studio_context(model: str, timeout: float = 2.5) -> int | None:
+    """Read the selected *already loaded* LM Studio model's context, if exposed.
+
+    The optional /api/v1/models endpoint must never load a model, change its
+    settings, or become a hard dependency for older OpenAI-compatible servers.
+    """
+    try:
+        req = urllib.request.Request(LM_STUDIO_BASE + '/api/v1/models',
+                                     headers={'User-Agent': 'MABStudio/0.3'})
+        with LOCAL_HTTP.open(req, timeout=timeout) as res:
+            raw = res.read(MAX_RESPONSE + 1)
+        if len(raw) > MAX_RESPONSE:
+            return None
+        data = json.loads(raw)
+        entries = data.get('models') if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            return None
+        matches = []
+        for item in entries[:150]:
+            if not isinstance(item, dict):
+                continue
+            loaded = item.get('loaded_instances')
+            if not isinstance(loaded, list):
+                continue
+            for instance in loaded[:20]:
+                if not isinstance(instance, dict):
+                    continue
+                if instance.get('id') != model and item.get('key') != model:
+                    continue
+                config = instance.get('config')
+                length = config.get('context_length') if isinstance(config, dict) else None
+                if type(length) is int and 1024 <= length <= 1048576:
+                    matches.append(length)
+        # If an alias matches several instances, use the smaller window.
+        return min(matches) if matches else None
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError, TypeError):
+        return None
+
+
+def _output_budget(provider: str, model: str, messages: list[dict]) -> tuple[int, int | None]:
+    context = _loaded_lm_studio_context(model) if provider == 'LM Studio' else None
+    if context is None:
+        return DEFAULT_OUTPUT_TOKENS, None
+    # Conservative headroom for instructions, schema, generation bookkeeping and
+    # tokenization differences. This is only an estimate, not a tokenizer.
+    request_chars = len(json.dumps({'messages': messages,
+                                   'schema': B143_JSON_SCHEMA}, ensure_ascii=False))
+    reserve = max(1800, (request_chars + 1) // 2 + 480)
+    remaining = context - reserve
+    if remaining < 800:
+        raise ModelOutputLimitError(
+            f'LM Studioのロード済みコンテキスト長{context}トークンでは、'
+            'この設計指示とSOURCE形式に必要な余裕がありません。'
+            'モデルのコンテキスト設定を確認してください（Studioは変更しません）。')
+    return min(MAX_OUTPUT_TOKENS, remaining), context
+
+
+def _truncated_error(provider: str, reply: dict, budget: int,
+                     context: int | None) -> ModelOutputLimitError:
+    usage = reply.get('usage')
+    consumed = usage.get('completion_tokens') if isinstance(usage, dict) else None
+    count = f'、生成済み{consumed}' if type(consumed) is int and consumed >= 0 else ''
+    ctx = f'、ロード済み文脈{context}' if context is not None else ''
+    return ModelOutputLimitError(
+        f'{provider}の設計JSON生成がトークン上限で途中終了しました'
+        f'（出力上限{budget}{count}{ctx}）。MAB SOURCEはまだ検証していません。'
+        '同じ条件での無駄な再推論は中止しました。'
+        'LM Studioではモデルのコンテキスト長・生成上限を確認してください。'
+        'コンテキスト長を増やすとRAM/VRAM使用量も増える可能性があります。')
 
 
 def _model_response(url: str, payload: dict, timeout: int) -> dict:
@@ -511,16 +594,17 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             task += "\n修正する前回の設計JSON: " + prior[:12000]
         task += "\n元の建築意図を保ち、エラーだけ直した完全なJSONを返してください。"
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+    output_budget, context_length = _output_budget(provider, model, messages)
     if provider == 'Ollama':
         url = OLLAMA_BASE + '/api/chat'
         payload = {'model': model, 'messages': messages, 'stream': False,
                    'format': B143_JSON_SCHEMA,
-                   'options': {'temperature': 0.3, 'num_predict': 4500}}
+                   'options': {'temperature': 0.3, 'num_predict': output_budget}}
         fallback = {**payload, 'format': 'json'}
     else:
         url = LM_STUDIO_BASE + '/v1/chat/completions'
         payload = {'model': model, 'messages': messages, 'temperature': 0.3,
-                   'max_tokens': 4500, 'stream': False,
+                   'max_tokens': output_budget, 'stream': False,
                    'response_format': {
                        'type': 'json_schema',
                        'json_schema': {'name': 'mab_b143_design', 'schema': B143_JSON_SCHEMA},
@@ -549,14 +633,14 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             raise ModelTransportError(f'{provider}がJSON出力を受け付けません (HTTP {fallback_error.code})') from fallback_error
     if provider == 'Ollama':
         if reply.get('done_reason') == 'length':
-            raise StudioError('AIの生成がトークン上限で中断されました。短い建築指示にしてください')
+            raise _truncated_error(provider, reply, output_budget, context_length)
         content = reply.get('message', {}).get('content', '')
     else:
         choices = reply.get('choices')
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise StudioError('LM Studioの回答候補がありません')
         if choices[0].get('finish_reason') == 'length':
-            raise StudioError('LM Studioの出力がトークン上限で中断されました。短い建築指示にしてください')
+            raise _truncated_error(provider, reply, output_budget, context_length)
         content = choices[0].get('message', {}).get('content', '')
     if not isinstance(content, str) or not content.strip():
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')

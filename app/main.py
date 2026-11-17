@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
     BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError,
+    ModelOutputLimitError,
     ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
@@ -695,11 +696,11 @@ class Studio(tk.Tk):
                     design = ask_llm(provider, model, prompt, error, previous_design=previous)
                     scene = run_bridge(engine, design)
                     return design, scene, attempt
-                except ModelTransportError:
-                    raise  # avoid a second long inference on server failure
+                except (ModelTransportError, ModelOutputLimitError):
+                    raise  # no duplicate expensive inference on HTTP or output-limit failure
                 except StudioError as e:
                     error = str(e)
-            raise StudioError('AIの設計を2回検証しましたが、MAB SOURCEが拒否しました: ' + error)
+            raise StudioError('AI設計の検証に2回失敗しました（最後の理由）: ' + error)
         def done(res):
             design, scene, retry = res
             self._display_design(design, scene, provider, model,
@@ -790,11 +791,11 @@ class Studio(tk.Tk):
                                     previous_design=prev, revision_base=original)
                     scene = run_bridge(engine, draft)
                     return draft, scene, attempt
-                except ModelTransportError:
-                    raise  # connectivity/HTTP failures do not merit a repeat
+                except (ModelTransportError, ModelOutputLimitError):
+                    raise  # an output-limit failure is NOT a SOURCE geometry rejection
                 except StudioError as exc:
                     error = str(exc)
-            raise StudioError('AI修正候補がMAB SOURCE検証に通りませんでした: '+error)
+            raise StudioError('AI修正候補の検証に失敗しました（最後の理由）: '+error)
         def done(data):
             revised, scene, retry = data
             # The model response is only a DRAFT.  No RevisionStore.commit,

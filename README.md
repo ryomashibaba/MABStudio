@@ -5,6 +5,12 @@
 2026-11-17時点の **Windows向け開発プレビュー**。既存MAB V11研究とは独立。追加課金0円を前提。**Minecraft Educationへの施工は未実装・無効**。
 
 
+## 2026-11-17 実機LM Studioの途中終了修正（v0.3継続）
+
+- 実機で `finish_reason=length` が報告された。従来の固定 `max_tokens=4500` を修正し、LM Studioの読み取り専用 `/api/v1/models` で**選択したロード済みモデルのコンテキスト長**が分かる場合、プロンプト等の余裕を確保して出力予算を調整する（最大8,000、8k文脈なら目安6,000強）。情報取得に失敗した旧サーバーでは既定6,400。Ollamaも6,400。Studioはモデルのロード/設定変更を行わない。
+- 応答がトークン上限で途中終了した場合、**MAB SOURCEは未実行**であることを明示し、同条件の2回目の高負荷推論を中止。SOURCE妥当性を保証するB143の本物の検証と、受け取り途中のJSONを分けて扱う。JSONが不完全な場合も部分建築を承認しない。
+- Linux/Xvfb＋真正B143とローカル模擬モデルの回帰テストを実施。**本物のGemma 4の推論品質・8k以上での安定生成はまだ未検証**。WindowsネイティブEXEの前回受入PASSは、旧版の実績。新修正を利用するには最新ソースをビルドし直す必要がある。
+
 ## Windows native 1-action test (isolated, no model load)
 
 `RUN_WINDOWS_NATIVE_QA.bat` performs a **non-interactive, isolated** Windows build of the actual one-directory EXE, downloads only the pinned B143 file and verifies its SHA, launches the EXE to compile/render 917 real source voxels, then exercises the packaged EXE through a deliberately marked **test-double** HTTP server on an ephemeral loopback port. The test double does not occupy Ollama's 11434, and its PASS is never recorded as genuine model inference. Output and a ZIP of the EXE live under `%LOCALAPPDATA%\MABStudio\diagnostics\windows-native-YYYYMMDD-HHMMSS`. The original Studio source and prior `dist` are untouched. The script creates an isolated project virtual environment to build; it may download PyInstaller, SocketBE and a fixed GitHub B143 module. **It does not start a real model, connect to Minecraft, or write to any world.**
