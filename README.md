@@ -226,6 +226,17 @@ Tk GUI and a **TEST DOUBLE**. It does not test a genuine language model.
 When the model is already loaded and you have selected it in the Studio GUI,
 double-click `RUN_REAL_MODEL_CHECK.bat` from the source release folder.
 
+**Loaded-model ID resolution (Windows diagnostic):** The GUI's `/v1/models` picker
+may return an installed/JIT model ID, whereas `/api/v1/models` distinguishes
+currently loaded model **instance** IDs. The real-model check only uses loaded
+LLM instances: it matches the saved key/ID to exactly one loaded instance; if
+there is exactly one loaded LLM but the saved choice is stale, it uses that
+sole instance and records both identifiers in `REAL_MODEL_CHECK.json`.
+With none loaded or multiple ambiguous candidates it stops with a clear error
+and never triggers an automatic model load. This diagnostic fix does **not**
+require rebuilding an already-passed Windows EXE; replace only the PS1 script.
+
+
 The script reads `%LOCALAPPDATA%\MABStudio\preferences.json`, verifies
 that **exactly the selected model is loaded** through read-only provider APIs,
 then finds the latest successful `WINDOWS_NATIVE_QA.json` and verifies its ZIP

@@ -17,7 +17,9 @@ def test_real_check_uses_previously_verified_exe_without_building():
 def test_real_check_does_not_autoload_models_or_touch_world():
     s=(ROOT/'RUN_REAL_MODEL_CHECK.ps1').read_text(encoding='ascii')
     assert '/api/v1/models' in s and '/api/ps' in s
-    assert 'MODEL_NOT_UNIQUELY_LOADED' in s
+    assert 'LM_STUDIO_NO_LOADED_LLM' in s
+    assert 'LM_STUDIO_MULTIPLE_INSTANCES_FOR_SELECTED_MODEL' in s
+    assert 'LM_STUDIO_AMBIGUOUS_LOADED_MODELS' in s
     assert 'OLLAMA_MODEL_NOT_RUNNING' in s
     assert 'Invoke-RestMethod -Method Get' in s
     for forbidden in ('/api/generate', '/api/v1/models/load', '/api/v1/models/unload',
@@ -36,3 +38,29 @@ def test_acceptance_records_inference_seconds_on_failure():
     s=(ROOT/'app/acceptance.py').read_text(encoding='utf-8')
     assert "report['providerRequestSeconds'] = round(time.monotonic() - llm_started, 2)" in s
     assert 'finally:' in s
+
+
+def test_real_check_resolves_loaded_instance_ids_instead_of_saved_picker_ids():
+    s=(ROOT/'RUN_REAL_MODEL_CHECK.ps1').read_text(encoding='ascii')
+    # Native API keys and already-loaded instance IDs are separate identifiers.
+    assert 'EXACT_LOADED_KEY_OR_INSTANCE_ID' in s
+    assert 'ONLY_ONE_ACTUALLY_LOADED_LLM' in s
+    assert "[string]$entry.type -cne 'llm'" in s
+    assert "[string]$instance.id" in s
+    assert '$_.id -ceq $model -or $_.key -ceq $model' in s
+    assert '$loadedCandidates.Count -eq 1' in s
+    assert '+ $inferenceModel +' in s and '--model' in s
+    assert 'savedModel' in s and 'resolvedModel' in s
+    assert 'modelSelectionMethod' in s
+    # No model may be loaded via the diagnostics; the only POST remains in the EXE.
+    assert '/api/v1/models/load' not in s
+    assert 'Invoke-RestMethod -Method Post' not in s
+
+def test_model_check_script_is_ps51_plain_ascii_and_preserves_strict_guards():
+    raw=(ROOT/'RUN_REAL_MODEL_CHECK.ps1').read_bytes()
+    assert raw.isascii() and b'\r\n' in raw
+    assert b'\n' not in raw.replace(b'\r\n', b'')
+    s=raw.decode('ascii')
+    assert 'NO_VERIFIED_EXE_ZIP' in s and 'Get-FileHash -Algorithm SHA256' in s
+    assert 'GENUINE_MODEL_RECEIPT_INCONSISTENT' in s
+    assert '$summary.realInference' in s

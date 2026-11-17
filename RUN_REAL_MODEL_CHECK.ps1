@@ -38,20 +38,57 @@ try {
     $summary.provider = $provider
     $summary.model = $model
     $summary.stage = 'VERIFY_ALREADY_LOADED_MODEL'
+    $inferenceModel = $model
     if ($provider -ceq 'LM Studio') {
+        # /v1/models (the GUI picker) may include downloaded/JIT models.
+        # Native /api/v1/models describes actual loaded instances with separate IDs.
+        # Only pre-existing LLM instances are eligible; never load a model here.
         $catalog = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:1234/api/v1/models' -TimeoutSec 8
-        $loadedFound = @()
-        foreach ($entry in @($catalog.models)) {
-            if ($null -eq $entry) { continue }
-            foreach ($instance in @($entry.loaded_instances)) {
-                if ($null -ne $instance -and (($instance.id -ceq $model) -or ($entry.key -ceq $model))) {
-                    $loadedFound += $instance.id
+        if ($null -eq $catalog -or $null -eq $catalog.models) {
+            throw 'LM_STUDIO_NATIVE_CATALOG_UNAVAILABLE: /api/v1/models did not return a models list.'
+        }
+        $loadedCandidates = @(
+            foreach ($entry in @($catalog.models)) {
+                if ($null -eq $entry -or [string]$entry.type -cne 'llm') { continue }
+                $key = [string]$entry.key
+                foreach ($instance in @($entry.loaded_instances)) {
+                    if ($null -eq $instance) { continue }
+                    $instanceId = [string]$instance.id
+                    if ($instanceId -cnotmatch '^[A-Za-z0-9_.:/-]{1,180}$') { continue }
+                    [pscustomobject]@{ id = $instanceId; key = $key }
                 }
             }
+        )
+        $summary.loadedLlmCount = $loadedCandidates.Count
+        $summary.savedModel = $model
+        $exact = @($loadedCandidates | Where-Object {
+            $_.id -ceq $model -or $_.key -ceq $model
+        })
+        if ($exact.Count -eq 1) {
+            $inferenceModel = [string]$exact[0].id
+            $summary.modelSelectionMethod = 'EXACT_LOADED_KEY_OR_INSTANCE_ID'
+        } elseif ($exact.Count -gt 1) {
+            throw 'LM_STUDIO_MULTIPLE_INSTANCES_FOR_SELECTED_MODEL: unload extras or select a unique instance ID.'
+        } elseif ($loadedCandidates.Count -eq 1) {
+            # The saved GUI ID may differ from the actual loaded instance ID.
+            # One loaded LLM is unambiguous; never select from installed-only models.
+            $inferenceModel = [string]$loadedCandidates[0].id
+            $summary.modelSelectionMethod = 'ONLY_ONE_ACTUALLY_LOADED_LLM'
+            $summary.modelSelectionNote = 'Saved GUI model differed from the sole loaded LLM; no model was loaded or reconfigured.'
+        } elseif ($loadedCandidates.Count -eq 0) {
+            throw 'LM_STUDIO_NO_LOADED_LLM: LM Studio server is running but no LLM instance is loaded. Load the desired model in LM Studio first; picking it in Studio is not enough.'
+        } else {
+            $candidateNames = @($loadedCandidates | Select-Object -First 5 | ForEach-Object {
+                [string]$_.id
+            })
+            $summary.loadedInstanceIds = $candidateNames
+            throw ('LM_STUDIO_AMBIGUOUS_LOADED_MODELS: saved model ' + $model +
+                   ' does not match any loaded instance; loaded IDs: ' + ($candidateNames -join ', ') +
+                   '. Select one of these IDs in MAB Studio (or unload the others).')
         }
-        if (@($loadedFound | Select-Object -Unique).Count -ne 1) {
-            throw 'LM_STUDIO_MODEL_NOT_UNIQUELY_LOADED: load one instance of the selected model first.'
-        }
+        $summary.resolvedModel = $inferenceModel
+        Write-Host ('LM Studio loaded LLM verified: ' + $inferenceModel +
+                    ' (' + $summary.modelSelectionMethod + ')')
     } else {
         $running = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:11434/api/ps' -TimeoutSec 8
         $loadedFound = @($running.models | Where-Object {
@@ -105,7 +142,7 @@ try {
     $requestClock = [System.Diagnostics.Stopwatch]::StartNew()
     # Use acceptance.py's existing Japanese diagnostic brief (no shell Unicode quoting).
     # Model strings were strictly checked above before passing as process arguments.
-    $arguments = '--acceptance --provider "' + $provider + '" --model "' + $model + '" --report "' + $reportPath + '"'
+    $arguments = '--acceptance --provider "' + $provider + '" --model "' + $inferenceModel + '" --report "' + $reportPath + '"'
     $proc = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $extracted -Wait -PassThru
     $requestClock.Stop()
     $summary.elapsedSeconds = [math]::Round($requestClock.Elapsed.TotalSeconds,2)
