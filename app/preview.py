@@ -13,12 +13,15 @@ def shade(color: str, factor: float) -> str:
 
 class VoxelPreview(tk.Canvas):
     LIMIT = 2300
+    DETAIL_LIMITS = {'標準（2,300）': 2300, '精細（8,000）': 8000,
+                     '高精細（15,000）': 15000}
     def __init__(self, master, **kw):
         super().__init__(master, bg='#101b2b', highlightthickness=0, **kw)
         self.scene = None
         self.angle = math.pi * 3 / 4
         self.zoom = 1.0
         self.pressed_at = None
+        self.detail_limit = self.LIMIT
         self.bind('<Configure>', lambda e: self.draw())
         self.bind('<ButtonPress-1>', lambda e: setattr(self, 'pressed_at', (e.x, self.angle)))
         self.bind('<B1-Motion>', self._drag)
@@ -32,6 +35,12 @@ class VoxelPreview(tk.Canvas):
 
     def _wheel(self, e):
         self.zoom = max(.4, min(4.0, self.zoom * (1.12 if e.delta > 0 else .89)))
+        self.draw()
+
+    def set_detail(self, label: str) -> None:
+        if label not in self.DETAIL_LIMITS:
+            raise ValueError('Unknown preview detail level')
+        self.detail_limit = self.DETAIL_LIMITS[label]
         self.draw()
 
     def show(self, scene):
@@ -56,16 +65,17 @@ class VoxelPreview(tk.Canvas):
         bypos = {(p[0],p[1],p[2]):p[3] for p in pts}
         visible = [p for p in pts if any((p[0]+dx,p[1]+dy,p[2]+dz) not in occupied
                    for dx,dy,dz in ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)))]
-        skipped = max(0,len(visible)-self.LIMIT)
+        limit = self.detail_limit
+        skipped = max(0,len(visible)-limit)
         # Decimated preview is explicit, never claimed to show all voxels.
         if skipped:
             priority = {tuple(p) for p in self.scene.get('priorityPositions', [])}
             selected = [p for p in visible if tuple(p[:3]) in priority]
-            if len(selected) >= self.LIMIT:
-                visible = selected[:self.LIMIT]
+            if len(selected) >= limit:
+                visible = selected[:limit]
             else:
                 other = [p for p in visible if tuple(p[:3]) not in priority]
-                quota = self.LIMIT - len(selected)
+                quota = limit - len(selected)
                 stride = math.ceil(len(other)/max(1, quota))
                 visible = selected + other[::stride][:quota]
         b = self.scene['bounds']

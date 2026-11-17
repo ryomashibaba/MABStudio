@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -38,6 +39,7 @@ class Studio(tk.Tk):
         self.terrain_archive = None
         self.terrain_report = None
         self.view_mode = tk.StringVar(value='建築のみ')
+        self.detail_mode = tk.StringVar(value='標準（2,300）')
         self.place_xyz = tk.StringVar(value='0 64 0')
         self.llm_provider = tk.StringVar(value='Ollama')
         self.model = tk.StringVar(value='')
@@ -125,6 +127,10 @@ class Studio(tk.Tk):
         self.view_box = ttk.Combobox(tools,textvariable=self.view_mode, state='readonly', width=17,
                                      values=('建築のみ','変更差分','地形＋建築'))
         self.view_box.pack(side='left',padx=(0,6))
+        detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
+                                  width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
+        detail_box.pack(side='left',padx=(0,6))
+        detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
         self.view_box.bind('<<ComboboxSelected>>', lambda _: self._refresh_view())
         self.restore_btn=ttk.Button(tools,text='前の設計に戻す',command=self.restore_previous,state='disabled')
         self.restore_btn.pack(side='left',padx=(0,6))
@@ -145,10 +151,20 @@ class Studio(tk.Tk):
 
     def _startup(self):
         self._update_engine_label()
+        # First launch: automatically install ONLY the SHA-pinned, code-hash-
+        # verified B143. Failed/offline installs leave the manual retry button.
+        # Do not auto-install moving branches, world adapters or model packages.
         if self.manager.active_path:
-            self.check_update(silent=True)
-        else:
             self.refresh_models()
+            self.after(9000, lambda: self.check_update(silent=True))
+        else:
+            def ready(_):
+                self._invalidate_scene()
+                self._update_engine_label()
+                self.caption.set('安全確認済みB143の初期導入完了。建築を指示できます。')
+                self.refresh_models()
+            self._start('初回起動：固定B143を安全確認して導入中',
+                        lambda: self.manager.install(BASELINE_SHA), ready, quiet=True)
 
     def _periodic_check(self):
         if not self.busy and self.manager.active_path:
@@ -506,7 +522,13 @@ class Studio(tk.Tk):
 
 
 def main():
+    if '--smoke' in sys.argv:
+        # Explicit release-test command.  No Minecraft connection or world
+        # writes; GUI and optional real pinned B143 are checked in isolation.
+        from app.smoke import run_smoke
+        return run_smoke(Studio, sys.argv[1:])
     Studio().mainloop()
+    return 0
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

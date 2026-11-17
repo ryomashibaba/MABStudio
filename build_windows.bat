@@ -6,9 +6,11 @@ py -3 -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --
 where node >nul 2>nul || (echo Node.js is needed for packaged edition & exit /b 1)
 for /f "delims=" %%i in ('where node') do (
   copy /Y "%%i" "dist\MABStudio\node.exe" >nul
-  for %%l in ("%%~dpiLICENSE" "%%~dpiLICENSE.txt") do (
-    if exist %%l copy /Y %%l "dist\MABStudio\NODE_LICENSE.txt" >nul
+  if not exist "%%~dpiLICENSE" (
+    echo Node.js license missing. Distribution cannot proceed.
+    goto :error
   )
+  copy /Y "%%~dpiLICENSE" "dist\MABStudio\NODE_LICENSE.txt" >nul || goto :error
   goto :done
 )
 :done

@@ -1,4 +1,4 @@
-name: Windows app build (manual or push)
+name: Windows GUI + pinned SOURCE release smoke
 on:
   workflow_dispatch:
   push:
@@ -7,9 +7,11 @@ on:
       - 'tests/**'
       - 'build_windows.bat'
       - '.github/workflows/windows-build.yml'
+
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -20,23 +22,52 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Unit tests
+      - name: Fetch and independently hash-check the single reviewed B143 module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = Join-Path $env:RUNNER_TEMP 'mab-b143-verified'
+          $source = Join-Path $engine 'source/ai/b143-building-dsl.mjs'
+          New-Item -ItemType Directory -Force (Split-Path $source -Parent) | Out-Null
+          $commit = 'b0295c2f5012877f57ae218ae791634794de7b52'
+          $url = "https://raw.githubusercontent.com/ryomashibaba/MinecraftAIBuilder/$commit/source/ai/b143-building-dsl.mjs"
+          Invoke-WebRequest -Uri $url -OutFile $source
+          $sha = (Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '537aa9e4a2b4e027f16179ef7a306b604ca4d850713d6de23940667ed2348e16') { throw 'B143_SOURCE_HASH_MISMATCH' }
+          "MAB_B143_VERIFIED_ENGINE=$engine" >> $env:GITHUB_ENV
+      - name: Unit tests including the real pinned B143
         shell: pwsh
         run: |
           python -m pip install pytest
-          python -m pytest -q
-      - name: Build isolated GUI
+          python -m pytest -q -rs
+      - name: Build isolated Windows GUI (bundled Node, no Python requirement)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python -m pip install pyinstaller
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data 'app/engine_bridge.mjs;app' app/main.py
           $nodePath = (Get-Command node).Source
           Copy-Item $nodePath dist/MABStudio/node.exe
           $nodeLicense = Join-Path (Split-Path $nodePath -Parent) 'LICENSE'
-          if (Test-Path $nodeLicense) { Copy-Item $nodeLicense dist/MABStudio/NODE_LICENSE.txt }
-          if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE missing' }
+          if (!(Test-Path $nodeLicense)) { throw 'Node.js license missing: release blocked' }
+          Copy-Item $nodeLicense dist/MABStudio/NODE_LICENSE.txt
+          if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE_MISSING' }
+      - name: Launch real packaged EXE and render 917 verified B143 voxels
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'mab-studio-windows-smoke.json'
+          & ./dist/MABStudio/MABStudio.exe --smoke --smoke-engine $env:MAB_B143_VERIFIED_ENGINE --smoke-report $report
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path $report)) { throw 'PACKAGED_GUI_SMOKE_FAILED' }
+          $status = Get-Content -Raw $report | ConvertFrom-Json
+          if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or $status.worldWrites -ne 0) {
+            throw 'PACKAGED_REAL_B143_OR_GUI_FAILED'
+          }
+          Write-Host "Packed Windows GUI/source smoke: $($status.result), $($status.sourceVoxels) voxels"
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
-          name: MABStudio-Windows-Preview
-          path: dist/MABStudio/**
+          name: MABStudio-Windows-Safe-Preview
+          path: |
+            dist/MABStudio/**
           retention-days: 14

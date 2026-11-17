@@ -31,8 +31,16 @@ MAX_MEMBERS = 5000
 MAX_RESPONSE = 1024 * 1024
 OLLAMA_BASE = "http://127.0.0.1:11434"
 LM_STUDIO_BASE = "http://127.0.0.1:1234"
-# Bypass OS HTTP proxies for model prompts: requests must remain on loopback.
-LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# Only known loopback endpoints may receive user prompts.  urllib's default
+# opener follows HTTP redirects, which could otherwise leak the prompt off-host.
+class _RefuseModelRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise StudioError("ローカルAIが外部へのリダイレクトを要求したため通信を拒否しました")
+
+
+LOCAL_HTTP = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _RefuseModelRedirect()
+)
 # Exact SHA256 of GitHub B143 source at commit b0295c2... (Git blob 3e257f9f...).
 # Source changes require a separately reviewed app release; a GitHub branch move
 # is never permission to execute unreviewed third-party JavaScript on a user's PC.
