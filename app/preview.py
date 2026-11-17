@@ -75,9 +75,52 @@ def greedy_visible_mesh(points, x_face: int, z_face: int) -> list[tuple]:
     return quads
 
 
+def projected_camera(bounds: dict, w: int, h: int, angle: float,
+                     elevation: float, zoom: float = 1.0,
+                     pan_x: float = 0.0, pan_y: float = 0.0):
+    """Auto-fit true SOURCE bounds, independently of voxel detail sampling.
+
+    Pure display transformation; neither creates voxels nor changes SOURCE.
+    Unlike using the longest 3D extent, this fits the actual projected width
+    and height (including tall/narrow buildings) to the available viewport.
+    """
+    if w <= 0 or h <= 0 or not math.isfinite(zoom) or zoom <= 0:
+        raise ValueError('Invalid camera viewport')
+    ca, sa = math.cos(angle), math.sin(angle)
+    sine, cosine = math.sin(elevation), math.cos(elevation)
+    mx = (bounds['minX'] + bounds['maxX'] + 1) / 2
+    my = (bounds['minY'] + bounds['maxY'] + 1) / 2
+    mz = (bounds['minZ'] + bounds['maxZ'] + 1) / 2
+    def raw(x, y, z):
+        a, b = x-mx, z-mz
+        return ca*a-sa*b, sine*(sa*a+ca*b)-cosine*(y-my)
+    corners = [raw(x,y,z) for x in (bounds['minX'], bounds['maxX']+1)
+                          for y in (bounds['minY'], bounds['maxY']+1)
+                          for z in (bounds['minZ'], bounds['maxZ']+1)]
+    left, right = min(p[0] for p in corners), max(p[0] for p in corners)
+    top, bottom = min(p[1] for p in corners), max(p[1] for p in corners)
+    # Reserve space for the visible SOURCE label and camera hint.
+    usable_h = max(1, h-65)
+    scale = min(w*0.86/max(right-left,1e-8),
+                usable_h*0.84/max(bottom-top,1e-8))*zoom
+    cx = w/2 - (left+right)*scale/2 + pan_x
+    cy = 33 + usable_h/2 - (top+bottom)*scale/2 + pan_y
+    def project(x,y,z):
+        xx, yy = raw(x,y,z)
+        return cx+xx*scale, cy+yy*scale
+    return project
+
+
+def scene_bounds(points: list) -> dict:
+    """True visible bounds, so a section view fits the exposed lower floors."""
+    return {'minX':min(p[0] for p in points), 'maxX':max(p[0] for p in points),
+            'minY':min(p[1] for p in points), 'maxY':max(p[1] for p in points),
+            'minZ':min(p[2] for p in points), 'maxZ':max(p[2] for p in points)}
+
+
 class VoxelPreview(tk.Canvas):
     LIMIT = 2300
-    DETAIL_LIMITS = {'標準（2,300）': 2300, '精細（8,000）': 8000,
+    DETAIL_LIMITS = {'なめらか（全体）': None, '標準（2,300）': 2300, '精細（8,000）': 8000,
                      '高精細（15,000）': 15000,
                      '全体メッシュ（境界面）': None}
     def __init__(self, master, **kw):
@@ -85,24 +128,57 @@ class VoxelPreview(tk.Canvas):
         self.scene = None
         self.angle = math.pi * 3 / 4
         self.zoom = 1.0
+        self.elevation = math.radians(27)
+        self.pan_x = self.pan_y = 0.0
         self.pressed_at = None
+        self.pan_pressed = None
+        self.show_edges = False
         self.detail_limit = self.LIMIT
-        self.mesh_mode = False
+        self.mesh_mode = True
         self.cut_level = None  # Visual-only Y upper bound; never modifies the design
         self._mesh_cache = {}
+        self.on_scene_changed = None
         self.bind('<Configure>', lambda e: self.draw())
-        self.bind('<ButtonPress-1>', lambda e: setattr(self, 'pressed_at', (e.x, self.angle)))
+        self.bind('<ButtonPress-1>', lambda e: setattr(self, 'pressed_at', (e.x, e.y, self.angle, self.elevation)))
         self.bind('<B1-Motion>', self._drag)
         self.bind('<MouseWheel>', self._wheel)
+        self.bind('<Button-4>', lambda e: self._zoom_by(1.12))
+        self.bind('<Button-5>', lambda e: self._zoom_by(1/1.12))
+        self.bind('<ButtonPress-2>', lambda e: setattr(self,'pan_pressed',(e.x,e.y,self.pan_x,self.pan_y)))
+        self.bind('<B2-Motion>', self._pan)
+        self.bind('<Double-Button-1>', lambda _: self.reset_view())
 
     def _drag(self, e):
         if self.pressed_at:
-            x, angle = self.pressed_at
+            x, y, angle, elevation = self.pressed_at
             self.angle = angle + (e.x-x)*0.009
+            self.elevation = max(math.radians(12), min(math.radians(74),
+                                  elevation + (e.y-y)*0.006))
             self.draw()
 
+    def _pan(self, e):
+        if self.pan_pressed:
+            x,y,px,py = self.pan_pressed
+            self.pan_x, self.pan_y = px + e.x - x, py + e.y - y
+            self.draw()
+
+    def _zoom_by(self, factor):
+        self.zoom = max(.25, min(6.0, self.zoom*factor))
+        self.draw()
+
     def _wheel(self, e):
-        self.zoom = max(.4, min(4.0, self.zoom * (1.12 if e.delta > 0 else .89)))
+        self._zoom_by(1.12 if e.delta > 0 else 1/1.12)
+
+    def reset_view(self):
+        """Fit SOURCE geometry in the viewport; no SOURCE edits."""
+        self.zoom = 1.0
+        self.angle = math.pi*3/4
+        self.elevation = math.radians(27)
+        self.pan_x = self.pan_y = 0.0
+        self.draw()
+
+    def set_edges(self, show: bool) -> None:
+        self.show_edges = bool(show)
         self.draw()
 
     def set_detail(self, label: str) -> None:
@@ -121,26 +197,23 @@ class VoxelPreview(tk.Canvas):
         self.cut_level = max_y
         self._mesh_cache.clear()
         self.draw()
+        if callable(self.on_scene_changed):
+            self.on_scene_changed()
 
     def show(self, scene):
         self.scene = scene
         self._mesh_cache.clear()
         self.zoom = 1.0
+        self.pan_x = self.pan_y = 0.0
         self.draw()
+        if callable(self.on_scene_changed):
+            self.on_scene_changed()
 
     def _draw_mesh(self, points, w, h, palette):
-        b = self.scene['bounds']
-        mx=(b['minX']+b['maxX']+1)/2
-        mz=(b['minZ']+b['maxZ']+1)/2
-        my=(b['minY']+b['maxY']+1)/2
-        extent=max(b['maxX']-b['minX']+1,b['maxZ']-b['minZ']+1,
-                   (b['maxY']-b['minY']+1)*1.2,8)
-        scale=min(w,h)*.62/extent*self.zoom
-        ca,sa=math.cos(self.angle),math.sin(self.angle)
-        def proj(x,y,z):
-            a,bb=x-mx,z-mz
-            return (w*.5+(ca*a-sa*bb)*scale,
-                    h*.52+(.42*(sa*a+ca*bb)-(y-my)*.85)*scale)
+        proj=projected_camera(scene_bounds(points), w, h,
+                              self.angle, self.elevation, self.zoom,
+                              self.pan_x, self.pan_y)
+        ca, sa = math.cos(self.angle), math.sin(self.angle)
         sx=1 if sa>0 else -1
         sz=1 if ca>0 else -1
         key=(sx,sz)
@@ -164,7 +237,9 @@ class VoxelPreview(tk.Canvas):
             coords=[]
             for xyz in corners:
                 coords.extend(proj(*xyz))
-            self.create_polygon(*coords,fill=shade(color,light),outline='#162335',width=.3)
+            self.create_polygon(*coords,fill=shade(color,light),
+                                outline='#243c55' if self.show_edges else '',
+                                width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
         label+=f' | 境界面メッシュ {len(quads):,}/{total_faces:,}面'
         if self.cut_level is not None:
@@ -173,7 +248,7 @@ class VoxelPreview(tk.Canvas):
             label+='（描画上限。全形状は表示されていません）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
         self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転 / ホイール：拡大',fill='#91a4c4',anchor='e')
+        self.create_text(w-12,h-10,text='ドラッグ：回転・上下 / ホイール：拡大 / ダブルクリック：全体表示',fill='#91a4c4',anchor='e')
 
     def draw(self):
         self.delete('all')
@@ -211,17 +286,10 @@ class VoxelPreview(tk.Canvas):
                 quota = limit - len(selected)
                 stride = math.ceil(len(other)/max(1, quota))
                 visible = selected + other[::stride][:quota]
-        b = self.scene['bounds']
-        mx=(b['minX']+b['maxX']+1)/2
-        mz=(b['minZ']+b['maxZ']+1)/2
-        my=(b['minY']+b['maxY']+1)/2
-        extent=max(b['maxX']-b['minX']+1,b['maxZ']-b['minZ']+1,(b['maxY']-b['minY']+1)*1.2,8)
-        scale=min(w, h)*.62/extent*self.zoom
+        proj=projected_camera(scene_bounds(pts), w, h,
+                              self.angle, self.elevation, self.zoom,
+                              self.pan_x, self.pan_y)
         ca, sa = math.cos(self.angle), math.sin(self.angle)
-        def proj(x,y,z):
-            a,b = x-mx,z-mz
-            return (w*.5+(ca*a-sa*b)*scale,
-                    h*.52+(.42*(sa*a+ca*b)-(y-my)*.85)*scale)
         def depth(p):
             x,y,z=p[:3]
             return sa*x+ca*z-0.1*y
@@ -244,7 +312,9 @@ class VoxelPreview(tk.Canvas):
             for corners,light in faces:
                 coords=[]
                 for xyz in corners: coords.extend(proj(*xyz))
-                self.create_polygon(*coords,fill=shade(color,light),outline='#162335',width=.3)
+                self.create_polygon(*coords,fill=shade(color,light),
+                                    outline='#243c55' if self.show_edges else '',
+                                    width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}表示セル'
         if self.cut_level is not None:
             label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
@@ -252,4 +322,4 @@ class VoxelPreview(tk.Canvas):
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
         self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転 / ホイール：拡大',fill='#91a4c4',anchor='e')
+        self.create_text(w-12,h-10,text='ドラッグ：回転・上下 / ホイール：拡大 / ダブルクリック：全体表示',fill='#91a4c4',anchor='e')

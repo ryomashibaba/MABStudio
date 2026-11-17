@@ -16,6 +16,7 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
+from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
 from app.diagnostics import check_local_setup, readiness_text
@@ -27,6 +28,7 @@ from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_sc
 
 class Studio(tk.Tk):
     def __init__(self):
+        enable_windows_dpi_awareness()
         super().__init__()
         self.title('MAB Studio — Minecraft Education 建築AI（安全プレビュー）')
         self.geometry('1210x880')
@@ -50,7 +52,7 @@ class Studio(tk.Tk):
         self.terrain_archive = None
         self.terrain_report = None
         self.view_mode = tk.StringVar(value='建築のみ')
-        self.detail_mode = tk.StringVar(value='標準（2,300）')
+        self.detail_mode = tk.StringVar(value='なめらか（全体）')
         self.section_enabled = tk.BooleanVar(value=False)
         self.section_level = tk.IntVar(value=0)
         self.place_xyz = tk.StringVar(value='0 64 0')
@@ -85,6 +87,47 @@ class Studio(tk.Tk):
                 setattr(self,attr,None)
         gc.collect()
         super().destroy()
+
+    def open_large_preview(self):
+        """Temporary viewer of verified current scene; no model or world writes."""
+        if self._large_preview_window is not None:
+            try:
+                self._large_preview_window.lift()
+                return
+            except tk.TclError:
+                pass
+        popup = tk.Toplevel(self)
+        popup.title('MAB Studio — 3Dプレビュー')
+        popup.geometry('1320x900')
+        popup.minsize(700, 500)
+        frame = ttk.Frame(popup, padding=10)
+        frame.pack(fill='both', expand=True)
+        tools = ttk.Frame(frame)
+        tools.pack(fill='x', pady=(0, 7))
+        ttk.Label(tools, text='3Dプレビュー（表示のみ）').pack(side='left')
+        ttk.Button(tools, text='全体表示', command=lambda: viewer.reset_view()).pack(side='right')
+        viewer = VoxelPreview(frame)
+        viewer.pack(fill='both', expand=True)
+        viewer.set_detail(self.detail_mode.get())
+        viewer.show(self.preview.scene)
+        self._large_preview_window = popup
+        self._large_preview = viewer
+        def close():
+            self._large_preview = None
+            self._large_preview_window = None
+            popup.destroy()
+        popup.protocol('WM_DELETE_WINDOW', close)
+
+    def _sync_large_preview(self):
+        viewer = self._large_preview
+        if viewer is None:
+            return
+        try:
+            viewer.show(self.preview.scene)
+            viewer.set_cut_level(self.preview.cut_level)
+        except tk.TclError:
+            self._large_preview = None
+            self._large_preview_window = None
 
     def _make_ui(self):
         """Creation-first desktop layout. Technical controls live in a separate window."""
@@ -196,6 +239,8 @@ class Studio(tk.Tk):
         top = ttk.Frame(right, style='Panel.TFrame')
         top.pack(fill='x', pady=(0, 10))
         ttk.Label(top, text='3Dプレビュー', style='Section.TLabel').pack(side='left')
+        ttk.Button(top, text='3Dを大きく表示', command=self.open_large_preview,
+                   style='Quiet.TButton').pack(side='right', padx=(7, 0))
         self.export_btn = ttk.Button(top, text='設計を保存', command=self.export_design,
                                      style='Quiet.TButton', state='disabled')
         self.export_btn.pack(side='right', padx=(6, 0))
@@ -212,6 +257,8 @@ class Studio(tk.Tk):
         detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
                                    width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
         detail_box.pack(side='left')
+        ttk.Button(tools, text='全体表示', command=lambda: self.preview.reset_view(),
+                   style='Quiet.TButton').pack(side='left', padx=(8, 0))
         detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
         ttk.Label(tools, text='SOURCE検証済み・施工なし', style='Muted.TLabel').pack(side='right')
 
@@ -226,6 +273,9 @@ class Studio(tk.Tk):
         self.reject_draft_btn.pack(side='left')
         self._reviewbar_visible = False
         self.preview = VoxelPreview(right)
+        self._large_preview_window = None
+        self._large_preview = None
+        self.preview.on_scene_changed = self._sync_large_preview
         self.preview.pack(fill='both', expand=True)
         sectionbar = ttk.Frame(right, style='Panel.TFrame')
         sectionbar.pack(fill='x', pady=(9, 3))

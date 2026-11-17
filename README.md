@@ -329,3 +329,11 @@ On Windows, extract this source ZIP to a new folder and run
 Do not rerun `RUN_WINDOWS_NATIVE_QA.bat`; the prebuilt EXE is not patched by
 this source-only hotfix. A passing SOURCE/GUI acceptance is still not proof of
 architecture aesthetics, user-intent fidelity or Minecraft construction.
+
+### Display clarity / source-only launch
+
+Start **`RUN_STUDIO_SOURCE.bat`** to run the current Python/Tk GUI code without rebuilding the Windows executable or accidentally launching an earlier packaged `dist/MABStudio/MABStudio.exe`. It does not contact any Minecraft world on startup. Windows Python and the pinned local MAB engine are still required.
+
+The new default `なめらか（全体）` preview draws the visible boundaries of the same SOURCE cells with merged coplanar faces, without per-block grid lines. It auto-fits projected bounds, supports mouse drag for yaw/elevation and wheel zoom, and offers `全体表示` and an independent `3Dを大きく表示` window. The old voxel-detail views remain selectable. A Windows DPI-awareness request is made before Tk startup to reduce OS bitmap scaling; native Windows visual quality has not yet been verified.
+
+These settings affect **display only**. They cannot improve the architecture of the model's generated building or authorize Minecraft construction. Architectural quality belongs to the upstream MAB research workflow.
