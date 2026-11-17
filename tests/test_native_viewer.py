@@ -173,3 +173,31 @@ def test_native_popup_uses_same_renderer_and_inherits_camera(studio):
     assert app.history.head()['revisionId']==initial
     app._large_preview_window.destroy()
     app._large_preview = app._large_preview_window = None
+
+
+def test_material_boundaries_include_partial_edges_inside_merged_faces():
+    """A small contrasting square inside a large surface has four real edges.
+
+    Greedy rectangles may have T junctions, so comparing only identical merged
+    quad endpoints would miss some or all of these exposed material seams.
+    """
+    from app.native_viewer import material_boundary_segments
+    cells = [[x, 0, z, int(x == 1 and z == 1)]
+             for x in range(4) for z in range(4)]
+    before = copy.deepcopy(cells)
+    boundaries = material_boundary_segments(cells)
+    assert len([item for item in boundaries if item[2] == (0, 1, 0)]) == 4
+    assert len([item for item in boundaries if item[2] == (0, -1, 0)]) == 4
+    assert len(boundaries) == 8
+    assert cells == before
+    assert material_boundary_segments([[x, 0, z, 0]
+                                      for x in range(4) for z in range(4)]) == []
+
+
+def test_extended_native_qa_fixture_is_pure_synthetic_and_exact_size():
+    from app.native_selfcheck import _extended_scene
+    scene = _extended_scene()
+    assert len(scene['primitives']) == 3128
+    assert len({(x,y,z) for x,y,z,_ in scene['primitives']}) == 3128
+    assert len(scene['previewPalette']) == 11
+    assert not any(k in scene for k in ('model', 'design', 'world', 'credentials'))

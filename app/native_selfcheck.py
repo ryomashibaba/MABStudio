@@ -7,13 +7,45 @@ Windows release QA; it must not be represented as actual user-model acceptance.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
 from pathlib import Path
 
 
-def inspect_native_viewer() -> dict:
+def _image_signature(widget) -> str:
+    """Hash sparse *rendered* framebuffer pixels, not the existence of a Tk image.
+
+    A frozen EXE can initialize VTK and create a PhotoImage while its GPU
+    displays only a constant blank frame. Palette-change comparisons should
+    catch that false positive, without exporting screenshots or SOURCE data.
+    """
+    from vtkmodules.util.numpy_support import vtk_to_numpy
+    w, h = widget._rendered_size
+    if w < 100 or h < 100 or widget._photo is None:
+        raise RuntimeError('NATIVE_3D_FRAMEBUFFER_NOT_PRESENT')
+    scalars = widget._capture.GetOutput().GetPointData().GetScalars()
+    if scalars is None or scalars.GetNumberOfTuples() != w*h:
+        raise RuntimeError('NATIVE_3D_FRAMEBUFFER_PIXELS_MISSING')
+    pixels = vtk_to_numpy(scalars).reshape(h, w, 3)
+    sample = pixels[::max(1, h//64), ::max(1, w//64), :]
+    return hashlib.sha256(sample.tobytes()).hexdigest()
+
+
+def _extended_scene() -> dict:
+    """Exactly 3,128 synthetic SOURCE-shaped cells; never user data/world data."""
+    voxels = [[x, y, z, (x+2*y+3*z) % 11] for x in range(16)
+              for y in range(12) for z in range(16)]
+    voxels += [[x, 12, z, (x+z) % 11] for x in range(4, 12)
+               for z in range(4, 11)]
+    return {'primitives': voxels,
+            'previewPalette': ['#b9a28b','#d4d9df','#5689a7','#d1a56e',
+                               '#6a9b8c','#d7c37d','#b47673','#67798d',
+                               '#b2b6bf','#806f9e','#72875e']}
+
+
+def inspect_native_viewer(*, extended: bool = False) -> dict:
     import tkinter as tk
     from app.release_runtime import verify_packaged_runtime
     # A packaged EXE must pass its private runtime audit before 3D is certified.
@@ -41,6 +73,7 @@ def inspect_native_viewer() -> dict:
         widget.draw()
         if widget._visible_count != 64 or widget._photo is None:
             raise RuntimeError('NATIVE_3D_RENDER_NOT_VISIBLE')
+        first_image = _image_signature(widget)
         size = widget._rendered_size
         if size[0] < 100 or size[1] < 100:
             raise RuntimeError('NATIVE_3D_FRAMEBUFFER_TOO_SMALL')
@@ -54,9 +87,40 @@ def inspect_native_viewer() -> dict:
         widget.set_cut_level(None)
         if widget._visible_count != 64:
             raise RuntimeError('NATIVE_3D_SECTION_RESTORE_FAILED')
+        # Change only colors, not geometry, camera or framebuffer size.
+        # The pixels must change; a blank/unchanging EXE cannot claim render PASS.
+        altered = {'primitives': voxels, 'previewPalette': ['#d36b49','#f4d85d']}
+        widget.show(altered)
+        widget.draw()
+        if _image_signature(widget) == first_image:
+            raise RuntimeError('NATIVE_3D_FRAMEBUFFER_UNCHANGED_AFTER_PALETTE')
+        stress = None
+        if extended:
+            large = _extended_scene()
+            widget.show(large)
+            widget.draw()
+            if widget._visible_count != 3128:
+                raise RuntimeError('NATIVE_3D_EXTENDED_SCENE_COUNT')
+            all_image = _image_signature(widget)
+            for direction in ('正面', '右側', '上面', '斜め'):
+                widget.set_view(direction)
+                if not _image_signature(widget):
+                    raise RuntimeError('NATIVE_3D_EXTENDED_CAMERA')
+            widget.set_cut_level(4)
+            widget.draw()
+            if widget._visible_count != 1280 or _image_signature(widget) == all_image:
+                raise RuntimeError('NATIVE_3D_EXTENDED_SECTION_PIXELS')
+            widget.set_cut_level(None)
+            if widget._visible_count != 3128:
+                raise RuntimeError('NATIVE_3D_EXTENDED_SECTION_RESTORE')
+            stress = {'cells': 3128, 'paletteEntries': 11,
+                      'views': 4, 'sectionCells': 1280,
+                      'pixelChangeVerified': True,
+                      'renderTimings': widget.render_statistics()}
         return {'result': 'PASS_NATIVE_READONLY_SELF_CHECK',
                 'renderer': 'VTK_OFFSCREEN_TK', 'source': 'SYNTHETIC_IN_MEMORY',
                 'cells': 64, 'views': 4, 'framebuffer': list(size),
+                'paletteChangePixelsVerified': True, 'extendedScene': stress,
                 'elapsedSeconds': round(time.monotonic()-started, 3),
                 'packagedRuntimeVerified': runtime['packagedRuntimeVerified'],
                 'runtimeMode': runtime['mode'],
@@ -72,9 +136,10 @@ def inspect_native_viewer() -> dict:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description='Read-only embedded native 3D smoke')
     p.add_argument('--report', type=Path)
+    p.add_argument('--extended', action='store_true', help='Render 3,128 synthetic cells as well')
     args = p.parse_args(argv)
     try:
-        result = inspect_native_viewer()
+        result = inspect_native_viewer(extended=args.extended)
         status = 0
     except Exception as exc:
         result = {'result': 'FAIL_NATIVE_READONLY_SELF_CHECK',

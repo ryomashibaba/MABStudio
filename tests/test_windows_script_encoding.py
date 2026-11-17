@@ -44,3 +44,17 @@ def test_education_runtime_is_only_pinned_readonly_dependency():
     assert '--ignore-scripts' in batch
     assert '--self-test' in batch
     assert 'npm install -g' not in batch
+
+
+def test_windows_packaged_native_qa_checks_real_pixels_and_large_synthetic_scene():
+    native = (ROOT / 'app/native_selfcheck.py').read_text(encoding='utf-8')
+    workflow = (ROOT / '.github/workflows/windows-build.yml').read_text(encoding='utf-8')
+    qa = (ROOT / 'RUN_WINDOWS_NATIVE_QA.ps1').read_text(encoding='utf-8-sig')
+    assert '_image_signature' in native
+    assert 'NATIVE_3D_FRAMEBUFFER_UNCHANGED_AFTER_PALETTE' in native
+    for script in (workflow, qa):
+        assert "'--extended'" in script
+        assert 'extendedScene.cells -ne 3128' in script
+        assert 'paletteChangePixelsVerified' in script
+        assert 'WaitForExit(120000)' in script
+        assert 'Stop-Process' in script

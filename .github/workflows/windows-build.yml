@@ -65,7 +65,7 @@ jobs:
           python -m app.native_selfcheck --report "$env:RUNNER_TEMP/mab-native-smoke.json"
           if ($LASTEXITCODE -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_FAILED' }
           $check = Get-Content -Raw "$env:RUNNER_TEMP/mab-native-smoke.json" | ConvertFrom-Json
-          if ($check.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or $check.worldWrites -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_INVALID' }
+          if ($check.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or !$check.paletteChangePixelsVerified -or $check.worldWrites -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_INVALID' }
       - name: Build isolated Windows GUI (bundled Node, native 3D, no Python requirement)
         shell: pwsh
         run: |
@@ -87,13 +87,22 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $env:RUNNER_TEMP 'mab-exe-native-render.json'
           $exePath = (Resolve-Path './dist/MABStudio/MABStudio.exe').Path
-          $args = @('--native-selfcheck', '--report', ('"'+$report+'"'))
-          $proc = Start-Process -FilePath $exePath -ArgumentList $args -Wait -PassThru
+          $args = @('--native-selfcheck', '--extended', '--report', ('"'+$report+'"'))
+          $proc = Start-Process -FilePath $exePath -ArgumentList $args -PassThru
+          if (!$proc.WaitForExit(120000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw 'PACKAGED_NATIVE_RENDER_TIMEOUT'
+          }
           if ($proc.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_NATIVE_RENDER_FAILED' }
           $check = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
           if ($check.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
               !$check.packagedRuntimeVerified -or $check.runtimeMode -ne 'PACKAGED_ONEDIR' -or
-              $check.cells -ne 64 -or $check.renderTimings.samples -lt 4 -or
+              $check.cells -ne 64 -or !$check.paletteChangePixelsVerified -or
+              $check.extendedScene.cells -ne 3128 -or
+              $check.extendedScene.paletteEntries -ne 11 -or
+              !$check.extendedScene.pixelChangeVerified -or
+              $check.extendedScene.renderTimings.materialBoundaryEdges -lt 1 -or
+              $check.renderTimings.samples -lt 10 -or
               $check.worldContacts -ne 0 -or $check.worldWrites -ne 0) {
             throw 'PACKAGED_NATIVE_RENDER_EVIDENCE_INVALID'
           }
@@ -105,7 +114,11 @@ jobs:
           $report = Join-Path $env:RUNNER_TEMP 'mab-studio-windows-smoke.json'
           $exePath = (Resolve-Path './dist/MABStudio/MABStudio.exe').Path
           $smokeArgs = @('--smoke','--smoke-engine', ('"'+$env:MAB_B143_VERIFIED_ENGINE+'"'), '--smoke-report', ('"'+$report+'"'))
-          $smokeProcess = Start-Process -FilePath $exePath -ArgumentList $smokeArgs -Wait -PassThru
+          $smokeProcess = Start-Process -FilePath $exePath -ArgumentList $smokeArgs -PassThru
+          if (!$smokeProcess.WaitForExit(120000)) {
+            Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+            throw 'PACKAGED_GUI_SMOKE_TIMEOUT'
+          }
           if ($smokeProcess.ExitCode -ne 0 -or !(Test-Path $report)) { throw 'PACKAGED_GUI_SMOKE_FAILED' }
           $status = Get-Content -Raw $report | ConvertFrom-Json
           if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or $status.worldWrites -ne 0) {
@@ -130,7 +143,11 @@ jobs:
             $port = (Get-Content -Raw $fixtureReady | ConvertFrom-Json).port
             if ($port -lt 1 -or $port -gt 65535) { throw 'BAD_FIXTURE_PORT' }
             $acceptArgs = @('--acceptance','--test-double','--fixture-port',[string]$port, '--provider','Ollama', '--model','CI_TEST_DOUBLE', '--engine', ('"'+$env:MAB_B143_VERIFIED_ENGINE+'"'), '--report', ('"'+$report+'"'))
-            $acceptProcess = Start-Process -FilePath $exePath -ArgumentList $acceptArgs -Wait -PassThru
+            $acceptProcess = Start-Process -FilePath $exePath -ArgumentList $acceptArgs -PassThru
+            if (!$acceptProcess.WaitForExit(120000)) {
+              Stop-Process -Id $acceptProcess.Id -Force -ErrorAction SilentlyContinue
+              throw 'PACKAGED_ACCEPTANCE_TIMEOUT'
+            }
             if ($acceptProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_ACCEPTANCE_FAILED' }
             $result = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
             if ($result.outcome -ne 'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' -or !$result.testDoubleUsed -or $result.actualProviderRequestAttempted -or !$result.testDoubleRequestAttempted -or !$result.sourceValid -or

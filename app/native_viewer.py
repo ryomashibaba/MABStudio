@@ -101,6 +101,47 @@ def exposed_surfaces(voxels: list[list[int]], max_quads: int = 250_000) -> list[
     return result
 
 
+
+def material_boundary_segments(voxels: list[list[int]]) -> list[tuple]:
+    """Exact SOURCE material borders on coplanar *exposed* unit faces.
+
+    Merged quads may meet only along part of an edge (T junction); comparing
+    full rectangle edges silently loses these borders. Use unit face lattice
+    coordinates to preserve boundaries without adding any Minecraft blocks.
+    Returns (start_xyz, end_xyz, face_normal) for each unique coplanar border.
+    """
+    occupied = {(x, y, z): mat for x, y, z, mat in voxels}
+    if len(occupied) != len(voxels):
+        raise NativeViewerError('NATIVE_DUPLICATE_CELL')
+    faces = {}
+    for (x, y, z), material in occupied.items():
+        for axis in range(3):
+            for sign in (-1, 1):
+                neighbor = [x, y, z]
+                neighbor[axis] += sign
+                if tuple(neighbor) in occupied:
+                    continue
+                u, v = ((y, z), (x, z), (x, y))[axis]
+                plane = (x, y, z)[axis] + (sign > 0)
+                faces[(axis, sign, plane, u, v)] = material
+    segments = []
+    for (axis, sign, plane, u, v), material in faces.items():
+        normal = tuple(sign if i == axis else 0 for i in range(3))
+        for du, dv in ((1, 0), (0, 1)):
+            if faces.get((axis, sign, plane, u+du, v+dv), material) == material:
+                continue
+            if du:
+                a, b = (u+1, v), (u+1, v+1)
+            else:
+                a, b = (u, v+1), (u+1, v+1)
+            def xyz(uv):
+                return ((plane, uv[0], uv[1]),
+                        (uv[0], plane, uv[1]),
+                        (uv[0], uv[1], plane))[axis]
+            segments.append((xyz(a), xyz(b), normal))
+    return segments
+
+
 def native_mesh_scene(scene: dict, cut_level: int | None = None):
     """Enforce inert, bounded display input before any rendering operation."""
     validated = compact_display_data(scene, cut_level)
@@ -350,11 +391,11 @@ class NativeVoxelPreview(tk.Frame):
         self._bounds = (min(v[0] for v in visible), max(v[0] for v in visible)+1,
                         min(v[1] for v in visible), max(v[1] for v in visible)+1,
                         min(v[2] for v in visible), max(v[2] for v in visible)+1)
-        self._add_mesh(faces, data['palette'])
+        self._add_mesh(faces, data['palette'], visible)
         self._add_floor_grid()
         self._schedule(40)
 
-    def _add_mesh(self, faces, palette):
+    def _add_mesh(self, faces, palette, visible):
         v = self._vtk
         points = v['vtkPoints']()
         poly_cells = v['vtkCellArray']()
@@ -366,8 +407,6 @@ class NativeVoxelPreview(tk.Frame):
         ox, oy, oz = (b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2
         edge_points = v['vtkPoints']()
         edge_cells = v['vtkCellArray']()
-        edge_owner = {}
-        material_boundary_edges = set()
         for surf in faces:
             idx = [points.InsertNextPoint(x-ox, y-oy, z-oz) for x,y,z in surf.corners]
             poly_cells.InsertNextCell(4)
@@ -375,20 +414,10 @@ class NativeVoxelPreview(tk.Frame):
                 poly_cells.InsertCellPoint(p)
             color = palette[surf.material] if 0<=surf.material<len(palette) else '#dddddd'
             colors.InsertNextTuple3(*colored_surface(color, surf.normal))
-            # Draw only the merged material boundary edges; no fake geometry.
+            # Edge overlays follow SOURCE-exposed surfaces; no fake geometry.
             corners = surf.corners
             for j in range(4):
                 a, bpt = corners[j], corners[(j+1)%4]
-                identity = tuple(sorted((a, bpt)))
-                if identity in edge_owner:
-                    # Multiple visible planes can meet at the same edge; keep
-                    # material comparison per-plane (not arbitrary first face).
-                    same_plane_mat = edge_owner[identity].get(surf.normal)
-                    if same_plane_mat is not None and same_plane_mat != surf.material:
-                        material_boundary_edges.add((identity, surf.normal))
-                    edge_owner[identity][surf.normal] = surf.material
-                    continue
-                edge_owner[identity] = {surf.normal: surf.material}
                 off = tuple(n*.012 for n in surf.normal)
                 p = edge_points.InsertNextPoint(*(a[i]-(ox,oy,oz)[i]+off[i] for i in range(3)))
                 q = edge_points.InsertNextPoint(*(bpt[i]-(ox,oy,oz)[i]+off[i] for i in range(3)))
@@ -431,13 +460,14 @@ class NativeVoxelPreview(tk.Frame):
         edge_actor.GetProperty().LightingOff()
         self._render.AddActor(edge_actor)
         self._edge_actor = edge_actor
-        # Keep actual material boundaries readable at mid-distance, without
-        # inventing voxel geometry or texture assets. Only SOURCE-exposed edges.
-        self._material_boundary_count = len(material_boundary_edges)
-        if material_boundary_edges:
+        # Exact partial-edge boundaries from exposed SOURCE unit faces.
+        # This also handles T-junctions created by greedy rectangular merging.
+        material_boundaries = material_boundary_segments(visible)
+        self._material_boundary_count = len(material_boundaries)
+        if material_boundaries:
             accent_points = v['vtkPoints']()
             accent_cells = v['vtkCellArray']()
-            for ((a, bpt), normal) in sorted(material_boundary_edges):
+            for a, bpt, normal in material_boundaries:
                 ids = [accent_points.InsertNextPoint(*(
                     point[i]-(ox,oy,oz)[i]+normal[i]*.030 for i in range(3)))
                        for point in (a,bpt)]

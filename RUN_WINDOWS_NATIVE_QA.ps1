@@ -65,29 +65,43 @@ try {
     & $python -m app.native_selfcheck --report $nativeReceiptPath
     if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $nativeReceiptPath)) { throw 'NATIVE_RENDER_QA_FAILED' }
     $nativeReceipt = Get-Content -Raw -LiteralPath $nativeReceiptPath -Encoding UTF8 | ConvertFrom-Json
-    if ($nativeReceipt.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or $nativeReceipt.worldWrites -ne 0) { throw 'NATIVE_RENDER_QA_INCONSISTENT' }
+    if ($nativeReceipt.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
+        !$nativeReceipt.paletteChangePixelsVerified -or $nativeReceipt.worldWrites -ne 0) { throw 'NATIVE_RENDER_QA_INCONSISTENT' }
     $summary.nativeRenderSelfCheck = 'PASS_SYNTHETIC_IN_MEMORY'
     $exe = Join-Path $work 'dist-native\MABStudio\MABStudio.exe'
     if (!(Test-Path -LiteralPath $exe)) { throw 'WINDOWS_EXE_MISSING' }
     $summary.stage = 'PACKAGED_NATIVE_3D_RENDER_QA'
     $packedNative = Join-Path $results 'EXE_NATIVE_3D_RENDER.json'
-    $packedNativeArgs = @('--native-selfcheck','--report',('"'+$packedNative+'"'))
-    $packedNativeProcess = Start-Process -FilePath $exe -ArgumentList $packedNativeArgs -WorkingDirectory $work -Wait -PassThru
+    $packedNativeArgs = @('--native-selfcheck','--extended','--report',('"'+$packedNative+'"'))
+    $packedNativeProcess = Start-Process -FilePath $exe -ArgumentList $packedNativeArgs -WorkingDirectory $work -PassThru
+    if (!$packedNativeProcess.WaitForExit(120000)) {
+        Stop-Process -Id $packedNativeProcess.Id -Force -ErrorAction SilentlyContinue
+        throw 'PACKAGED_NATIVE_3D_RENDER_TIMEOUT'
+    }
     if ($packedNativeProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $packedNative)) {
         throw 'PACKAGED_NATIVE_3D_RENDER_FAILED'
     }
     $packedCheck = Get-Content -Raw -LiteralPath $packedNative -Encoding UTF8 | ConvertFrom-Json
     if ($packedCheck.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
         !$packedCheck.packagedRuntimeVerified -or $packedCheck.runtimeMode -ne 'PACKAGED_ONEDIR' -or
-        $packedCheck.cells -ne 64 -or $packedCheck.renderTimings.samples -lt 4 -or
+        $packedCheck.cells -ne 64 -or !$packedCheck.paletteChangePixelsVerified -or
+        $packedCheck.extendedScene.cells -ne 3128 -or
+        $packedCheck.extendedScene.paletteEntries -ne 11 -or
+        !$packedCheck.extendedScene.pixelChangeVerified -or
+        $packedCheck.extendedScene.renderTimings.materialBoundaryEdges -lt 1 -or
+        $packedCheck.renderTimings.samples -lt 10 -or
         $packedCheck.worldContacts -ne 0 -or $packedCheck.worldWrites -ne 0) {
         throw 'PACKAGED_NATIVE_3D_EVIDENCE_INVALID'
     }
-    $summary.packagedNativeRenderSelfCheck = 'PASS_EXE_SYNTHETIC_64_CELLS'
+    $summary.packagedNativeRenderSelfCheck = 'PASS_EXE_SYNTHETIC_3128_CELLS'
     $summary.stage = 'REAL_WINDOWS_EXE_SMOKE'
     $smoke = Join-Path $results 'EXE_SMOKE.json'
     $smokeArgs = @('--smoke','--smoke-engine',('"'+$engine+'"'),'--smoke-report',('"'+$smoke+'"'))
-    $smokeProcess = Start-Process -FilePath $exe -ArgumentList $smokeArgs -WorkingDirectory $work -Wait -PassThru
+    $smokeProcess = Start-Process -FilePath $exe -ArgumentList $smokeArgs -WorkingDirectory $work -PassThru
+    if (!$smokeProcess.WaitForExit(120000)) {
+        Stop-Process -Id $smokeProcess.Id -Force -ErrorAction SilentlyContinue
+        throw 'PACKAGED_GUI_SMOKE_TIMEOUT'
+    }
     if ($smokeProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $smoke)) { throw 'REAL_WINDOWS_EXE_SMOKE_FAILED' }
     $receipt = Get-Content -Raw -LiteralPath $smoke -Encoding UTF8 | ConvertFrom-Json
     if ($receipt.result -ne 'PASS' -or $receipt.sourceVoxels -ne 917 -or $receipt.worldWrites -ne 0) {
@@ -114,7 +128,11 @@ try {
     $acceptArgs = @('--acceptance','--provider','Ollama','--model','CI_TEST_DOUBLE',
                     '--test-double','--fixture-port',[string]$port,'--engine',('"'+$engine+'"'),
                     '--report',('"'+$report+'"'))
-    $acceptProcess = Start-Process -FilePath $exe -ArgumentList $acceptArgs -WorkingDirectory $work -Wait -PassThru
+    $acceptProcess = Start-Process -FilePath $exe -ArgumentList $acceptArgs -WorkingDirectory $work -PassThru
+    if (!$acceptProcess.WaitForExit(120000)) {
+        Stop-Process -Id $acceptProcess.Id -Force -ErrorAction SilentlyContinue
+        throw 'PACKAGED_ACCEPTANCE_TIMEOUT'
+    }
     if ($acceptProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'EXE_TEST_DOUBLE_ACCEPTANCE_FAILED' }
     $acceptance = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
     if ($acceptance.outcome -ne 'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' -or
