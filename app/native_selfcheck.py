@@ -175,7 +175,8 @@ def main(argv=None) -> int:
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(json.dumps(result, ensure_ascii=False))
+    if sys.stdout is not None:
+        print(json.dumps(result, ensure_ascii=False))
     return status
 
 

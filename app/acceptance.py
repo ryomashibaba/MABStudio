@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import time
+import sys
 
 from app.release_runtime import verify_packaged_runtime
 from app.core import (BASELINE_SHA, EngineManager, ModelTransportError,
@@ -192,13 +193,13 @@ def run_acceptance(argv: list[str]) -> int:
         try:
             def progress(note: str) -> None:
                 # Counts only; never print original instructions or AI response.
-                if ns.console_progress:
+                if ns.console_progress and sys.stdout is not None:
                     now = time.monotonic()
                     if now - progress.last_time >= 8:
                         print('[LOCAL MODEL] ' + note, flush=True)
                         progress.last_time = now
             progress.last_time = llm_started
-            if ns.console_progress:
+            if ns.console_progress and sys.stdout is not None:
                 print('[LOCAL MODEL] One inference started; no automatic retry.', flush=True)
             def metadata_received(receipt: dict) -> None:
                 # Never persist original model text or user prompt.

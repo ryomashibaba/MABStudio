@@ -1,6 +1,9 @@
 ﻿# One-click, isolated native Windows build + packaged EXE SOURCE/GUI test.
 # The only model endpoint exercised is a deliberately marked loopback TEST DOUBLE.
 # It does NOT start Ollama/LM Studio, run genuine inference, or touch Minecraft.
+param(
+    [ValidatePattern('^[0-9a-f]{32}$')][string]$SavedRevisionId = ''
+)
 $ErrorActionPreference = 'Stop'
 $source = $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -25,6 +28,7 @@ $summary = [ordered]@{
     windowsExeSmoke = 'NOT_RUN'
     portableZipNativeSelfCheck = 'NOT_RUN'
     portableZipSourceGui = 'NOT_RUN'
+    savedRevisionNative3D = 'NOT_REQUESTED'
     testDoubleGuiAcceptance = 'NOT_RUN'
 }
 $fixture = $null
@@ -206,6 +210,34 @@ try {
         $pSource.nativeCells -ne 917 -or $pSource.worldWrites -ne 0 -or
         $pSource.worldContacts -ne 0) { throw 'PORTABLE_NATIVE_B143_GUI_EVIDENCE_INVALID' }
     $summary.portableZipSourceGui = 'PASS_EXTRACTED_EXE_PINNED_B143_NATIVE_GUI'
+    if ($SavedRevisionId) {
+        # Optional REAL saved revision (NOT model inference): the exact EXTRACTED
+        # EXE reads the user's immutable SOURCE snapshot without switching head.
+        $summary.stage = 'EXTRACTED_EXE_SAVED_REVISION_NATIVE_3D'
+        $savedPath = Join-Path $results 'SAVED_REVISION_NATIVE_3D.json'
+        $savedArgs = @('--saved-native-selfcheck','--revision-id',$SavedRevisionId,
+                       '--report',('"'+$savedPath+'"'))
+        $savedProcess = Start-Process -FilePath $portableExe -ArgumentList $savedArgs -WorkingDirectory $portable -PassThru
+        if (!$savedProcess.WaitForExit(120000)) {
+            Stop-Process -Id $savedProcess.Id -Force -ErrorAction SilentlyContinue
+            throw 'SAVED_NATIVE_REVISION_TIMEOUT'
+        }
+        if ($savedProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $savedPath)) {
+            throw 'SAVED_NATIVE_REVISION_FAILED'
+        }
+        $saved = Get-Content -Raw -LiteralPath $savedPath -Encoding UTF8 | ConvertFrom-Json
+        if ($saved.result -ne 'PASS_SAVED_REVISION_NATIVE_RENDER_ONLY' -or
+            $saved.revisionId -cne $SavedRevisionId -or !$saved.savedRevisionIntegrityVerified -or
+            !$saved.revisionAndIndexUnchanged -or !$saved.cameraPixelChangeVerified -or
+            !$saved.packagedRuntimeVerified -or $saved.cells -lt 1 -or
+            $saved.modelRequests -ne 0 -or $saved.worldWrites -ne 0 -or
+            $saved.minecraftWorldContacts -ne 0 -or $saved.constructionApproved) {
+            throw 'SAVED_NATIVE_REVISION_EVIDENCE_INVALID'
+        }
+        $summary.savedRevisionNative3D = 'PASS_EXTRACTED_EXE_READONLY_SAVED_REVISION'
+        $summary.savedRevisionCells = $saved.cells
+        $summary.savedRevisionId = $SavedRevisionId
+    }
     # Avoid keeping a second large runtime copy after the evidence is saved.
     Remove-Item -LiteralPath $portable -Recurse -Force
     $summary.outcome = 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY'

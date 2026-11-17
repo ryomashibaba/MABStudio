@@ -1340,6 +1340,10 @@ class Studio(tk.Tk):
 
 
 def main():
+    if '--saved-native-selfcheck' in sys.argv:
+        # Explicit read-only, saved SOURCE native VTK proof. Never switch head.
+        from app.saved_native_selfcheck import main as saved_native_main
+        return saved_native_main([v for v in sys.argv[1:] if v != '--saved-native-selfcheck'])
     if '--native-selfcheck' in sys.argv:
         # Exercise native VTK from INSIDE the actual frozen executable.
         # Synthetic read-only geometry only; never invokes the LLM or Minecraft.
