@@ -75,6 +75,109 @@ def greedy_visible_mesh(points, x_face: int, z_face: int) -> list[tuple]:
     return quads
 
 
+def camera_depth(x: float, y: float, z: float, angle: float, elevation: float) -> float:
+    """Orthographic distance *toward* the viewer (larger means nearer).
+
+    The projection uses horizontal view direction (sin(angle), cos(angle))
+    and an above-ground elevation. Sorting only by X/Z, or subtracting Y,
+    paints some roof/facade surfaces behind objects that are actually farther.
+    """
+    return (math.cos(elevation) * (math.sin(angle) * x + math.cos(angle) * z)
+            + math.sin(elevation) * y)
+
+
+def _three_face_solid_box(quads: list[tuple]) -> bool:
+    """True only when three complete exposed faces form one rectangular box."""
+    if len(quads) != 3:
+        return False
+    all_vertices = [vertex for quad in quads for vertex in quad[0]]
+    low = tuple(min(v[axis] for v in all_vertices) for axis in range(3))
+    high = tuple(max(v[axis] for v in all_vertices) for axis in range(3))
+    covered_axes = set()
+    for corners, _, _, _ in quads:
+        stationary = [axis for axis in range(3)
+                      if len({v[axis] for v in corners}) == 1]
+        if len(stationary) != 1:
+            return False
+        axis = stationary[0]
+        if axis in covered_axes:
+            return False
+        covered_axes.add(axis)
+        if axis == 1 and corners[0][axis] != high[axis]:
+            return False  # Top of the bounding box must be visible.
+        for other_axis in range(3):
+            if other_axis != axis and ({v[other_axis] for v in corners}
+                                       != {low[other_axis], high[other_axis]}):
+                return False
+    return covered_axes == {0, 1, 2}
+
+
+def ordered_mesh_quads(quads: list[tuple], angle: float, elevation: float,
+                       max_quads: int = 15000) -> tuple[list[tuple], str]:
+    """Order visible Canvas faces without hiding a nearer roof behind a wall.
+
+    Large greedy rectangles span different depths and must not be sorted by
+    centroid alone: subdivide into true 1x1 SOURCE face tiles, then draw from
+    far to near. For a solid box, its three faces meet only at edges and may
+    stay merged. Extremely large scenes keep a bounded, explicitly labelled
+    approximate/partial display; nothing changes the SOURCE or stored design.
+
+    Returns (paintable faces, 'exact' | 'coarse' | 'partial').
+    """
+    if max_quads < 1:
+        raise ValueError('Invalid Canvas face budget')
+    dimensions = []
+    for quad in quads:
+        a, b, _, d = quad[0]
+        width = sum(abs(b[i] - a[i]) for i in range(3))
+        height = sum(abs(d[i] - a[i]) for i in range(3))
+        if width < 1 or height < 1 or width * height != quad[3]:
+            raise ValueError('Malformed SOURCE-facing preview rectangle')
+        dimensions.append((quad, width, height))
+
+    if _three_face_solid_box(quads):
+        tiles = list(quads)
+        mode = 'exact'
+    else:
+        step = 1
+        def tile_count(size):
+            return sum(math.ceil(w / size) * math.ceil(h / size)
+                       for _, w, h in dimensions)
+
+        while tile_count(step) > max_quads and step < 1024:
+            step *= 2
+        mode = 'exact' if step == 1 else 'coarse'
+        tiles = []
+        for (corners, material, light, _), width, height in dimensions:
+            a, b, _, d = corners
+            du = tuple((b[i] - a[i]) // width for i in range(3))
+            dv = tuple((d[i] - a[i]) // height for i in range(3))
+            def at(u, v):
+                return tuple(a[i] + u * du[i] + v * dv[i]
+                             for i in range(3))
+            for u in range(0, width, step):
+                u2 = min(width, u + step)
+                for v in range(0, height, step):
+                    v2 = min(height, v + step)
+                    tiles.append(((at(u, v), at(u2, v),
+                                   at(u2, v2), at(u, v2)),
+                                  material, light, (u2 - u) * (v2 - v)))
+
+        if len(tiles) > max_quads:
+            # More isolated faces than the budget: explicitly mark incomplete.
+            tiles.sort(key=lambda q: q[3], reverse=True)
+            tiles = tiles[:max_quads]
+            mode = 'partial'
+
+    # Precompute the camera vector once: this runs on every mouse-drag frame.
+    horizontal = math.cos(elevation)
+    dx = horizontal * math.sin(angle)
+    dy = math.sin(elevation)
+    dz = horizontal * math.cos(angle)
+    tiles.sort(key=lambda q: sum(dx*x + dy*y + dz*z for x, y, z in q[0]))
+    return tiles, mode
+
+
 def projected_camera(bounds: dict, w: int, h: int, angle: float,
                      elevation: float, zoom: float = 1.0,
                      pan_x: float = 0.0, pan_y: float = 0.0):
@@ -221,18 +324,8 @@ class VoxelPreview(tk.Canvas):
             self._mesh_cache[key] = greedy_visible_mesh(points,sx,sz)
         quads=self._mesh_cache[key]
         total_faces=len(quads)
-        # Large scenes are bounded; never describe a sampled rendering as full.
-        render_limit=15000
-        if len(quads)>render_limit:
-            quads=sorted(quads,key=lambda q:q[3],reverse=True)[:render_limit]
-        def depth(q):
-            corners=q[0]
-            x=sum(p[0] for p in corners)/4
-            y=sum(p[1] for p in corners)/4
-            z=sum(p[2] for p in corners)/4
-            return sa*x+ca*z-.1*y
-        quads=sorted(quads,key=depth)
-        for corners,mat,light,area in quads:
+        render_quads, render_mode = ordered_mesh_quads(quads, self.angle, self.elevation)
+        for corners,mat,light,area in render_quads:
             color=palette[mat] if 0<=mat<len(palette) else '#dddddd'
             coords=[]
             for xyz in corners:
@@ -241,11 +334,13 @@ class VoxelPreview(tk.Canvas):
                                 outline='#243c55' if self.show_edges else '',
                                 width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
-        label+=f' | 境界面メッシュ {len(quads):,}/{total_faces:,}面'
+        label+=f' | 境界面メッシュ {total_faces:,}面'
         if self.cut_level is not None:
             label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
-        if total_faces>render_limit:
-            label+='（描画上限。全形状は表示されていません）'
+        if render_mode == 'partial':
+            label+='（描画上限・一部省略。GPUで全体を確認）'
+        elif render_mode == 'coarse':
+            label+='（高速表示・重なりはGPUで確認）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
         self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
         self.create_text(w-12,h-10,text='ドラッグ：回転・上下 / ホイール：拡大 / ダブルクリック：全体表示',fill='#91a4c4',anchor='e')
@@ -292,7 +387,8 @@ class VoxelPreview(tk.Canvas):
         ca, sa = math.cos(self.angle), math.sin(self.angle)
         def depth(p):
             x,y,z=p[:3]
-            return sa*x+ca*z-0.1*y
+            return camera_depth(x+.5, y+.5, z+.5,
+                                self.angle, self.elevation)
         # Draw back-to-front, all exposed top and two camera-facing sides.
         cells=sorted(visible,key=depth)
         sx=1 if sa>0 else -1
