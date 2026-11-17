@@ -506,15 +506,24 @@ class Studio(tk.Tk):
             if sha == self.manager.active_sha:
                 self.pending_sha=None
                 self.status.set('GitHub確認：現在のエンジンは追跡ブランチと同じSHAです。')
+            elif sha != BASELINE_SHA:
+                # A branch moving is not an engine security/compatibility review.
+                # Show the newer commit for awareness, but do not offer to apply
+                # it through the single-file approved B143 installer.
+                self.pending_sha=None
+                self.status.set('MABの新しいコミット '+sha[:12]+'… を検出。Studioで未審査のため導入保留（旧版は継続使用可）。')
             else:
                 self.pending_sha=sha
-                self.status.set('更新候補: '+sha[:12]+'…  検証して更新を押すまで切り替えません。')
+                self.status.set('審査済みB143の更新候補: '+sha[:12]+'…  手動適用まで切り替えません。')
             self._update_engine_label()
         self._start('GitHubの最新コミットを確認中',lambda:branch_sha(target_branch),done,quiet=silent)
 
     def install_pending(self):
         sha=self.pending_sha
         if not sha or sha==self.manager.active_sha:
+            return
+        if sha != BASELINE_SHA:
+            messagebox.showerror('更新保留','未審査のMABコミットは適用できません。')
             return
         self._start('更新候補を隔離導入しSOURCE互換性を検証中',lambda:self.manager.install(sha),
                     lambda r:(setattr(self,'pending_sha',None),self._invalidate_scene(),
@@ -854,6 +863,11 @@ class Studio(tk.Tk):
 
 
 def main():
+    if '--acceptance' in sys.argv:
+        # Explicit model-inference acceptance. Reports evidence to the chosen
+        # path, but does not save a user project or touch Minecraft.
+        from app.acceptance import run_acceptance
+        return run_acceptance(sys.argv[1:])
     if '--smoke' in sys.argv:
         # Explicit release-test command.  No Minecraft connection or world
         # writes; GUI and optional real pinned B143 are checked in isolation.

@@ -6,6 +6,7 @@ on:
       - 'app/**'
       - 'tests/**'
       - 'build_windows.bat'
+      - 'RUN_WINDOWS_ACCEPTANCE.*'
       - '.github/workflows/windows-build.yml'
 
 jobs:
@@ -76,6 +77,34 @@ jobs:
             throw 'PACKAGED_REAL_B143_OR_GUI_FAILED'
           }
           Write-Host "Packed Windows GUI/source smoke: $($status.result), $($status.sourceVoxels) voxels"
+      - name: Packaged EXE end-to-end SOURCE and 3D via explicit localhost TEST DOUBLE (NOT real model)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'mab-windows-acceptance-test-double.json'
+          $fixture = Start-Process -FilePath (Get-Command python).Source -ArgumentList '-m', 'tests.windows_acceptance_fixture' -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            foreach ($attempt in 1..35) {
+              try {
+                $status = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 1
+                if ($status.models[0].name -eq 'CI_TEST_DOUBLE') { $ready = $true; break }
+              } catch { }
+              Start-Sleep -Milliseconds 200
+            }
+            if (!$ready) { throw 'LOCAL_FIXTURE_DID_NOT_START' }
+            & ./dist/MABStudio/MABStudio.exe --acceptance --provider Ollama --model CI_TEST_DOUBLE --engine $env:MAB_B143_VERIFIED_ENGINE --report $report
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_ACCEPTANCE_FAILED' }
+            $result = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
+            if ($result.outcome -ne 'PASS_SOURCE_AND_GUI_ONLY' -or !$result.sourceValid -or
+                !$result.guiRendered -or $result.source.voxelCount -ne 917 -or
+                $result.worldWrites -ne 0 -or $result.minecraftEducationTested) {
+              throw 'PACKAGED_ACCEPTANCE_INCONSISTENT'
+            }
+            Write-Host 'TEST-DOUBLE END-TO-END PASS. Not an actual local LLM test.'
+          } finally {
+            Stop-Process -Id $fixture.Id -Force -ErrorAction SilentlyContinue
+          }
       - uses: actions/upload-artifact@v4
         if: success()
         with:

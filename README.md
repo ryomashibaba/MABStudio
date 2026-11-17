@@ -4,6 +4,14 @@
 
 2026-11-17時点の **Windows向け開発プレビュー**。既存MAB V11研究とは独立。追加課金0円を前提。**Minecraft Educationへの施工は未実装・無効**。
 
+## 最新のWindows初回導入・真正AI受入検証（2026-11-17 追加）
+
+- 最初に使うB143は、**固定コミット `b0295c2f...` の単一 `b143-building-dsl.mjs`** だけを取得し、実バイトのSHA-256 (`537aa9e4...`) と192セルのSOURCE出力を検証して隔離保存する。従来版の保存済み確認済みエンジンは再ダウンロードしない。**最新ブランチの未審査SHAは画面へ通知するだけで導入できない**。原本MABやワールドへの書き込みはない。
+- `RUN_WINDOWS_ACCEPTANCE.bat` をダブルクリックすると、EXEがない場合だけ**明示確認後**に隔離ビルドを実行。ユーザーが起動・ロード済みのOllama／LM StudioとモデルIDを選び、日本語指示を指定して**もう一度明示確認してから**ローカル推論を**1回**実行する。勝手にモデルをロードしない。実行中はPC負荷が高くなる可能性がある。
+- 受入検証の正確な範囲：**実ローカルHTTP応答 → 確認済みMAB B143コンパイル → 同じTkinterプレビューモジュールで3D描画**。成否・モデル・コンパイルセル数・SOURCE SHA・処理段階を `%LOCALAPPDATA%\MABStudio\diagnostics\acceptance\windows-acceptance-*.json` に記録する。**指示文そのもの・モデルが返した建築JSON全文は保存しない**。この検証では設計履歴もMinecraftワールドも書き換えない。
+- 受入PASSは、指定されたローカルサーバーから返った設計がコンパイルされ描画できたことだけを示す。モデルの同一性、未知日本語の意味理解、美しさ、実Educationの歩行・施工は**別途未検証**。GitHub Actionsで行う同経路試験は**固定JSONを返すテストダブル**であり、本物のLLM実証ではない。**このZIPのWindows CIはまだGitHub上で実行していない**。
+- Python/Nodeを既にインストール済みなら、従来どおり `start_windows.bat` でStudio GUIを直接開いて利用できる。`RUN_WINDOWS_ACCEPTANCE.bat` は開発版EXEの一括確認用であり、建築の通常操作に毎回必要なものではない。
+
 ## 何ができたか
 
 - 日本語入力 → ローカル Ollama / LM Studio → B143の本物の `validateDesign / compileDesign / verifyCompiled` → 3D表示（既存v0.2から継承）。

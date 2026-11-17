@@ -30,6 +30,7 @@ MAX_ZIP_BYTES = 60 * 1024 * 1024
 MAX_UNPACK_BYTES = 260 * 1024 * 1024
 MAX_MEMBERS = 5000
 MAX_RESPONSE = 1024 * 1024
+MAX_PINNED_MODULE_BYTES = 256 * 1024
 OLLAMA_BASE = "http://127.0.0.1:11434"
 LM_STUDIO_BASE = "http://127.0.0.1:1234"
 # Only known loopback endpoints may receive user prompts.  urllib's default
@@ -243,6 +244,29 @@ def _safe_extract_zip(zbytes: bytes, target: Path, expected_commit: str | None =
                     shutil.copyfileobj(src, dst, 128 * 1024)
 
 
+def _download_reviewed_b143(sha: str) -> bytes:
+    """Fetch only the one independently approved B143 JS file, not an entire repo.
+
+    The commit AND content hash are pinned. This never tracks a moving branch or
+    silently authorizes a newer MAB engine. Offline use works once installed.
+    """
+    if sha != BASELINE_SHA:
+        raise StudioError("新しいMABコミットはまだStudioの互換性・安全審査対象外です。導入を保留します")
+    url = (f"https://raw.githubusercontent.com/{REPO}/{sha}/"
+           f"{ENGINE_FILE}")
+    req = urllib.request.Request(url, headers={"User-Agent": "MABStudio/0.3"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as res:
+            source = res.read(MAX_PINNED_MODULE_BYTES + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise StudioError("固定B143ソースの取得に失敗しました。接続後に再試行してください") from exc
+    if not source or len(source) > MAX_PINNED_MODULE_BYTES:
+        raise StudioError("固定B143モジュールのサイズが不正です")
+    if hashlib.sha256(source).hexdigest() != APPROVED_B143_SOURCE_SHA256:
+        raise StudioError("取得したB143モジュールのSHA-256が承認済み原本と一致しません")
+    return source
+
+
 class EngineManager:
     def __init__(self, root: Path | None = None):
         self.root = root or user_root()
@@ -290,16 +314,24 @@ class EngineManager:
             staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=self.versions))
             try:
                 if archive is None:
-                    url = f"https://codeload.github.com/{REPO}/zip/{sha}"
-                    req = urllib.request.Request(url, headers={"User-Agent": "MABStudio/0.1"})
-                    with urllib.request.urlopen(req, timeout=45) as r:
-                        archive = r.read(MAX_ZIP_BYTES + 1)
-                if len(archive) > MAX_ZIP_BYTES:
-                    raise StudioError("ダウンロード容量の上限を超えました")
-                _safe_extract_zip(archive, staging, expected_commit=sha)
+                    # The reviewed B143 module has no imports or other source
+                    # dependencies. Downloading the giant repository archive is
+                    # unnecessary for the normal first-run experience.
+                    source = _download_reviewed_b143(sha)
+                    dest = staging / ENGINE_FILE
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(source)
+                    provenance = {"installMethod": "PINNED_SINGLE_MODULE",
+                                  "moduleDownloadSha256": hashlib.sha256(source).hexdigest()}
+                else:
+                    if len(archive) > MAX_ZIP_BYTES:
+                        raise StudioError("ダウンロード容量の上限を超えました")
+                    _safe_extract_zip(archive, staging, expected_commit=sha)
+                    provenance = {"installMethod": "EXPLICIT_ARCHIVE",
+                                  "archiveSha256": hashlib.sha256(archive).hexdigest()}
                 evidence = compatibility_check(staging)
                 atomic_json(staging / ".studio-evidence.json", {"commit": sha,
-                            "archiveSha256": hashlib.sha256(archive).hexdigest(),
+                            **provenance,
                             "engineSha256": hashlib.sha256((staging / ENGINE_FILE).read_bytes()).hexdigest(),
                             "compatibility": evidence})
                 staging.rename(target)

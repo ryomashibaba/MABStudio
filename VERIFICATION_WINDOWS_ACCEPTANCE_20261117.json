@@ -1,0 +1,31 @@
+{
+  "schema": "mab-studio-release-acceptance-verification-v1",
+  "date": "2026-11-17",
+  "baseCommit": "73544008823832d3f4c01aafc24eb2a3b374ff60",
+  "scope": "MAB Studio v0.3 continuation, no MAB engine source or Minecraft world changes",
+  "local": {
+    "pythonTestsPassed": 92,
+    "pythonTestsSkipped": 9,
+    "pythonTestsFailed": 0,
+    "display": "Linux virtual display via xvfb-run",
+    "nodeJs": "Present; sandbox bridge and explicit offline test double"
+  },
+  "changes": [
+    "SHA256-pinned single-module first install instead of full repository ZIP",
+    "refuse unreviewed remote commit in GUI before install",
+    "opt-in single-real-request acceptance CLI with true B143 verification and Tk canvas",
+    "Windows native one-click build/acceptance script requiring explicit consent",
+    "Windows Actions EXE acceptance using a deterministic local HTTP test double"
+  ],
+  "windowsNativeEXEBuiltAndLaunched": false,
+  "actualLocalLLMUnknownJapanesePromptTested": false,
+  "minecraftEducationWebSocketRealTested": false,
+  "minecraftWorldWritten": false,
+  "realEducationMcworldRead": false,
+  "b143RealSourceLocallyReexecuted": false,
+  "b143SkippedReason": "Verified file unavailable in this Linux runtime; nine tests skipped, not passed.",
+  "windowsActionsExecuted": false,
+  "artisticQualityCertified": false,
+  "constructionApproved": false,
+  "worldWrites": 0
+}
