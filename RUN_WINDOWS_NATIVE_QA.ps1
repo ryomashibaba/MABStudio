@@ -1,4 +1,4 @@
-# One-click, isolated native Windows build + packaged EXE SOURCE/GUI test.
+﻿# One-click, isolated native Windows build + packaged EXE SOURCE/GUI test.
 # The only model endpoint exercised is a deliberately marked loopback TEST DOUBLE.
 # It does NOT start Ollama/LM Studio, run genuine inference, or touch Minecraft.
 $ErrorActionPreference = 'Stop'
@@ -118,6 +118,9 @@ try {
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryFile -Encoding UTF8
     Write-Host ('MAB Studio Windows QA: ' + $summary.outcome)
     Write-Host ('Report: ' + $summaryFile)
+    if ($summary.outcome -eq 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY') {
+        Write-Host 'NOTE: Real local model was NOT tested. Use RUN_REAL_MODEL_CHECK.bat for one live request WITHOUT rebuilding.'
+    }
     if ($summary.error) { Write-Host ('Error: ' + $summary.error) }
     Remove-Item Env:MAB_STUDIO_NO_PAUSE -ErrorAction SilentlyContinue
     # Working files are isolated and disposable; do not alter original Studio.

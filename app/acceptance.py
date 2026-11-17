@@ -101,9 +101,11 @@ def run_acceptance(argv: list[str]) -> int:
         try:
             design = ask_llm(ns.provider, ns.model, ns.prompt)
         finally:
+            # Keep elapsed time even when the model errors or hits a token limit;
+            # otherwise the real-model diagnostic cannot distinguish those cases.
+            report['providerRequestSeconds'] = round(time.monotonic() - llm_started, 2)
             if original_base is not None:
                 core.OLLAMA_BASE = original_base
-        report['providerRequestSeconds'] = round(time.monotonic() - llm_started, 2)
         report['stage'] = 'REAL_MAB_SOURCE_VERIFICATION'
         scene = run_bridge(engine, design)
         if scene['stats']['voxels'] < 1:

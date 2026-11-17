@@ -217,3 +217,28 @@ The `RUN_WINDOWS_NATIVE_QA.bat` acceptance entry point is unchanged.
 - Qwen3.8のモデルIDに限り、公式モデルカードにあるリクエスト単位の `chat_template_kwargs.enable_thinking=false` を送ります。LM Studioの実行環境による対応差は実機確認が必要です。モデルの自動ロード/再設定/VRAM割当変更はしません。
 - JSONの未完了・切断・検証不一致は失敗として処理します。失敗した生成からMinecraft書込コマンドを作ることはありません。AI修正案はDRAFTとして表示し、明示承認まで履歴を変更しません。
 - Linux上のローカル試験ではLM StudioのSSEを模擬し、MABの固定B143原本でSOURCE検証しています。**真正Gemma/Qwenの生成、Windows上の新EXE実行、建築の美観・用途忠実度、Education実機施工は未実証**です。
+
+
+## Windows: one real model check WITHOUT rebuilding (2026-11-17)
+
+`RUN_WINDOWS_NATIVE_QA.bat` only proves a Windows EXE, pinned B143 SOURCE,
+Tk GUI and a **TEST DOUBLE**. It does not test a genuine language model.
+When the model is already loaded and you have selected it in the Studio GUI,
+double-click `RUN_REAL_MODEL_CHECK.bat` from the source release folder.
+
+The script reads `%LOCALAPPDATA%\MABStudio\preferences.json`, verifies
+that **exactly the selected model is loaded** through read-only provider APIs,
+then finds the latest successful `WINDOWS_NATIVE_QA.json` and verifies its ZIP
+SHA-256. It extracts that already-built EXE temporarily, sends exactly one
+real-model building request using `--acceptance`, and saves a JSON report under
+`%LOCALAPPDATA%\MABStudio\diagnostics\real-model-...\REAL_MODEL_CHECK.json`.
+No PyInstaller, pip or npm installations, no automatic model loading,
+no Minecraft commands, no world writes, no user designs committed, and no
+model-generated JSON or prompt text stored in the diagnostic report.
+
+A genuine model response might still fail B143, time out, or hit a token
+limit; the receipt preserves the error category, exact stage and request
+seconds. Do not confuse this with proof of Japanese intent understanding or
+architectural visual quality. This check uses the existing fixed Japanese
+diagnostic prompt from `app.acceptance.DEFAULT_PROMPT`; normal custom
+Japanese creation remains in the GUI.

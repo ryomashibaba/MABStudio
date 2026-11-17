@@ -1,0 +1,149 @@
+# MAB Studio local provider acceptance using the LAST PASS Windows EXE.
+# No Python installation, EXE rebuild, server starts, model loads or Minecraft commands.
+# Fails closed if the saved model is not already running or the QA ZIP hash differs.
+$ErrorActionPreference = 'Stop'
+$studioRoot = Join-Path $env:LOCALAPPDATA 'MABStudio'
+$diagnostics = Join-Path $studioRoot 'diagnostics'
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$id = [Guid]::NewGuid().ToString('N').Substring(0,8)
+$run = Join-Path $diagnostics ('real-model-' + $stamp + '-' + $id)
+$extracted = Join-Path $run 'extracted'
+$reportPath = Join-Path $run 'REAL_MODEL_ACCEPTANCE.json'
+$runSummary = Join-Path $run 'REAL_MODEL_CHECK.json'
+New-Item -ItemType Directory -Force -Path $run | Out-Null
+$summary = [ordered]@{
+    schema = 'mab-studio-real-model-check-v1'
+    createdAt = (Get-Date).ToUniversalTime().ToString('o')
+    outcome = 'FAIL'
+    stage = 'PREFLIGHT'
+    realInference = 'NOT_ATTEMPTED'
+    worldWrites = 0
+    acceptanceReport = $reportPath
+}
+try {
+    $choice = Join-Path $studioRoot 'preferences.json'
+    if (!(Test-Path -LiteralPath $choice -PathType Leaf)) {
+        throw 'MODEL_CHOICE_NOT_SAVED: select a provider/model in the MAB Studio GUI first.'
+    }
+    $pref = Get-Content -LiteralPath $choice -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($pref.schema -cne 'mab-studio-local-interface-preferences-v1') {
+        throw 'MODEL_PREFERENCES_INVALID'
+    }
+    $provider = [string]$pref.provider
+    $model = [string]$pref.model
+    if (@('LM Studio','Ollama') -cnotcontains $provider -or
+        $model -cnotmatch '^[A-Za-z0-9_.:/-]{1,180}$') {
+        throw 'MODEL_CHOICE_INVALID: choose the loaded model in the GUI first.'
+    }
+    $summary.provider = $provider
+    $summary.model = $model
+    $summary.stage = 'VERIFY_ALREADY_LOADED_MODEL'
+    if ($provider -ceq 'LM Studio') {
+        $catalog = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:1234/api/v1/models' -TimeoutSec 8
+        $loadedFound = @()
+        foreach ($entry in @($catalog.models)) {
+            if ($null -eq $entry) { continue }
+            foreach ($instance in @($entry.loaded_instances)) {
+                if ($null -ne $instance -and (($instance.id -ceq $model) -or ($entry.key -ceq $model))) {
+                    $loadedFound += $instance.id
+                }
+            }
+        }
+        if (@($loadedFound | Select-Object -Unique).Count -ne 1) {
+            throw 'LM_STUDIO_MODEL_NOT_UNIQUELY_LOADED: load one instance of the selected model first.'
+        }
+    } else {
+        $running = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:11434/api/ps' -TimeoutSec 8
+        $loadedFound = @($running.models | Where-Object {
+            $null -ne $_ -and (($_.name -ceq $model) -or ($_.model -ceq $model))
+        })
+        if ($loadedFound.Count -ne 1) {
+            throw 'OLLAMA_MODEL_NOT_RUNNING: load the selected model first; this check will not auto-load it.'
+        }
+    }
+    $summary.stage = 'FIND_PREVIOUS_PASS_EXE'
+    $qaReports = @(Get-ChildItem -Path $diagnostics -Directory -Filter 'windows-native-*' |
+                   Sort-Object LastWriteTime -Descending |
+                   ForEach-Object {
+                       $f = Join-Path $_.FullName 'WINDOWS_NATIVE_QA.json'
+                       if (Test-Path -LiteralPath $f -PathType Leaf) { $f }
+                   })
+    $selected = $null
+    foreach ($f in $qaReports) {
+        try {
+            $qa = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($qa.schema -cne 'mab-studio-windows-native-acceptance-v1' -or
+                $qa.outcome -cne 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY' -or
+                $qa.stage -cne 'COMPLETE') { continue }
+            $zipFile = [string]$qa.previewZip
+            $qaFolder = Split-Path -Parent $f
+            if ([System.IO.Path]::GetFullPath($zipFile) -cne
+                [System.IO.Path]::GetFullPath((Join-Path $qaFolder 'MABStudio-Windows-Safe-Preview.zip'))) {
+                continue
+            }
+            if (!(Test-Path -LiteralPath $zipFile -PathType Leaf)) { continue }
+            $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipFile).Hash.ToLowerInvariant()
+            if ($sha -cne [string]$qa.previewZipSha256) { continue }
+            $selected = $zipFile
+            $summary.sourceWindowsQa = $f
+            $summary.verifiedZipSha256 = $sha
+            break
+        } catch { continue }
+    }
+    if (!$selected) {
+        throw 'NO_VERIFIED_EXE_ZIP: run RUN_WINDOWS_NATIVE_QA.bat once, then retry without rebuilding.'
+    }
+    $summary.stage = 'EXTRACT_VERIFIED_EXE'
+    New-Item -ItemType Directory -Force -Path $extracted | Out-Null
+    Expand-Archive -LiteralPath $selected -DestinationPath $extracted -Force
+    $exe = Join-Path $extracted 'MABStudio\MABStudio.exe'
+    if (!(Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw 'VERIFIED_ARCHIVE_EXE_MISSING'
+    }
+    $summary.stage = 'ONE_REAL_MODEL_REQUEST'
+    $summary.realInference = 'ATTEMPTED'
+    $requestClock = [System.Diagnostics.Stopwatch]::StartNew()
+    # Use acceptance.py's existing Japanese diagnostic brief (no shell Unicode quoting).
+    # Model strings were strictly checked above before passing as process arguments.
+    $arguments = '--acceptance --provider "' + $provider + '" --model "' + $model + '" --report "' + $reportPath + '"'
+    $proc = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $extracted -Wait -PassThru
+    $requestClock.Stop()
+    $summary.elapsedSeconds = [math]::Round($requestClock.Elapsed.TotalSeconds,2)
+    $summary.exitCode = $proc.ExitCode
+    if (!(Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        throw 'REAL_MODEL_REPORT_NOT_CREATED'
+    }
+    $receipt = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $summary.realInference = 'REQUEST_ATTEMPTED'
+    $summary.stage = [string]$receipt.stage
+    $summary.outcome = [string]$receipt.outcome
+    if ($receipt.sourceValid) { $summary.voxels = $receipt.source.voxelCount }
+    if ($null -ne $receipt.providerRequestSeconds) { $summary.modelSeconds = $receipt.providerRequestSeconds }
+    if ($receipt.failureClass) { $summary.failureClass = [string]$receipt.failureClass }
+    if ($receipt.error) { $summary.error = [string]$receipt.error }
+    if ($receipt.testDoubleUsed -or !$receipt.actualProviderRequestAttempted) {
+        throw 'GENUINE_MODEL_RECEIPT_INCONSISTENT'
+    }
+    if ($proc.ExitCode -ne 0 -or $summary.outcome -cne 'PASS_SOURCE_AND_GUI_ONLY') {
+        if (!$summary.error) { $summary.error = 'Real model request, source validation or Tk preview failed.' }
+    } else {
+        $summary.stage = 'COMPLETE'
+    }
+} catch {
+    $summary.outcome = 'FAIL'
+    $summary.error = [string]$_.Exception.Message
+} finally {
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $runSummary -Encoding UTF8
+    Write-Host ('MAB Studio REAL model check: ' + $summary.outcome)
+    Write-Host ('Stage: ' + $summary.stage)
+    if ($summary.error) { Write-Host ('Error: ' + $summary.error) }
+    if ($null -ne $summary.elapsedSeconds) { Write-Host ('Real-model check elapsed seconds: ' + $summary.elapsedSeconds) }
+    if ($summary.voxels) { Write-Host ('B143 source cells: ' + $summary.voxels) }
+    Write-Host ('Report: ' + $runSummary)
+    # The passed EXE always remains available in its original verified ZIP.
+    if (Test-Path -LiteralPath $extracted) {
+        Remove-Item -LiteralPath $extracted -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($summary.outcome -ceq 'PASS_SOURCE_AND_GUI_ONLY') { exit 0 }
+exit 1
