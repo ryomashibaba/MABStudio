@@ -1,0 +1,101 @@
+"""Actual Tkinter review controls; simulated local model, NO Minecraft/real AI."""
+from __future__ import annotations
+import copy
+import hashlib
+import os
+from pathlib import Path
+import time
+import pytest
+from app import core
+from app.examples import example_library
+from app import main as studio_main
+
+
+def _scene(design, material='stone'):
+    # Fixture respects RevisionStore's verified-source fields.
+    digest = hashlib.sha256((design['title']+material).encode()).hexdigest()
+    cells = [[x,1,z,0,0] for x in range(3,6) for z in range(3,5)]
+    if material=='glass':
+        cells[0][3]=1
+    return {'title':design['title'], 'designOnly':True, 'readiness':'NOT_PREPARED',
+            'worldContacts':0,'worldCoordinates':None,'BuildPlan':{'operations':[]},
+            'stats':{'voxels':len(cells),'constructionApproved':False},
+            'sourceSha256':digest,'geometrySha256':digest,'layerNames':['stone','glass'],
+            'primitives':cells,'bounds':{'minX':3,'maxX':5,'minY':1,'maxY':1,'minZ':3,'maxZ':4}}
+
+
+@pytest.fixture
+def studio(tmp_path,monkeypatch):
+    if os.name!='nt' and not os.getenv('DISPLAY'):
+        pytest.skip('GUI test needs DISPLAY (use xvfb-run -a on Linux)')
+    class Manager:
+        root=tmp_path
+        active_sha=core.BASELINE_SHA
+        active_path=tmp_path/'fixed-engine'
+        state={'tracked_branch':core.DEFAULT_BRANCH}
+    monkeypatch.setattr(studio_main,'EngineManager',Manager)
+    orig=example_library()
+    revised=copy.deepcopy(orig)
+    revised['title']='approved draft candidate'
+    scenes={orig['title']:_scene(orig),revised['title']:_scene(revised,'glass')}
+    calls=[]
+    def fake_bridge(engine, design):
+        calls.append(design['title'])
+        return copy.deepcopy(scenes[design['title']])
+    monkeypatch.setattr(studio_main,'run_bridge',fake_bridge)
+    monkeypatch.setattr(studio_main,'ask_llm',lambda *a,**kw:copy.deepcopy(revised))
+    root=studio_main.Studio()
+    root.model.set('fixture-model')
+    root._display_design(orig,scenes[orig['title']],'OFFLINE_SAMPLE','','original')
+    try:
+        yield root,calls
+    finally:
+        for pending in root.tk.call('after', 'info'):
+            try: root.after_cancel(pending)
+            except Exception: pass
+        root.destroy()
+
+
+def _complete(root,limit=3.0):
+    end=time.monotonic()+limit
+    while root.busy and time.monotonic()<end:
+        root.update()
+        time.sleep(.02)
+    root.update()
+    assert not root.busy,'worker hung during GUI review test'
+
+
+def test_ai_draft_never_commits_until_explicit_approval(studio):
+    app,calls=studio
+    initial=app.history.head()
+    original_src=(app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    app.revise_design()
+    _complete(app)
+    assert app.pending_revision is not None
+    assert app.history.head()['revisionId']==initial['revisionId']
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==original_src
+    assert app.view_mode.get()=='変更差分'
+    assert 'disabled' not in app.approve_draft_btn.state()
+    assert 'disabled' not in app.reject_draft_btn.state()
+    # Approved source remains unchanged during candidate review.
+    assert app.design['title']==initial['design']['title']
+    app.approve_revision()
+    _complete(app)
+    assert calls.count('approved draft candidate')>=2
+    assert app.pending_revision is None
+    assert app.history.head()['parentId']==initial['revisionId']
+    assert app.history.head()['design']['title']=='approved draft candidate'
+    assert app.history.head()['worldWrites']==0
+    assert 'disabled' in app.approve_draft_btn.state()
+
+
+def test_reject_discards_candidate_without_touching_history(studio):
+    app,_=studio
+    start=app.history.head()['revisionId']
+    app.revise_design()
+    _complete(app)
+    app.reject_revision()
+    assert app.pending_revision is None
+    assert app.history.head()['revisionId']==start
+    assert app.view_mode.get()=='建築のみ'
+    assert 'disabled' not in app.revise_btn.state()

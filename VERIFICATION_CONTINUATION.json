@@ -1,0 +1,37 @@
+{
+  "schema": "mab-studio-continuation-evidence-v1",
+  "createdAtUTC": "2026-11-17T05:30:49.988534+00:00",
+  "base": "MAB Studio v0.3 Windows readiness patch",
+  "sourceBranch": "studio/review-first-readonly-20261117",
+  "localTestCommand": "xvfb-run -a python -m pytest -q -rs",
+  "result": {
+    "passed": 56,
+    "skipped": 9,
+    "failed": 0
+  },
+  "realMabB143TestInThisRun": "NOT_RUN_FILE_UNAVAILABLE",
+  "realLocalLLMInference": "NOT_RUN",
+  "WindowsNativeExeBuild": "NOT_RUN_LINUX",
+  "WindowsNativeExeLaunch": "NOT_RUN_LINUX",
+  "EducationRealReadback": "NOT_RUN",
+  "EducationWorldWrites": 0,
+  "sourceOnlyChanges": [
+    "draft_before_approve",
+    "explicit_reject",
+    "reverify_before_approve",
+    "canvas_greedy_mesh",
+    "local_provider_readiness_diagnostics",
+    "b134_external_diagnostic_json_intake"
+  ],
+  "runtimeLimits": [
+    "greedy_mesh_max_15000_rectangles",
+    "external_b134_json_unverified",
+    "model_listing_does_not_prove_inference"
+  ],
+  "safety": {
+    "minecraftWritesImplemented": false,
+    "MinecraftCommandGeneration": false,
+    "BuildPlanOperationsExecuted": 0,
+    "MabEngineRepositoryMutated": false
+  }
+}

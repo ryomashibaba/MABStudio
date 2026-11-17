@@ -44,4 +44,4 @@ def test_preview_detail_limits_are_bounded():
     assert VoxelPreview.DETAIL_LIMITS['標準（2,300）'] == 2300
     assert VoxelPreview.DETAIL_LIMITS['精細（8,000）'] == 8000
     assert VoxelPreview.DETAIL_LIMITS['高精細（15,000）'] == 15000
-    assert max(VoxelPreview.DETAIL_LIMITS.values()) <= 15000
+    assert max(v for v in VoxelPreview.DETAIL_LIMITS.values() if v is not None) <= 15000

@@ -14,6 +14,8 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
+from app.diagnostics import check_local_setup, readiness_text
+from app.education import import_b134_readback
 from app.examples import example_library
 from app.revisions import RevisionStore, compare_scenes, diff_preview_scene
 from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_scene
@@ -35,6 +37,7 @@ class Studio(tk.Tk):
         self.history = RevisionStore(self.manager.root / 'projects')
         self.current_snapshot = None
         self.delta = None
+        self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
         self.terrain = None
         self.terrain_archive = None
         self.terrain_report = None
@@ -103,7 +106,8 @@ class Studio(tk.Tk):
         self.model_box=ttk.Combobox(mrow,textvariable=self.model)
         self.model_box.grid(row=0,column=0,sticky='ew',padx=(0,4))
         self.models_btn=ttk.Button(mrow,text='モデル取得',command=self.refresh_models)
-        self.models_btn.grid(row=0,column=1)
+        self.models_btn.grid(row=0,column=1,padx=(0,4))
+        ttk.Button(mrow,text='接続診断',command=self.diagnose).grid(row=0,column=2)
         ttk.Label(left,text='3  どんな建築を作りたい？',style='Header.TLabel').grid(row=10,column=0,sticky='w',pady=(6,5))
         self.prompt = tk.Text(left,height=7,wrap='word',font=('Yu Gothic UI',10),relief='solid',borderwidth=1)
         self.prompt.grid(row=11,column=0,sticky='nsew')
@@ -125,7 +129,7 @@ class Studio(tk.Tk):
         tools = ttk.Frame(right)
         tools.pack(fill='x', pady=(0, 7))
         self.view_box = ttk.Combobox(tools,textvariable=self.view_mode, state='readonly', width=17,
-                                     values=('建築のみ','変更差分','地形＋建築'))
+                                     values=('建築のみ','修正案（未承認）','変更差分','地形＋建築'))
         self.view_box.pack(side='left',padx=(0,6))
         detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
                                   width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
@@ -134,13 +138,25 @@ class Studio(tk.Tk):
         self.view_box.bind('<<ComboboxSelected>>', lambda _: self._refresh_view())
         self.restore_btn=ttk.Button(tools,text='前の設計に戻す',command=self.restore_previous,state='disabled')
         self.restore_btn.pack(side='left',padx=(0,6))
-        ttk.Button(tools,text='前回の設計を開く',command=self.load_saved_design).pack(side='left')
+        self.load_btn=ttk.Button(tools,text='前回の設計を開く',command=self.load_saved_design)
+        self.load_btn.pack(side='left')
+        reviewbar = ttk.Frame(right)
+        reviewbar.pack(fill='x', pady=(0,7))
+        self.approve_draft_btn=ttk.Button(reviewbar,text='AI修正案を承認（設計のみ）',
+                                           command=self.approve_revision,state='disabled')
+        self.approve_draft_btn.pack(side='left',padx=(0,6))
+        self.reject_draft_btn=ttk.Button(reviewbar,text='修正案を却下',
+                                          command=self.reject_revision,state='disabled')
+        self.reject_draft_btn.pack(side='left')
+        ttk.Label(reviewbar,text='承認してもMinecraftには施工しません',
+                  foreground='#a0522d').pack(side='left',padx=(10,0))
         terrainbar = ttk.Frame(right)
         terrainbar.pack(fill='x', pady=(0,7))
         ttk.Label(terrainbar,text='予定位置 XYZ').pack(side='left')
         ttk.Entry(terrainbar,textvariable=self.place_xyz,width=18).pack(side='left',padx=(6,6))
         self.import_terrain_btn=ttk.Button(terrainbar,text='.mcworldを読み取る',command=self.import_terrain)
         self.import_terrain_btn.pack(side='left')
+        ttk.Button(terrainbar,text='B134読取結果',command=self.import_education_diagnostic).pack(side='left',padx=(8,0))
         self.preview=VoxelPreview(right)
         self.preview.pack(fill='both',expand=True)
         self.caption=tk.StringVar(value='表示待ち：AIモデル・エンジンが準備できたら生成できます。')
@@ -167,7 +183,7 @@ class Studio(tk.Tk):
                         lambda: self.manager.install(BASELINE_SHA), ready, quiet=True)
 
     def _periodic_check(self):
-        if not self.busy and self.manager.active_path:
+        if not self.busy and self.pending_revision is None and self.manager.active_path:
             self.check_update(silent=True)
         self.after(15*60*1000,self._periodic_check)
 
@@ -175,12 +191,12 @@ class Studio(tk.Tk):
         sha=self.manager.active_sha
         self.engine_state.set('使用中: '+sha[:12]+'…  /  更新はコミットSHA固定' if self.manager.active_path
                               else '未導入 / 最初にB143を導入してください')
-        self.generate_btn.configure(state='normal' if self.manager.active_path and not self.busy else 'disabled')
-        self.sample_btn.configure(state='normal' if self.manager.active_path and not self.busy else 'disabled')
+        self.generate_btn.configure(state='normal' if self.manager.active_path and not self.busy and self.pending_revision is None else 'disabled')
+        self.sample_btn.configure(state='normal' if self.manager.active_path and not self.busy and self.pending_revision is None else 'disabled')
         self.install_btn.configure(state='normal' if not self.busy and not self.manager.active_path else 'disabled')
-        self.check_btn.configure(state='normal' if not self.busy else 'disabled')
-        self.rollback_btn.configure(state='normal' if not self.busy else 'disabled')
-        self.apply_btn.configure(state='normal' if self.pending_sha and not self.busy else 'disabled')
+        self.check_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
+        self.rollback_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
+        self.apply_btn.configure(state='normal' if self.pending_sha and not self.busy and self.pending_revision is None else 'disabled')
         self._refresh_buttons()
 
     def _start(self, title, fn, callback=None, quiet=False):
@@ -224,13 +240,18 @@ class Studio(tk.Tk):
         self.preview.show(None)
         self.export_btn.configure(state='disabled')
         self.delta = None
+        self.pending_revision = None
         self.design = None
         self.current_snapshot = None
         self._refresh_buttons()
 
     def _refresh_buttons(self):
-        self.revise_btn.configure(state='normal' if self.design and self.manager.active_path and not self.busy else 'disabled')
-        self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and not self.busy else 'disabled')
+        ready = not self.busy and self.pending_revision is None
+        self.revise_btn.configure(state='normal' if self.design and self.manager.active_path and ready else 'disabled')
+        self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
+        self.load_btn.configure(state='normal' if ready else 'disabled')
+        self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
 
     def _coords(self):
         try:
@@ -249,19 +270,26 @@ class Studio(tk.Tk):
             self.preview.show(None)
             return
         mode = self.view_mode.get()
-        if mode == '変更差分':
-            if self.delta is None or not any(self.delta['counts'][p] for p in ('added','removed','replaced')):
+        candidate = self.pending_revision
+        active_scene = candidate['scene'] if candidate else self.scene
+        active_delta = candidate['delta'] if candidate else self.delta
+        if mode == '修正案（未承認）':
+            self.preview.show(active_scene)
+            if candidate is None:
+                self.status.set('未承認の修正案はありません。承認済み設計を表示しています。')
+        elif mode == '変更差分':
+            if active_delta is None or not any(active_delta['counts'][p] for p in ('added','removed','replaced')):
                 self.preview.show(self.scene)
                 self.status.set('変更差分がありません。通常モデルを表示します。')
             else:
-                self.preview.show(diff_preview_scene(self.delta, self.scene))
+                self.preview.show(diff_preview_scene(active_delta, active_scene))
         elif mode == '地形＋建築':
             if self.terrain is None:
                 self.preview.show(self.scene)
                 self.status.set('地形ブロックは未読取です。.mcworldの読み込みを先に行ってください')
             else:
                 try:
-                    merged, self.terrain_report = create_overlay_scene(self.terrain, self.scene, self._coords())
+                    merged, self.terrain_report = create_overlay_scene(self.terrain, active_scene, self._coords())
                     self.preview.show(merged)
                     self.status.set('実地形との重なり候補: ' + str(self.terrain_report['potentialTerrainIntersections']) +
                                     'セル / 不明な地形セル: ' + str(self.terrain_report['unreadableCells']) + '（未施工）')
@@ -271,7 +299,28 @@ class Studio(tk.Tk):
         else:
             self.preview.show(self.scene)
 
+    def import_education_diagnostic(self):
+        # Existing B134 connector does the real read-only WebSocket probing.
+        # Studio only accepts its diagnostic report; it never generates commands.
+        filename=filedialog.askopenfilename(title='MAB B134の読み取り専用診断JSON',
+                                              filetypes=[('JSON診断','*.json')])
+        if not filename:
+            return
+        def done(report):
+            messagebox.showinfo('Education B134読取診断（外部結果）',
+                '対象XYZ: '+str(report['coords'])+'\n'
+                '結果: '+report['outcome']+'\n'
+                '方向候補: '+str(report['provisionalStateValue'])+'\n\n'
+                'これは外部診断JSONの形式検査のみです。\n'
+                'StudioからのMinecraft接続・実ワールドのブロック認証・施工は未実施です。')
+            self.status.set('B134外部診断の形式検査が完了しました。ワールド未変更。')
+        self._start('B134読み取り専用結果を安全検査中',
+                    lambda:import_b134_readback(filename),done)
+
     def import_terrain(self):
+        if self.pending_revision is not None:
+            messagebox.showwarning('未承認の修正案', '先に修正案を承認または却下してください。')
+            return
         filename = filedialog.askopenfilename(title='Minecraft Educationからエクスポートした.mcworldを選択',
                                               filetypes=[('Minecraft World','*.mcworld')])
         if not filename:
@@ -302,6 +351,8 @@ class Studio(tk.Tk):
         self._start('安全なコピーから.mcworld地形を解析中', work, done)
 
     def install_baseline(self):
+        if self.pending_revision is not None:
+            return
         self._start('B143エンジンを検証して初期導入中',lambda:self.manager.install(BASELINE_SHA),
                     lambda r:(self._invalidate_scene(),self._update_engine_label(),
                               self.caption.set('B143導入とSOURCE互換性試験が完了（施工は無効）')))
@@ -357,7 +408,22 @@ class Studio(tk.Tk):
             self.status.set(f'{provider}: {len(names)}件のモデルを取得しました。')
         self._start(provider+'のモデル一覧を取得中',lambda:llm_models(provider),done,quiet=True)
 
+    def diagnose(self):
+        provider = self.llm_provider.get()
+        def done(report):
+            if self.llm_provider.get() == provider and report['models']:
+                self.model_box['values'] = report['models']
+                if self.model.get() not in report['models']:
+                    self.model.set(report['models'][0])
+            messagebox.showinfo('MAB Studio 接続診断（読み取りのみ）', readiness_text(report))
+            self.status.set('接続診断完了：MAB / Node / ローカルAIのみ。Minecraft未接続。')
+        self._start('MAB SOURCEとローカルAIの読み取り診断中',
+                    lambda: check_local_setup(self.manager,provider),done)
+
     def generate(self):
+        if self.pending_revision is not None:
+            messagebox.showwarning('未承認の修正案', '先に修正案を承認または却下してください。')
+            return
         prompt=self.prompt.get('1.0','end').strip()
         provider=self.llm_provider.get()
         model=self.model.get().strip()
@@ -388,6 +454,8 @@ class Studio(tk.Tk):
         self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done)
 
     def show_sample(self):
+        if self.pending_revision is not None:
+            return
         engine = self.manager.active_path
         if not engine:
             messagebox.showwarning('未導入','先にMABエンジンを導入してください。')
@@ -433,6 +501,8 @@ class Studio(tk.Tk):
                              ' / 交換' + str(self.delta['counts']['replaced']) + '（施工前）')
 
     def revise_design(self):
+        if self.pending_revision is not None:
+            return
         if not self.scene or not self.design or self.current_snapshot is None:
             messagebox.showwarning('修正元なし','まず建築設計を作成してください。')
             return
@@ -463,11 +533,68 @@ class Studio(tk.Tk):
             raise StudioError('AI修正候補がMAB SOURCE検証に通りませんでした: '+error)
         def done(data):
             revised, scene, retry = data
-            self._display_design(revised, scene, provider, model,
-                                 'AI修正案 / 施工なし', operation='revision')
+            # The model response is only a DRAFT.  No RevisionStore.commit,
+            # no latest-design overwrite until the user explicitly approves.
+            if self.current_snapshot is None or self.scene is None:
+                raise StudioError('修正元が消えたため修正案を破棄しました')
+            delta = compare_scenes(self.scene, scene)
+            self.pending_revision = {
+                'design': revised, 'scene': scene, 'delta': delta,
+                'parentId': self.current_snapshot['revisionId'],
+                'parentGeometrySha256': self.scene['geometrySha256'],
+                'engineSha': self.manager.active_sha,
+                'provider': provider, 'model': model,
+            }
             self.view_mode.set('変更差分')
             self._refresh_view()
+            counts = delta['counts']
+            self.caption.set(f'未承認のAI修正案：追加{counts["added"]} / 削除{counts["removed"]} / '
+                             f'交換{counts["replaced"]}  |  3Dを確認して承認または却下（未施工）')
+            self.status.set('修正案の検証に成功しました。承認前の設計履歴は未変更です。')
         self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done)
+
+    def approve_revision(self):
+        candidate = self.pending_revision
+        if not candidate:
+            return
+        engine = self.manager.active_path
+        if (engine is None or self.manager.active_sha != candidate['engineSha']
+                or self.current_snapshot is None or self.scene is None
+                or self.current_snapshot['revisionId'] != candidate['parentId']
+                or self.scene['geometrySha256'] != candidate['parentGeometrySha256']):
+            messagebox.showerror('修正案の承認を保留', '元の設計またはMABエンジンが変更されました。')
+            return
+        def work():
+            # Recompile both approved and draft source before accepting.
+            before = run_bridge(engine, self.design)
+            after = run_bridge(engine, candidate['design'])
+            if before['geometrySha256'] != candidate['parentGeometrySha256']:
+                raise StudioError('元の設計の再検証に失敗しました')
+            if (after['geometrySha256'] != candidate['scene']['geometrySha256']
+                    or after['sourceSha256'] != candidate['scene']['sourceSha256']):
+                raise StudioError('修正案の再検証でSOURCEが一致しません')
+            return after
+        def done(scene):
+            # Only here does the existing append-only RevisionStore commit.
+            self._display_design(candidate['design'], scene, candidate['provider'],
+                                 candidate['model'], '承認されたAI修正 / 施工なし',
+                                 operation='revision')
+            self.pending_revision = None
+            self._refresh_buttons()
+            self.view_mode.set('変更差分')
+            self._refresh_view()
+            self.status.set('承認済み：設計履歴だけ更新しました。Minecraftワールドは未変更です。')
+        self._start('承認前のSOURCE真正再検証（ワールド書き込みなし）',work,done)
+
+    def reject_revision(self):
+        if self.pending_revision is None or self.busy:
+            return
+        self.pending_revision = None
+        self.view_mode.set('建築のみ')
+        self._refresh_view()
+        self._update_engine_label()
+        self.caption.set('AI修正案を却下しました。承認済みの元設計と履歴を維持しています。')
+        self.status.set('修正案を破棄しました。Minecraftワールドは未変更です。')
 
     def restore_previous(self):
         engine=self.manager.active_path
@@ -487,6 +614,8 @@ class Studio(tk.Tk):
                           verify=lambda design:run_bridge(engine,design)),done)
 
     def load_saved_design(self):
+        if self.pending_revision is not None:
+            return
         engine=self.manager.active_path
         if engine is None:
             messagebox.showwarning('エンジン未導入','先にB143を導入してください。')
