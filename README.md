@@ -167,3 +167,19 @@ MAB Studioの使い方は従来どおり。モデルの一覧を表示できる�
 - オフラインGUI試験（Linux + Xvfb）は **104 PASS / 9 SKIP**。モックモデルを含むテスト結果であり、Windows EXE・真正LLMの自由文からの建築品質・Education実機接続・施工の認証ではありません。
 
 > この更新も既存の **MAB Studio v0.3** の継続です。MAB本体の建築SOURCE生成・変換・施工ゲートは変更していません。
+
+### Windows CMD/PowerShell encoding compatibility (2026-11-17 hotfix)
+Windows `cmd.exe` on Japanese locales may interpret LF-only `.bat` files incorrectly.
+All distributed `.bat` files are now ASCII + CRLF, with no UTF-8 byte-order mark.
+`.ps1` files use CRLF; any PowerShell script containing Japanese has a UTF-8 BOM
+for Windows PowerShell 5.1 compatibility. A build-time preflight rejects incorrect
+`.bat` bytes **before downloading or installing any packages**. The failure
+`'ll' is not recognized` / `'global' is not recognized` in the earlier ZIP was
+observed after PyInstaller installed successfully; replace the whole ZIP with
+this hotfix before rerunning `RUN_WINDOWS_NATIVE_QA.bat`.
+
+To retry: extract into a **new** directory, not over the old extracted copy,
+then launch `RUN_WINDOWS_NATIVE_QA.bat` once. It still uses an isolated work area
+and emits `WINDOWS_NATIVE_QA.json` with a stage-specific failure reason. Passing
+Linux regression tests cannot certify the native Windows build: that still
+requires a Windows run. No model inference or Minecraft world writes occur.

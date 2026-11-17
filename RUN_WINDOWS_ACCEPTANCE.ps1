@@ -1,4 +1,4 @@
-# One user-triggered acceptance for Windows native EXE + an explicitly chosen local model.
+﻿# One user-triggered acceptance for Windows native EXE + an explicitly chosen local model.
 # Does not install models, change Minecraft worlds, or change system-wide settings.
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot

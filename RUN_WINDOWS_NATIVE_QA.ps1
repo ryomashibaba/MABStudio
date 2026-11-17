@@ -25,6 +25,19 @@ $summary = [ordered]@{
 }
 $fixture = $null
 try {
+    $summary.stage = 'VALIDATE_WINDOWS_BATCH_FORMAT'
+    # The original release accidentally shipped LF-only BAT files. Fail before installing
+    # dependencies rather than producing misleading cmd.exe parser errors.
+    foreach ($batch in @('RUN_WINDOWS_NATIVE_QA.bat','build_windows.bat','prepare_education_readonly.bat')) {
+        $data = [System.IO.File]::ReadAllBytes((Join-Path $source $batch))
+        if ($data.Length -lt 10) { throw ('INVALID_WINDOWS_BATCH_FILE: ' + $batch) }
+        for ($i = 0; $i -lt $data.Length; $i++) {
+            if ($data[$i] -gt 127) { throw ('NON_ASCII_WINDOWS_BATCH_FILE: ' + $batch) }
+            if ($data[$i] -eq 10 -and ($i -eq 0 -or $data[$i-1] -ne 13)) {
+                throw ('LF_ONLY_WINDOWS_BATCH_FILE: ' + $batch)
+            }
+        }
+    }
     # Never build over the original checked-out directory or an earlier dist.
     foreach ($item in @('app','tests','build_windows.bat','prepare_education_readonly.bat')) {
         Copy-Item -LiteralPath (Join-Path $source $item) -Destination $work -Recurse -Force

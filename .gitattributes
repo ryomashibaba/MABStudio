@@ -1,0 +1,5 @@
+# Preserve binary-identical Windows launch scripts in Git and release ZIPs.
+# cmd.exe may misparse LF-only BAT files; PowerShell 5.1 needs BOM for UTF-8 Japanese.
+*.bat -text
+*.cmd -text
+*.ps1 -text
