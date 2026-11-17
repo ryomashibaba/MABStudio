@@ -1,0 +1,25 @@
+{
+  "schema": "mab-studio-patch-verification-v1",
+  "date": "2026-11-17",
+  "base": "uploaded MAB Studio v0.3 ZIP (preserved separately)",
+  "localEnvironment": "Linux, Python 3.13.5, Node 22.16.0",
+  "tests": {
+    "passed": 39,
+    "skipped": 9,
+    "failed": 0,
+    "realB143Reexecuted": false,
+    "skipsWhy": "Pinned B143 source unavailable to the local sandbox; Windows CI retrieves hash-verified source",
+    "guiLinuxXvfb": "PASS: Tk window 1210x880, Canvas draw 171 objects for synthetic 144-cell sample",
+    "windowsExeBuild": "NOT_RUN",
+    "windowsExeLaunch": "NOT_RUN",
+    "actualLocalLLM": "NOT_RUN",
+    "actualEducationWorld": "NOT_RUN"
+  },
+  "safety": {
+    "minecraftWorldWrites": 0,
+    "minecraftConnection": false,
+    "sourceOnly": true,
+    "officialBuildPlanEnabled": false
+  },
+  "windowsCi": "IMPLEMENTED_NOT_EXECUTED; independent app repo GitHub push needed"
+}
