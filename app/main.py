@@ -33,6 +33,8 @@ class Studio(tk.Tk):
         enable_windows_dpi_awareness()
         super().__init__()
         self.title('MAB Studio — Minecraft Education 建築AI（安全プレビュー）')
+        if os.environ.get('MAB_STUDIO_ONE_CLICK_FALLBACK') == '1':
+            self.title('MAB Studio — 安全プレビュー（軽量3D・ネイティブ準備未完了）')
         self.geometry('1210x880')
         self.minsize(1020, 840)
         self.configure(bg='#e9eef5')

@@ -20,6 +20,7 @@ $summary = [ordered]@{
     sourceCommit = 'b0295c2f5012877f57ae218ae791634794de7b52'
     sourcePinnedHash = '537aa9e4a2b4e027f16179ef7a306b604ca4d850713d6de23940667ed2348e16'
     releaseLicenseClearance = 'NOT_CERTIFIED'
+    nativeRenderSelfCheck = 'NOT_RUN'
     windowsExeSmoke = 'NOT_RUN'
     testDoubleGuiAcceptance = 'NOT_RUN'
 }
@@ -28,7 +29,7 @@ try {
     $summary.stage = 'VALIDATE_WINDOWS_BATCH_FORMAT'
     # The original release accidentally shipped LF-only BAT files. Fail before installing
     # dependencies rather than producing misleading cmd.exe parser errors.
-    foreach ($batch in @('RUN_WINDOWS_NATIVE_QA.bat','build_windows.bat','prepare_education_readonly.bat')) {
+    foreach ($batch in @('RUN_WINDOWS_NATIVE_QA.bat','build_windows_native.bat','START_MAB_STUDIO.bat','prepare_education_readonly.bat')) {
         $data = [System.IO.File]::ReadAllBytes((Join-Path $source $batch))
         if ($data.Length -lt 10) { throw ('INVALID_WINDOWS_BATCH_FILE: ' + $batch) }
         for ($i = 0; $i -lt $data.Length; $i++) {
@@ -39,7 +40,7 @@ try {
         }
     }
     # Never build over the original checked-out directory or an earlier dist.
-    foreach ($item in @('app','tests','build_windows.bat','prepare_education_readonly.bat')) {
+    foreach ($item in @('app','tests','build_windows_native.bat','prepare_education_readonly.bat')) {
         Copy-Item -LiteralPath (Join-Path $source $item) -Destination $work -Recurse -Force
     }
     Set-Location -LiteralPath $work
@@ -54,9 +55,18 @@ try {
 
     $summary.stage = 'WINDOWS_BUILD_IN_SANDBOX'
     $env:MAB_STUDIO_NO_PAUSE = '1'
-    & (Join-Path $work 'build_windows.bat')
+    & (Join-Path $work 'build_windows_native.bat')
     if ($LASTEXITCODE -ne 0) { throw 'ISOLATED_WINDOWS_BUILD_FAILED' }
-    $exe = Join-Path $work 'dist\MABStudio\MABStudio.exe'
+    $summary.stage = 'WINDOWS_NATIVE_SYNTHETIC_RENDER_QA'
+    $python = Join-Path $work '.venv-native\Scripts\python.exe'
+    if (!(Test-Path -LiteralPath $python)) { throw 'PRIVATE_NATIVE_PYTHON_MISSING' }
+    $nativeReceiptPath = Join-Path $results 'NATIVE_RENDER_SMOKE.json'
+    & $python -m app.native_selfcheck --report $nativeReceiptPath
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $nativeReceiptPath)) { throw 'NATIVE_RENDER_QA_FAILED' }
+    $nativeReceipt = Get-Content -Raw -LiteralPath $nativeReceiptPath -Encoding UTF8 | ConvertFrom-Json
+    if ($nativeReceipt.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or $nativeReceipt.worldWrites -ne 0) { throw 'NATIVE_RENDER_QA_INCONSISTENT' }
+    $summary.nativeRenderSelfCheck = 'PASS_SYNTHETIC_IN_MEMORY'
+    $exe = Join-Path $work 'dist-native\MABStudio\MABStudio.exe'
     if (!(Test-Path -LiteralPath $exe)) { throw 'WINDOWS_EXE_MISSING' }
     $summary.stage = 'REAL_WINDOWS_EXE_SMOKE'
     $smoke = Join-Path $results 'EXE_SMOKE.json'
@@ -71,7 +81,6 @@ try {
 
     $summary.stage = 'ISOLATED_TEST_DOUBLE'
     $ready = Join-Path $work 'fixture-ready.json'
-    $python = Join-Path $work '.venv-build\Scripts\python.exe'
     if (!(Test-Path -LiteralPath $python)) { throw 'ISOLATED_PYTHON_MISSING' }
     # Port 0: OS selects a free loopback port. Does not occupy Ollama's 11434.
     $fixtureArguments = @('-m','tests.windows_acceptance_fixture','--port','0','--ready-file', ('"'+$ready+'"'))
@@ -102,8 +111,8 @@ try {
     $summary.stage = 'ARCHIVE_VERIFIED_EXE'
     # Preserve hidden npm files and original onedir layout in the ZIP.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $release = Join-Path $results 'MABStudio-Windows-Safe-Preview.zip'
-    [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $work 'dist'),$release)
+    $release = Join-Path $results 'MABStudio-Windows-Native-Preview.zip'
+    [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $work 'dist-native'),$release)
     $summary.previewZip = $release
     $summary.previewZipSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash.ToLowerInvariant()
     $summary.outcome = 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY'

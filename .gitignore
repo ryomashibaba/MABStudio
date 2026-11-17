@@ -14,3 +14,4 @@ app/education_runtime/node_modules/
 app/education_runtime/package-lock.json
 .venv-native/
 dist-native/
+.studio-startup/

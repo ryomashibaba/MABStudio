@@ -6,6 +6,9 @@ on:
       - 'app/**'
       - 'tests/**'
       - 'build_windows.bat'
+      - 'build_windows_native.bat'
+      - 'START_MAB_STUDIO.bat'
+      - 'RUN_STUDIO_NATIVE.bat'
       - 'app/node_packaging.py'
       - 'RUN_WINDOWS_ACCEPTANCE.*'
       - '.github/workflows/windows-build.yml'
@@ -54,12 +57,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'EDUCATION_NPM_PREPARE_FAILED' }
           $pkg = Get-Content -Raw app/education_runtime/node_modules/socket-be/package.json | ConvertFrom-Json
           if ($pkg.version -ne '2.8.0') { throw 'SOCKETBE_VERSION_MISMATCH' }
-      - name: Build isolated Windows GUI (bundled Node, no Python requirement)
+      - name: Native VTK and Pillow read-only Windows render QA
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install 'vtk==9.6.2' 'Pillow>=10,<13'
+          python -m app.native_selfcheck --report "$env:RUNNER_TEMP/mab-native-smoke.json"
+          if ($LASTEXITCODE -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_FAILED' }
+          $check = Get-Content -Raw "$env:RUNNER_TEMP/mab-native-smoke.json" | ConvertFrom-Json
+          if ($check.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or $check.worldWrites -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_INVALID' }
+      - name: Build isolated Windows GUI (bundled Node, native 3D, no Python requirement)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install pyinstaller
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --add-data 'app/engine_bridge.mjs;app' --add-data 'app/education_runtime;app/education_runtime' app/main.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --collect-all vtkmodules --hidden-import vtkmodules.vtkRenderingOpenGL2 --hidden-import vtkmodules.vtkIOImage --add-data 'app/engine_bridge.mjs;app' --add-data 'app/gpu_viewer_assets;app/gpu_viewer_assets' --add-data 'app/education_runtime;app/education_runtime' app/main.py
           python -m app.node_packaging dist/MABStudio
           if ($LASTEXITCODE -ne 0) { throw 'NODE_PACKAGING_AND_LICENSE_FAILED' }
           if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE_MISSING' }
@@ -116,7 +128,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: MABStudio-Windows-Safe-Preview
+          name: MABStudio-Windows-Native-Preview
           path: |
             dist/MABStudio/**
           retention-days: 14
