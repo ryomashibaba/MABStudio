@@ -15,6 +15,7 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
+from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
@@ -43,14 +44,18 @@ class Studio(tk.Tk):
         self._education_running = False
         self._education_cancel = threading.Event()
         self._closed = False
+        self._section_after = None
         self.terrain = None
         self.terrain_archive = None
         self.terrain_report = None
         self.view_mode = tk.StringVar(value='建築のみ')
         self.detail_mode = tk.StringVar(value='標準（2,300）')
+        self.section_enabled = tk.BooleanVar(value=False)
+        self.section_level = tk.IntVar(value=0)
         self.place_xyz = tk.StringVar(value='0 64 0')
-        self.llm_provider = tk.StringVar(value='Ollama')
-        self.model = tk.StringVar(value='')
+        provider_saved, model_saved = read_local_choice(self.manager.root)
+        self.llm_provider = tk.StringVar(value=provider_saved)
+        self.model = tk.StringVar(value=model_saved)
         self.branch = tk.StringVar(value=self.manager.state.get('tracked_branch', DEFAULT_BRANCH))
         self._make_ui()
         self.place_xyz.trace_add('write', self._on_anchor_changed)
@@ -67,7 +72,7 @@ class Studio(tk.Tk):
             return
         self._closed = True
         self._education_cancel.set()
-        for attr in ('_poll_after','_startup_after','_check_after'):
+        for attr in ('_poll_after','_startup_after','_check_after','_section_after'):
             handle=getattr(self,attr,None)
             if handle is not None:
                 try:self.after_cancel(handle)
@@ -127,12 +132,13 @@ class Studio(tk.Tk):
         ttk.Label(left,text='2  ローカルAI',style='Header.TLabel').grid(row=7,column=0,sticky='w')
         provider=ttk.Combobox(left,textvariable=self.llm_provider,values=('Ollama','LM Studio'),state='readonly')
         provider.grid(row=8,column=0,sticky='ew',pady=(5,4))
-        provider.bind('<<ComboboxSelected>>',lambda _: self.refresh_models())
+        provider.bind('<<ComboboxSelected>>',lambda _: self._provider_changed())
         mrow=ttk.Frame(left)
         mrow.grid(row=9,column=0,sticky='ew',pady=(0,7))
         mrow.columnconfigure(0,weight=1)
         self.model_box=ttk.Combobox(mrow,textvariable=self.model)
         self.model_box.grid(row=0,column=0,sticky='ew',padx=(0,4))
+        self.model_box.bind('<<ComboboxSelected>>',lambda _: self._remember_model_choice())
         self.models_btn=ttk.Button(mrow,text='モデル取得',command=self.refresh_models)
         self.models_btn.grid(row=0,column=1,padx=(0,4))
         ttk.Button(mrow,text='接続診断',command=self.diagnose).grid(row=0,column=2)
@@ -200,8 +206,20 @@ class Studio(tk.Tk):
         self.edu_stop_btn.pack(side='left')
         ttk.Label(educationbar,text='1か所のオーク階段・testforblock限定・施工しません',
                   foreground='#a0522d').pack(side='left',padx=(9,0))
+        sectionbar=ttk.Frame(right)
+        sectionbar.pack(fill='x', pady=(0,5))
+        self.section_toggle=ttk.Checkbutton(sectionbar,text='建築の断面を表示（上部を一時非表示）',
+                                            variable=self.section_enabled,command=self._section_changed)
+        self.section_toggle.pack(side='left',padx=(0,8))
+        self.section_scale=tk.Scale(sectionbar,from_=0,to=96,orient='horizontal',
+                                    variable=self.section_level,showvalue=True,length=220,
+                                    resolution=1,command=lambda _:self._queue_section_change())
+        self.section_scale.pack(side='left')
+        ttk.Label(sectionbar,text='※表示のみ・SOURCEは変更しません',
+                  foreground='#64748b').pack(side='left',padx=(9,0))
         self.preview=VoxelPreview(right)
         self.preview.pack(fill='both',expand=True)
+        self.section_scale.configure(state='disabled')
         self.caption=tk.StringVar(value='表示待ち：AIモデル・エンジンが準備できたら生成できます。')
         ttk.Label(right,textvariable=self.caption,wraplength=670).pack(anchor='w',pady=(7,0))
         self.status=tk.StringVar(value='準備中')
@@ -321,6 +339,7 @@ class Studio(tk.Tk):
     def _invalidate_scene(self):
         self.scene = None
         self.preview.show(None)
+        self._sync_section_controls()
         self.export_btn.configure(state='disabled')
         self.delta = None
         self.pending_revision = None
@@ -360,9 +379,53 @@ class Studio(tk.Tk):
         self.preview.show(self.scene)
         self.status.set('予定位置を変更しました。古い地形の重ね合わせを解除しました。新しい位置では.mcworldを再読取してください。')
 
+    def _queue_section_change(self):
+        # A 160,000-cell source can be expensive to mesh. Do not rebuild the
+        # scene for every mouse-move while a floor slider is being dragged.
+        if self._closed:
+            return
+        if self._section_after is not None:
+            self.after_cancel(self._section_after)
+        self._section_after = self.after(100, self._apply_queued_section)
+
+    def _apply_queued_section(self):
+        self._section_after = None
+        self._section_changed()
+
+    def _section_changed(self):
+        # Renderer-only section; SOURCE remains immutable.
+        if self._closed or not hasattr(self,'preview'):
+            return
+        level = self.section_level.get() if self.section_enabled.get() else None
+        if hasattr(self,'section_scale'):
+            self.section_scale.configure(state='normal' if self.section_enabled.get() and self.preview.scene else 'disabled')
+        self.preview.set_cut_level(level)
+
+    def _sync_section_controls(self):
+        # Use the currently displayed scene Y bounds for floor inspection.
+        scene = self.preview.scene
+        bounds = scene.get('bounds') if isinstance(scene,dict) else None
+        if not isinstance(bounds,dict):
+            self.section_scale.configure(state='disabled')
+            self.preview.set_cut_level(None)
+            return
+        low, high = bounds.get('minY'), bounds.get('maxY')
+        if type(low) is not int or type(high) is not int or low>high:
+            self.section_scale.configure(state='disabled')
+            self.preview.set_cut_level(None)
+            return
+        self.section_scale.configure(from_=low,to=high,
+                                     state='normal' if self.section_enabled.get() else 'disabled')
+        # A newly opened building may have different floor bounds. Avoid
+        # dragging a stale section level outside its actual extent.
+        if self.section_level.get()<low or self.section_level.get()>high:
+            self.section_level.set(high)
+        self._section_changed()
+
     def _refresh_view(self):
         if not self.scene:
             self.preview.show(None)
+            self._sync_section_controls()
             return
         mode = self.view_mode.get()
         candidate = self.pending_revision
@@ -397,6 +460,7 @@ class Studio(tk.Tk):
                     self.status.set(str(exc))
         else:
             self.preview.show(self.scene)
+        self._sync_section_controls()
 
     def start_education_readonly(self):
         """User-initiated test-world transport. Never performs Minecraft writes."""
@@ -567,12 +631,29 @@ class Studio(tk.Tk):
         self._start('旧エンジンを検証して復元中',self.manager.rollback,
                     lambda sha:(self._invalidate_scene(),self.caption.set('復元しました: '+sha[:12]+'…')))
 
+    def _remember_model_choice(self):
+        # Only the model identifier is remembered. Never load the model, run
+        # inference, or persist a user prompt as a side effect of choosing it.
+        save_local_choice(self.manager.root,self.llm_provider.get(),self.model.get().strip())
+
+    def _provider_changed(self):
+        self.model.set('')
+        self._remember_model_choice()
+        self.refresh_models()
+
     def refresh_models(self):
         provider=self.llm_provider.get()
         def done(names):
+            if self.llm_provider.get()!=provider:
+                return  # provider changed during request, never cross-assign IDs
             self.model_box['values']=names
-            if names and self.model.get() not in names:
+            chosen=self.model.get().strip()
+            if names and not chosen:
                 self.model.set(names[0])
+                self._remember_model_choice()
+            elif names and chosen not in names:
+                self.status.set('以前のモデル '+chosen[:45]+' が現在の一覧にありません。使うモデルを選び直してください。')
+                return
             self.status.set(f'{provider}: {len(names)}件のモデルを取得しました。')
         self._start(provider+'のモデル一覧を取得中',lambda:llm_models(provider),done,quiet=True)
 
@@ -581,8 +662,9 @@ class Studio(tk.Tk):
         def done(report):
             if self.llm_provider.get() == provider and report['models']:
                 self.model_box['values'] = report['models']
-                if self.model.get() not in report['models']:
+                if not self.model.get().strip():
                     self.model.set(report['models'][0])
+                    self._remember_model_choice()
             messagebox.showinfo('MAB Studio 接続診断（読み取りのみ）', readiness_text(report))
             self.status.set('接続診断完了：MAB / Node / ローカルAIのみ。Minecraft未接続。')
         self._start('MAB SOURCEとローカルAIの読み取り診断中',
@@ -602,6 +684,7 @@ class Studio(tk.Tk):
         if not prompt or not model:
             messagebox.showwarning('入力不足','日本語指示とローカルLLMモデルを選んでください。')
             return
+        self._remember_model_choice()
         def work():
             error = ''
             design = None
@@ -691,6 +774,7 @@ class Studio(tk.Tk):
         if not instruction or not model or engine is None:
             messagebox.showwarning('入力不足','修正内容を入力し、ローカルAIを選択してください。')
             return
+        self._remember_model_choice()
         original = self.design
         pinned_hash = self.scene['geometrySha256']
         def work():

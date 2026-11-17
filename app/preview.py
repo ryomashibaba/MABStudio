@@ -11,6 +11,19 @@ def shade(color: str, factor: float) -> str:
     return '#%02x%02x%02x' % tuple(max(0, min(255, round(c*factor))) for c in rgb)
 
 
+def visible_section(points: list, max_y: int | None) -> list:
+    """Display-only cross section, preserving original SOURCE primitives verbatim.
+
+    A newly exposed face at the slice boundary is an *illustrative section face*,
+    never evidence of a real roof, floor, Minecraft block, or construction plan.
+    """
+    if max_y is None:
+        return points
+    if type(max_y) is not int:
+        raise ValueError('Section limit must be an integer or None')
+    return [p for p in points if p[1] <= max_y]
+
+
 def greedy_visible_mesh(points, x_face: int, z_face: int) -> list[tuple]:
     """Create exact, material-aware visible quad union for an orthographic view.
 
@@ -75,6 +88,7 @@ class VoxelPreview(tk.Canvas):
         self.pressed_at = None
         self.detail_limit = self.LIMIT
         self.mesh_mode = False
+        self.cut_level = None  # Visual-only Y upper bound; never modifies the design
         self._mesh_cache = {}
         self.bind('<Configure>', lambda e: self.draw())
         self.bind('<ButtonPress-1>', lambda e: setattr(self, 'pressed_at', (e.x, self.angle)))
@@ -96,6 +110,16 @@ class VoxelPreview(tk.Canvas):
             raise ValueError('Unknown preview detail level')
         self.mesh_mode = self.DETAIL_LIMITS[label] is None
         self.detail_limit = self.DETAIL_LIMITS[label] if not self.mesh_mode else self.LIMIT
+        self.draw()
+
+    def set_cut_level(self, max_y: int | None) -> None:
+        """Show only cells at/below a Y level without mutating the SOURCE scene."""
+        if max_y is not None and type(max_y) is not int:
+            raise ValueError('Section level must be integer')
+        if self.cut_level == max_y:
+            return
+        self.cut_level = max_y
+        self._mesh_cache.clear()
         self.draw()
 
     def show(self, scene):
@@ -143,6 +167,8 @@ class VoxelPreview(tk.Canvas):
             self.create_polygon(*coords,fill=shade(color,light),outline='#162335',width=.3)
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
         label+=f' | 境界面メッシュ {len(quads):,}/{total_faces:,}面'
+        if self.cut_level is not None:
+            label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
         if total_faces>render_limit:
             label+='（描画上限。全形状は表示されていません）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
@@ -155,9 +181,12 @@ class VoxelPreview(tk.Canvas):
         self.create_text(w//2,h//2,fill='#91a4c4',text='生成した建築のプレビューがここに表示されます' if not self.scene else '描画中...')
         if not self.scene:
             return
-        pts = self.scene.get('primitives') or []
+        pts = visible_section(self.scene.get('primitives') or [], self.cut_level)
         palette = self.scene.get('previewPalette', PALETTE)
         if not pts:
+            self.delete('all')
+            self.create_text(w//2, h//2, text='このY断面に表示するセルはありません。上限を上げてください。',
+                             fill='#afc2df', font=('Segoe UI', 11))
             return
         self.delete('all')
         total = len(pts)
@@ -216,7 +245,9 @@ class VoxelPreview(tk.Canvas):
                 coords=[]
                 for xyz in corners: coords.extend(proj(*xyz))
                 self.create_polygon(*coords,fill=shade(color,light),outline='#162335',width=.3)
-        label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}セル'
+        label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}表示セル'
+        if self.cut_level is not None:
+            label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
         if skipped:
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
