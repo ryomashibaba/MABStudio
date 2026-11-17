@@ -27,5 +27,6 @@ echo Result: dist\MABStudio\MABStudio.exe
 exit /b 0
 :error
 echo Build failed
+if /I "%MAB_STUDIO_NO_PAUSE%"=="1" exit /b 1
 pause
 exit /b 1

@@ -125,3 +125,62 @@ def test_acceptance_http_error_does_not_retry(tmp_path,monkeypatch):
         assert not report['sourceValid'] and not report['guiRendered']
         assert len(requests)==1
         assert report['worldWrites']==0
+
+
+def test_fixture_cannot_masquerade_as_actual_model(tmp_path):
+    """The official CI fixture must never produce genuine-inference evidence."""
+    report = tmp_path / 'unmarked-fixture.json'
+    assert run_acceptance(['--acceptance', '--provider', 'Ollama',
+                           '--model', 'CI_TEST_DOUBLE', '--report', str(report)]) == 1
+    data = json.loads(report.read_text(encoding='utf-8'))
+    assert data['stage'] == 'PREFLIGHT'
+    assert not data['actualProviderRequestAttempted']
+    assert not data['testDoubleRequestAttempted']
+    assert data['worldWrites'] == 0
+
+
+@pytest.mark.real_engine
+@pytest.mark.skipif(shutil.which('node') is None or (os.name != 'nt' and not os.getenv('DISPLAY')),
+                    reason='Real Node and Tk display needed')
+def test_explicit_ephemeral_fixture_real_engine_and_tk(tmp_path):
+    """Exercises real pinned B143 + Tk, but is explicitly fake-model evidence."""
+    import subprocess
+    import sys
+    import time
+    root = os.environ.get('MAB_B143_VERIFIED_ENGINE')
+    if not root:
+        pytest.skip('Real B143 engine not provided')
+    ready = tmp_path / 'fixture-ready.json'
+    process = subprocess.Popen([sys.executable, '-m', 'tests.windows_acceptance_fixture',
+                                '--port', '0', '--ready-file', str(ready)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(50):
+            if ready.exists():
+                break
+            if process.poll() is not None:
+                raise AssertionError('Fixture exited early')
+            time.sleep(.05)
+        assert ready.exists()
+        port = json.loads(ready.read_text(encoding='utf-8'))['port']
+        assert 1 <= port <= 65535
+        report = tmp_path / 'explicit-fixture.json'
+        code = run_acceptance(['--acceptance', '--provider', 'Ollama',
+                               '--model', 'CI_TEST_DOUBLE', '--test-double',
+                               '--fixture-port', str(port), '--engine', root,
+                               '--report', str(report)])
+        data = json.loads(report.read_text(encoding='utf-8'))
+        assert code == 0
+        assert data['outcome'] == 'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY'
+        assert data['testDoubleUsed'] and data['testDoubleRequestAttempted']
+        assert not data['actualProviderRequestAttempted']
+        assert data['sourceValid'] and data['guiRendered']
+        assert data['source']['voxelCount'] == 917
+        assert data['worldContacts'] == data['worldWrites'] == 0
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)

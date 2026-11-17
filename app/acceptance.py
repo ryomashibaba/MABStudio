@@ -27,6 +27,10 @@ def run_acceptance(argv: list[str]) -> int:
     parser.add_argument('--model', required=True)
     parser.add_argument('--prompt', default=DEFAULT_PROMPT)
     parser.add_argument('--report', required=True)
+    parser.add_argument('--test-double', action='store_true',
+                        help='Explicit localhost CI fixture, never a real LLM acceptance result')
+    parser.add_argument('--fixture-port', type=int, default=None,
+                        help='Only valid together with --test-double and model CI_TEST_DOUBLE')
     parser.add_argument('--engine', default=None,
                         help='Optional preverified engine directory for CI; never an unreviewed engine')
     ns = parser.parse_args(argv)
@@ -42,6 +46,8 @@ def run_acceptance(argv: list[str]) -> int:
         'sourceValid': False,
         'guiRendered': False,
         'actualProviderRequestAttempted': False,
+        'testDoubleUsed': bool(ns.test_double),
+        'testDoubleRequestAttempted': False,
         'providerIdentityIndependentlyVerified': False,
         'architecturalIntentVerified': False,
         'humanVisualQualityVerified': False,
@@ -55,6 +61,11 @@ def run_acceptance(argv: list[str]) -> int:
     window = None
     started = time.monotonic()
     try:
+        if (ns.test_double and (ns.provider != 'Ollama' or ns.model != 'CI_TEST_DOUBLE'
+                                  or ns.fixture_port is None or not (1 <= ns.fixture_port <= 65535))):
+            raise StudioError('テスト用応答は明示的なOllamaテスト設定とポートのみ許可します')
+        if not ns.test_double and (ns.fixture_port is not None or ns.model == 'CI_TEST_DOUBLE'):
+            raise StudioError('CIの模擬AIを真正ローカルLLMとして実行することは禁止です')
         if not ns.model.strip() or not ns.prompt.strip() or len(ns.prompt) > 2000:
             raise StudioError('受入テストのモデル名または日本語指示が無効です')
         report['stage'] = 'PACKAGED_RUNTIME'
@@ -77,9 +88,21 @@ def run_acceptance(argv: list[str]) -> int:
         report['stage'] = 'LOCAL_MODEL_REQUEST'
         # Exactly ONE explicit inference for diagnostic predictability. Retry is
         # separately available in ordinary GUI design, not hidden in this test.
-        report['actualProviderRequestAttempted'] = True
+        original_base = None
+        if ns.test_double:
+            # An isolated ephemeral loopback fixture must never be counted as a real model.
+            from app import core
+            original_base = core.OLLAMA_BASE
+            core.OLLAMA_BASE = f'http://127.0.0.1:{ns.fixture_port}'
+            report['testDoubleRequestAttempted'] = True
+        else:
+            report['actualProviderRequestAttempted'] = True
         llm_started = time.monotonic()
-        design = ask_llm(ns.provider, ns.model, ns.prompt)
+        try:
+            design = ask_llm(ns.provider, ns.model, ns.prompt)
+        finally:
+            if original_base is not None:
+                core.OLLAMA_BASE = original_base
         report['providerRequestSeconds'] = round(time.monotonic() - llm_started, 2)
         report['stage'] = 'REAL_MAB_SOURCE_VERIFICATION'
         scene = run_bridge(engine, design)
@@ -113,7 +136,8 @@ def run_acceptance(argv: list[str]) -> int:
         report['guiRendered'] = True
         report['guiCanvasItems'] = items
         report['previewMode'] = 'GREEDY_SURFACE_MESH'
-        report['outcome'] = 'PASS_SOURCE_AND_GUI_ONLY'
+        report['outcome'] = ('PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' if ns.test_double
+                             else 'PASS_SOURCE_AND_GUI_ONLY')
         report['stage'] = 'COMPLETE'
     except Exception as exc:
         # Do not write the sensitive model response or prompt to disk.
@@ -131,4 +155,5 @@ def run_acceptance(argv: list[str]) -> int:
             atomic_json(report_path, report)
         except (OSError, ValueError):
             return 2
-    return 0 if report['outcome'] == 'PASS_SOURCE_AND_GUI_ONLY' else 1
+    return 0 if report['outcome'] in ('PASS_SOURCE_AND_GUI_ONLY',
+                                       'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY') else 1

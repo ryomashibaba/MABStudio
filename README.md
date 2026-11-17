@@ -5,6 +5,12 @@
 2026-11-17時点の **Windows向け開発プレビュー**。既存MAB V11研究とは独立。追加課金0円を前提。**Minecraft Educationへの施工は未実装・無効**。
 
 
+## Windows native 1-action test (isolated, no model load)
+
+`RUN_WINDOWS_NATIVE_QA.bat` performs a **non-interactive, isolated** Windows build of the actual one-directory EXE, downloads only the pinned B143 file and verifies its SHA, launches the EXE to compile/render 917 real source voxels, then exercises the packaged EXE through a deliberately marked **test-double** HTTP server on an ephemeral loopback port. The test double does not occupy Ollama's 11434, and its PASS is never recorded as genuine model inference. Output and a ZIP of the EXE live under `%LOCALAPPDATA%\MABStudio\diagnostics\windows-native-YYYYMMDD-HHMMSS`. The original Studio source and prior `dist` are untouched. The script creates an isolated project virtual environment to build; it may download PyInstaller, SocketBE and a fixed GitHub B143 module. **It does not start a real model, connect to Minecraft, or write to any world.**
+
+This only tests native EXE packaging and deterministic SOURCE/GUI functionality; it does not prove unknown-language understanding, visual quality, Education connectivity, licensing, or construction permission. The CI fixture is explicit `--test-double --fixture-port PORT --model CI_TEST_DOUBLE` and must not be reported as a true provider invocation. To test a real loaded local model, use the existing `RUN_WINDOWS_ACCEPTANCE.bat` separately; the model inference can be heavy.
+
 ## 2026-11-17 配布ランタイム整合性の追加検証（v0.3継続）
 
 - Windowsビルドは、同梱 `node.exe`（22以降）、Node権限モード、Education読取ブリッジの5コマンド自己試験、SocketBE 2.8.0のモジュール読込を**配布フォルダ内の実体で**確認し、失敗時は配布を停止する。

@@ -76,8 +76,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $env:RUNNER_TEMP 'mab-studio-windows-smoke.json'
-          & ./dist/MABStudio/MABStudio.exe --smoke --smoke-engine $env:MAB_B143_VERIFIED_ENGINE --smoke-report $report
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $report)) { throw 'PACKAGED_GUI_SMOKE_FAILED' }
+          $exePath = (Resolve-Path './dist/MABStudio/MABStudio.exe').Path
+          $smokeArgs = @('--smoke','--smoke-engine', ('"'+$env:MAB_B143_VERIFIED_ENGINE+'"'), '--smoke-report', ('"'+$report+'"'))
+          $smokeProcess = Start-Process -FilePath $exePath -ArgumentList $smokeArgs -Wait -PassThru
+          if ($smokeProcess.ExitCode -ne 0 -or !(Test-Path $report)) { throw 'PACKAGED_GUI_SMOKE_FAILED' }
           $status = Get-Content -Raw $report | ConvertFrom-Json
           if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or $status.worldWrites -ne 0) {
             throw 'PACKAGED_REAL_B143_OR_GUI_FAILED'
@@ -88,21 +90,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $report = Join-Path $env:RUNNER_TEMP 'mab-windows-acceptance-test-double.json'
-          $fixture = Start-Process -FilePath (Get-Command python).Source -ArgumentList '-m', 'tests.windows_acceptance_fixture' -PassThru -WindowStyle Hidden
+          $fixtureReady = Join-Path $env:RUNNER_TEMP 'mab-fixture-port.json'
+          $fixture = Start-Process -FilePath (Get-Command python).Source -ArgumentList @('-m', 'tests.windows_acceptance_fixture', '--port', '0', '--ready-file', ('"'+$fixtureReady+'"')) -PassThru -WindowStyle Hidden
           try {
             $ready = $false
-            foreach ($attempt in 1..35) {
-              try {
-                $status = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 1
-                if ($status.models[0].name -eq 'CI_TEST_DOUBLE') { $ready = $true; break }
-              } catch { }
-              Start-Sleep -Milliseconds 200
+            foreach ($attempt in 1..40) {
+              if (Test-Path -LiteralPath $fixtureReady) { $ready = $true; break }
+              Start-Sleep -Milliseconds 250
             }
             if (!$ready) { throw 'LOCAL_FIXTURE_DID_NOT_START' }
-            & ./dist/MABStudio/MABStudio.exe --acceptance --provider Ollama --model CI_TEST_DOUBLE --engine $env:MAB_B143_VERIFIED_ENGINE --report $report
-            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_ACCEPTANCE_FAILED' }
+            $port = (Get-Content -Raw $fixtureReady | ConvertFrom-Json).port
+            if ($port -lt 1 -or $port -gt 65535) { throw 'BAD_FIXTURE_PORT' }
+            $acceptArgs = @('--acceptance','--test-double','--fixture-port',[string]$port, '--provider','Ollama', '--model','CI_TEST_DOUBLE', '--engine', ('"'+$env:MAB_B143_VERIFIED_ENGINE+'"'), '--report', ('"'+$report+'"'))
+            $acceptProcess = Start-Process -FilePath $exePath -ArgumentList $acceptArgs -Wait -PassThru
+            if ($acceptProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_ACCEPTANCE_FAILED' }
             $result = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
-            if ($result.outcome -ne 'PASS_SOURCE_AND_GUI_ONLY' -or !$result.sourceValid -or
+            if ($result.outcome -ne 'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' -or !$result.testDoubleUsed -or $result.actualProviderRequestAttempted -or !$result.testDoubleRequestAttempted -or !$result.sourceValid -or
                 !$result.guiRendered -or $result.source.voxelCount -ne 917 -or
                 $result.worldWrites -ne 0 -or $result.minecraftEducationTested) {
               throw 'PACKAGED_ACCEPTANCE_INCONSISTENT'
