@@ -639,6 +639,110 @@ def _model_response(url: str, payload: dict, timeout: int, on_progress=None) -> 
     return reply
 
 
+def _local_model_json(path: str, *, method: str = 'GET', payload: dict | None = None,
+                      timeout: float = 10.0, provider: str = 'ローカルAI') -> dict:
+    """Small, bounded localhost-only model-management requests; never follow redirects."""
+    base = LM_STUDIO_BASE if provider == 'LM Studio' else OLLAMA_BASE
+    if provider not in ('LM Studio', 'Ollama') or not path.startswith('/') or '//' in path:
+        raise StudioError('モデル管理の接続先が不正です')
+    body = json.dumps(payload).encode('utf-8') if payload is not None else None
+    req = urllib.request.Request(base + path, data=body, method=method,
+                                 headers={'Content-Type': 'application/json',
+                                          'User-Agent': 'MABStudio/0.3'})
+    try:
+        with LOCAL_HTTP.open(req, timeout=timeout) as res:
+            raw = res.read(MAX_RESPONSE + 1)
+        if len(raw) > MAX_RESPONSE:
+            raise StudioError('モデル管理の応答が大きすぎます')
+        result = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        if provider == 'LM Studio' and exc.code in (404, 405, 501):
+            raise StudioError('LM Studioのモデル管理APIが使えません。0.4.0以降か確認してください。') from exc
+        raise StudioError(f'{provider}のモデル操作がHTTP {exc.code}で拒否されました') from exc
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError, UnicodeError) as exc:
+        raise StudioError(f'{provider}のローカルサーバーとの通信に失敗しました: {str(exc)[:100]}') from exc
+    if not isinstance(result, dict):
+        raise StudioError('モデル管理の応答形式が不正です')
+    return result
+
+
+def _lm_instance_for_model(models: dict, model: str) -> str:
+    """Select exactly one loaded instance by key or instance ID; never unload all."""
+    items = models.get('models')
+    if not isinstance(items, list):
+        raise StudioError('LM Studioのロード情報を取得できません')
+    selected = []
+    for entry in items[:200]:
+        if not isinstance(entry, dict):
+            continue
+        instances = entry.get('loaded_instances', [])
+        if not isinstance(instances, list):
+            raise StudioError('LM Studioのロード情報が不正です')
+        for ins in instances[:100]:
+            if not isinstance(ins, dict):
+                continue
+            instance_id = ins.get('id')
+            if isinstance(instance_id, str) and (instance_id == model or entry.get('key') == model):
+                selected.append(instance_id)
+    selected = list(dict.fromkeys(selected))
+    if not selected:
+        raise StudioError('選択モデルは現在ロードされていません。アンロードは行いません')
+    if len(selected) != 1:
+        raise StudioError('同じモデルに複数のロード状態があります。誤終了防止のため操作を中止しました')
+    return selected[0]
+
+
+def _ollama_is_running(result: dict, model: str) -> bool:
+    items = result.get('models')
+    if not isinstance(items, list):
+        raise StudioError('Ollamaの実行中モデル一覧を取得できません')
+    return any(isinstance(item, dict) and
+               (item.get('name') == model or item.get('model') == model)
+               for item in items)
+
+
+def unload_local_model(provider: str, model: str) -> dict:
+    """Explicitly unload only a currently running selected model, with no inference.
+
+    Does not unload all, stop servers, change memory settings or touch Minecraft.
+    Confirmation/verification is local and does not re-trigger an inference.
+    """
+    if provider not in ('Ollama', 'LM Studio'):
+        raise StudioError('モデルの提供元が不正です')
+    if not isinstance(model, str) or not model.strip() or len(model) > 180 or any(ord(c) < 32 for c in model):
+        raise StudioError('アンロードするモデル名を選択してください')
+    model = model.strip()
+    if provider == 'LM Studio':
+        before = _local_model_json('/api/v1/models', provider=provider)
+        instance_id = _lm_instance_for_model(before, model)
+        reply = _local_model_json('/api/v1/models/unload', method='POST',
+                                   payload={'instance_id': instance_id},
+                                   provider=provider)
+        if reply.get('instance_id') != instance_id:
+            raise StudioError('LM Studioの応答とアンロード対象が一致しません。状態を確認してください')
+        after = _local_model_json('/api/v1/models', provider=provider)
+        try:
+            _lm_instance_for_model(after, model)
+        except StudioError as exc:
+            if 'ロードされていません' in str(exc):
+                return {'provider': provider, 'model': model, 'instance_id': instance_id,
+                        'unloaded': True, 'worldWrites': 0}
+            raise
+        raise StudioError('アンロード後も対象モデルがロード中と報告されました。LM Studioを確認してください')
+    before = _local_model_json('/api/ps', provider=provider)
+    if not _ollama_is_running(before, model):
+        raise StudioError('選択モデルは現在ロードされていません。アンロードは行いません')
+    reply = _local_model_json('/api/generate', method='POST',
+                              payload={'model': model, 'keep_alive': 0, 'stream': False},
+                              provider=provider, timeout=15.0)
+    if reply.get('model') != model or reply.get('done') is not True or reply.get('done_reason') != 'unload':
+        raise StudioError('Ollamaからアンロード完了を確認できません。実行中モデルを確認してください')
+    after = _local_model_json('/api/ps', provider=provider)
+    if _ollama_is_running(after, model):
+        raise StudioError('Ollamaが対象モデルをまだ実行中と報告しています')
+    return {'provider': provider, 'model': model, 'unloaded': True, 'worldWrites': 0}
+
+
 def llm_models(provider: str, timeout: int = 5) -> list[str]:
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの種類が不正です")

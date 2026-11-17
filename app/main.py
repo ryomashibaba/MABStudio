@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 from app.core import (
     BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError,
     ModelOutputLimitError,
-    ask_llm, branch_sha, compatibility_check, llm_models, run_bridge, atomic_json
+    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
 from app.preferences import read_local_choice, save_local_choice
@@ -87,145 +87,242 @@ class Studio(tk.Tk):
         super().destroy()
 
     def _make_ui(self):
+        """Creation-first desktop layout. Technical controls live in a separate window."""
+        c = {'bg': '#f3f6fb', 'panel': '#ffffff', 'ink': '#13253d',
+             'muted': '#617389', 'line': '#dce5ee', 'accent': '#2563eb',
+             'pale': '#eaf2ff', 'caution': '#9a5b22'}
+        self.configure(bg=c['bg'])
+        self.geometry('1270x830')
+        self.minsize(990, 690)
         style = ttk.Style(self)
         if 'clam' in style.theme_names():
             style.theme_use('clam')
-        style.configure('Title.TLabel', font=('Yu Gothic UI',17,'bold'), foreground='#15304d')
-        style.configure('Header.TLabel', font=('Yu Gothic UI',10,'bold'))
-        style.configure('TButton', font=('Yu Gothic UI',10), padding=(9,7))
-        style.configure('TLabel', font=('Yu Gothic UI',10))
-        outer = ttk.Frame(self, padding=14)
-        outer.pack(fill='both', expand=True)
-        ttk.Label(outer,text='MAB Studio',style='Title.TLabel').pack(anchor='w')
-        ttk.Label(outer,text='自然な日本語 → ローカルAI → MAB SOURCE検証 → 3Dプレビュー  |  ワールド操作なし').pack(anchor='w',pady=(0,10))
-        body = ttk.Frame(outer)
-        body.pack(fill='both',expand=True)
-        body.columnconfigure(0,minsize=385,weight=0)
-        body.columnconfigure(1,weight=1)
-        body.rowconfigure(0,weight=1)
-        left = ttk.Frame(body,padding=(0,5,12,0),width=390)
-        right = ttk.Frame(body,padding=(8,5,0,0))
-        left.grid(row=0,column=0,sticky='nsew')
-        left.grid_propagate(False)
-        right.grid(row=0,column=1,sticky='nsew')
-        left.columnconfigure(0,weight=1)
-        self.engine_state=tk.StringVar(value='エンジンを確認中')
-        ttk.Label(left,text='1  MABエンジン',style='Header.TLabel').grid(row=0,column=0,sticky='w')
-        ttk.Label(left,textvariable=self.engine_state,wraplength=330,foreground='#2a516e').grid(row=1,column=0,sticky='w',pady=(3,5))
-        self.install_btn=ttk.Button(left,text='MABを初期導入（確認済みB143）',command=self.install_baseline)
-        self.install_btn.grid(row=2,column=0,sticky='ew')
-        branchrow=ttk.Frame(left)
-        branchrow.grid(row=3,column=0,sticky='ew',pady=(9,4))
-        branchrow.columnconfigure(0,weight=1)
-        ttk.Entry(branchrow,textvariable=self.branch).grid(row=0,column=0,sticky='ew',padx=(0,4))
-        ttk.Button(branchrow,text='追跡保存',command=self.save_branch).grid(row=0,column=1)
-        updates=ttk.Frame(left)
-        updates.grid(row=4,column=0,sticky='ew',pady=(0,5))
-        updates.columnconfigure(0,weight=1)
-        updates.columnconfigure(1,weight=1)
-        self.check_btn=ttk.Button(updates,text='GitHub更新を確認',command=self.check_update)
-        self.check_btn.grid(row=0,column=0,sticky='ew',padx=(0,4))
-        self.apply_btn=ttk.Button(updates,text='検証して更新',command=self.install_pending,state='disabled')
-        self.apply_btn.grid(row=0,column=1,sticky='ew')
-        self.rollback_btn=ttk.Button(left,text='前のエンジンに戻す',command=self.rollback)
-        self.rollback_btn.grid(row=5,column=0,sticky='ew')
-        ttk.Separator(left).grid(row=6,column=0,sticky='ew',pady=13)
-        ttk.Label(left,text='2  ローカルAI',style='Header.TLabel').grid(row=7,column=0,sticky='w')
-        provider=ttk.Combobox(left,textvariable=self.llm_provider,values=('Ollama','LM Studio'),state='readonly')
-        provider.grid(row=8,column=0,sticky='ew',pady=(5,4))
-        provider.bind('<<ComboboxSelected>>',lambda _: self._provider_changed())
-        mrow=ttk.Frame(left)
-        mrow.grid(row=9,column=0,sticky='ew',pady=(0,7))
-        mrow.columnconfigure(0,weight=1)
-        self.model_box=ttk.Combobox(mrow,textvariable=self.model)
-        self.model_box.grid(row=0,column=0,sticky='ew',padx=(0,4))
-        self.model_box.bind('<<ComboboxSelected>>',lambda _: self._remember_model_choice())
-        self.models_btn=ttk.Button(mrow,text='モデル取得',command=self.refresh_models)
-        self.models_btn.grid(row=0,column=1,padx=(0,4))
-        ttk.Button(mrow,text='接続診断',command=self.diagnose).grid(row=0,column=2)
-        ttk.Label(left,text='3  どんな建築を作りたい？',style='Header.TLabel').grid(row=10,column=0,sticky='w',pady=(6,5))
-        self.prompt = tk.Text(left,height=7,wrap='word',font=('Yu Gothic UI',10),relief='solid',borderwidth=1)
-        self.prompt.grid(row=11,column=0,sticky='nsew')
-        self.prompt.insert('1.0','未来的な2階建ての小さな図書館。ガラス張りの正面、\n広い入口、屋上庭園を作って。')
-        left.rowconfigure(11,weight=1)
-        self.generate_btn=ttk.Button(left,text='AIで設計して3Dプレビュー',command=self.generate)
-        self.generate_btn.grid(row=12,column=0,sticky='ew',pady=(10,4))
-        self.revise_btn=ttk.Button(left,text='現在の設計をAIで部分修正',command=self.revise_design,state='disabled')
-        self.revise_btn.grid(row=13,column=0,sticky='ew',pady=(2,4))
-        self.sample_btn=ttk.Button(left,text='サンプル建築で動作確認（AI不要）',command=self.show_sample)
-        self.sample_btn.grid(row=14,column=0,sticky='ew',pady=(2,4))
-        self.export_btn=ttk.Button(left,text='検証済み設計をJSON保存',command=self.export_design,state='disabled')
-        self.export_btn.grid(row=15,column=0,sticky='ew',pady=(2,4))
-        self.edu_btn=ttk.Button(left,text='Educationへインポート（実機未検証）',state='disabled')
-        self.edu_btn.grid(row=16,column=0,sticky='ew',pady=(2,5))
-        ttk.Label(left,text='注意：B143は設計用。教育版への施工・ファイル書込は未接続。\n専用テストワールド以外では使わないでください。',
-                  wraplength=320,foreground='#a0522d').grid(row=17,column=0,sticky='w',pady=(2,3))
-        ttk.Label(right,text='SOURCE建築モデル / 設計差分 / ワールド地形（読み取り専用）',style='Header.TLabel').pack(anchor='w',pady=(0,6))
-        tools = ttk.Frame(right)
-        tools.pack(fill='x', pady=(0, 7))
-        self.view_box = ttk.Combobox(tools,textvariable=self.view_mode, state='readonly', width=17,
-                                     values=('建築のみ','修正案（未承認）','変更差分','地形＋建築'))
-        self.view_box.pack(side='left',padx=(0,6))
-        detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
-                                  width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
-        detail_box.pack(side='left',padx=(0,6))
-        detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
+        style.configure('App.TFrame', background=c['bg'])
+        style.configure('Panel.TFrame', background=c['panel'])
+        style.configure('TFrame', background=c['panel'])
+        style.configure('TLabel', background=c['panel'], foreground=c['ink'],
+                        font=('Yu Gothic UI', 10))
+        style.configure('Muted.TLabel', background=c['panel'], foreground=c['muted'],
+                        font=('Yu Gothic UI', 9))
+        style.configure('PageTitle.TLabel', background=c['bg'], foreground=c['ink'],
+                        font=('Yu Gothic UI', 20, 'bold'))
+        style.configure('Section.TLabel', background=c['panel'], foreground=c['ink'],
+                        font=('Yu Gothic UI', 12, 'bold'))
+        style.configure('TButton', font=('Yu Gothic UI', 10), padding=(10, 8),
+                        background=c['pale'], foreground=c['ink'], borderwidth=0)
+        style.map('TButton', background=[('active', '#d9e7fc'), ('disabled', '#e9edf2')])
+        style.configure('Primary.TButton', font=('Yu Gothic UI', 11, 'bold'),
+                        padding=(13, 12), background=c['accent'], foreground='#fff')
+        style.map('Primary.TButton', background=[('active', '#1d4ed8'),
+                                                 ('disabled', '#dce4ee')],
+                  foreground=[('disabled', '#8796a9')])
+        style.configure('Quiet.TButton', font=('Yu Gothic UI', 9), padding=(7, 5),
+                        background=c['panel'], foreground='#395573')
+        style.configure('TCombobox', padding=6)
+        style.configure('TEntry', padding=5)
+        style.configure('TCheckbutton', background=c['panel'], foreground=c['ink'])
+        style.configure('TSeparator', background=c['line'])
+
+        root = ttk.Frame(self, style='App.TFrame', padding=(20, 13, 20, 13))
+        root.pack(fill='both', expand=True)
+        header = ttk.Frame(root, style='App.TFrame')
+        header.pack(fill='x', pady=(0, 15))
+        # The header labels use the root background, not the card surface.
+        title = ttk.Frame(header, style='App.TFrame')
+        title.pack(side='left', fill='x', expand=True)
+        ttk.Label(title, text='MAB Studio', style='PageTitle.TLabel').pack(anchor='w')
+        tk.Label(title, text='日本語で設計する  ·  ローカルAI  ·  Minecraft Education',
+                 font=('Yu Gothic UI', 10), fg=c['muted'], bg=c['bg']).pack(anchor='w')
+        ttk.Button(header, text='保存した建築', command=self.browse_saved_designs,
+                   style='Quiet.TButton').pack(side='right', padx=(7, 0))
+        ttk.Button(header, text='詳細設定・接続診断', command=self._open_advanced,
+                   style='Quiet.TButton').pack(side='right')
+        body = ttk.Frame(root, style='App.TFrame')
+        body.pack(fill='both', expand=True)
+        body.columnconfigure(0, minsize=320, weight=0)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        left = ttk.Frame(body, style='Panel.TFrame', padding=(18, 18, 18, 16), width=345)
+        right = ttk.Frame(body, style='Panel.TFrame', padding=(14, 14, 14, 13))
+        left.grid(row=0, column=0, sticky='nsew', padx=(0, 13))
+        left.pack_propagate(False)
+        right.grid(row=0, column=1, sticky='nsew')
+        left.columnconfigure(0, weight=1)
+
+        ttk.Label(left, text='AIモデル', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(left, text='手元のモデルを選んで建築します',
+                  style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
+        self.provider_box = ttk.Combobox(left, textvariable=self.llm_provider,
+                              values=('Ollama', 'LM Studio'), state='readonly')
+        self.provider_box.pack(fill='x')
+        self.provider_box.bind('<<ComboboxSelected>>', lambda _: self._provider_changed())
+        mrow = ttk.Frame(left, style='Panel.TFrame')
+        mrow.pack(fill='x', pady=(8, 6))
+        mrow.columnconfigure(0, weight=1)
+        self.model_box = ttk.Combobox(mrow, textvariable=self.model)
+        self.model_box.grid(row=0, column=0, sticky='ew', padx=(0, 5))
+        self.model_box.bind('<<ComboboxSelected>>', lambda _: self._remember_model_choice())
+        self.models_btn = ttk.Button(mrow, text='更新', command=self.refresh_models,
+                                     style='Quiet.TButton')
+        self.models_btn.grid(row=0, column=1)
+        self.unload_btn = ttk.Button(left, text='選択モデルをアンロード（メモリ解放）',
+                                     command=self.unload_selected_model,
+                                     style='Quiet.TButton')
+        self.unload_btn.pack(anchor='w', pady=(0, 10))
+        ttk.Separator(left).pack(fill='x', pady=(4, 13))
+
+        ttk.Label(left, text='どんな建築を作りたい？', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(left, text='日本語で自由に指示できます', style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
+        self.prompt = tk.Text(left, height=8, wrap='word', font=('Yu Gothic UI', 11),
+                              relief='flat', borderwidth=0, bg='#f5f8fd', fg=c['ink'],
+                              padx=12, pady=12, insertbackground=c['ink'],
+                              highlightbackground=c['line'], highlightcolor=c['accent'],
+                              highlightthickness=1, undo=True)
+        self.prompt.pack(fill='both', expand=True, pady=(0, 13))
+        self.prompt.insert('1.0', '未来的な4階建てのビルを作って。窓がたくさんあるように。')
+        self.generate_btn = ttk.Button(left, text='AIで建築を設計する',
+                                       command=self.generate, style='Primary.TButton')
+        self.generate_btn.pack(fill='x', pady=(0, 8))
+        self.revise_btn = ttk.Button(left, text='この指示で今の建築を修正',
+                                     command=self.revise_design, state='disabled')
+        self.revise_btn.pack(fill='x', pady=(0, 8))
+        self.sample_btn = ttk.Button(left, text='AIなしでサンプルを見る',
+                                     command=self.show_sample, style='Quiet.TButton')
+        self.sample_btn.pack(anchor='w')
+        tk.Label(left, text='設計の確認・修正までアプリ内で完結します。\nMinecraftへの施工はまだ有効化していません。',
+                 font=('Yu Gothic UI', 9), fg=c['muted'], bg=c['panel'],
+                 justify='left', anchor='w', wraplength=300).pack(anchor='w', pady=(13, 0))
+
+        top = ttk.Frame(right, style='Panel.TFrame')
+        top.pack(fill='x', pady=(0, 10))
+        ttk.Label(top, text='3Dプレビュー', style='Section.TLabel').pack(side='left')
+        self.export_btn = ttk.Button(top, text='設計を保存', command=self.export_design,
+                                     style='Quiet.TButton', state='disabled')
+        self.export_btn.pack(side='right', padx=(6, 0))
+        self.restore_btn = ttk.Button(top, text='前に戻す', command=self.restore_previous,
+                                      style='Quiet.TButton', state='disabled')
+        self.restore_btn.pack(side='right')
+
+        tools = ttk.Frame(right, style='Panel.TFrame')
+        tools.pack(fill='x', pady=(0, 9))
+        self.view_box = ttk.Combobox(tools, textvariable=self.view_mode, state='readonly',
+                                     width=17, values=('建築のみ', '修正案（未承認）', '変更差分', '地形＋建築'))
+        self.view_box.pack(side='left', padx=(0, 7))
         self.view_box.bind('<<ComboboxSelected>>', lambda _: self._refresh_view())
-        self.restore_btn=ttk.Button(tools,text='前の設計に戻す',command=self.restore_previous,state='disabled')
-        self.restore_btn.pack(side='left',padx=(0,6))
-        self.load_btn=ttk.Button(tools,text='前回の設計を開く',command=self.load_saved_design)
-        self.load_btn.pack(side='left')
-        self.browse_btn=ttk.Button(tools,text='過去の建築一覧',command=self.browse_saved_designs)
-        self.browse_btn.pack(side='left',padx=(6,0))
-        reviewbar = ttk.Frame(right)
-        reviewbar.pack(fill='x', pady=(0,7))
-        self.approve_draft_btn=ttk.Button(reviewbar,text='AI修正案を承認（設計のみ）',
-                                           command=self.approve_revision,state='disabled')
-        self.approve_draft_btn.pack(side='left',padx=(0,6))
-        self.reject_draft_btn=ttk.Button(reviewbar,text='修正案を却下',
-                                          command=self.reject_revision,state='disabled')
+        detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
+                                   width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
+        detail_box.pack(side='left')
+        detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
+        ttk.Label(tools, text='SOURCE検証済み・施工なし', style='Muted.TLabel').pack(side='right')
+
+        self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
+        ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel').pack(side='left', padx=(0, 12))
+        self.approve_draft_btn = ttk.Button(self.reviewbar, text='修正案を承認',
+                                            command=self.approve_revision, state='disabled',
+                                            style='Primary.TButton')
+        self.approve_draft_btn.pack(side='left', padx=(0, 6))
+        self.reject_draft_btn = ttk.Button(self.reviewbar, text='却下',
+                                           command=self.reject_revision, state='disabled')
         self.reject_draft_btn.pack(side='left')
-        ttk.Label(reviewbar,text='承認してもMinecraftには施工しません',
-                  foreground='#a0522d').pack(side='left',padx=(10,0))
-        terrainbar = ttk.Frame(right)
-        terrainbar.pack(fill='x', pady=(0,7))
-        ttk.Label(terrainbar,text='予定位置 XYZ').pack(side='left')
-        self.anchor_entry = ttk.Entry(terrainbar,textvariable=self.place_xyz,width=18)
-        self.anchor_entry.pack(side='left',padx=(6,6))
-        self.anchor_entry.bind('<FocusOut>', lambda _event: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
-        self.anchor_entry.bind('<Return>', lambda _event: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
-        self.import_terrain_btn=ttk.Button(terrainbar,text='.mcworldを読み取る',command=self.import_terrain)
-        self.import_terrain_btn.pack(side='left')
-        ttk.Button(terrainbar,text='B134読取結果',command=self.import_education_diagnostic).pack(side='left',padx=(8,0))
-        educationbar = ttk.Frame(right)
-        educationbar.pack(fill='x', pady=(0,7))
-        self.edu_live_btn=ttk.Button(educationbar,text='Educationから直接読取（5照合）',
-                                     command=self.start_education_readonly)
-        self.edu_live_btn.pack(side='left',padx=(0,6))
-        self.edu_stop_btn=ttk.Button(educationbar,text='読取待機を停止',
-                                     command=self.stop_education_readonly,state='disabled')
-        self.edu_stop_btn.pack(side='left')
-        ttk.Label(educationbar,text='1か所のオーク階段・testforblock限定・施工しません',
-                  foreground='#a0522d').pack(side='left',padx=(9,0))
-        sectionbar=ttk.Frame(right)
-        sectionbar.pack(fill='x', pady=(0,5))
-        self.section_toggle=ttk.Checkbutton(sectionbar,text='建築の断面を表示（上部を一時非表示）',
-                                            variable=self.section_enabled,command=self._section_changed)
-        self.section_toggle.pack(side='left',padx=(0,8))
-        self.section_scale=tk.Scale(sectionbar,from_=0,to=96,orient='horizontal',
-                                    variable=self.section_level,showvalue=True,length=220,
-                                    resolution=1,command=lambda _:self._queue_section_change())
-        self.section_scale.pack(side='left')
-        ttk.Label(sectionbar,text='※表示のみ・SOURCEは変更しません',
-                  foreground='#64748b').pack(side='left',padx=(9,0))
-        self.preview=VoxelPreview(right)
-        self.preview.pack(fill='both',expand=True)
+        self._reviewbar_visible = False
+        self.preview = VoxelPreview(right)
+        self.preview.pack(fill='both', expand=True)
+        sectionbar = ttk.Frame(right, style='Panel.TFrame')
+        sectionbar.pack(fill='x', pady=(9, 3))
+        self.section_toggle = ttk.Checkbutton(sectionbar, text='断面表示',
+                                              variable=self.section_enabled,
+                                              command=self._section_changed)
+        self.section_toggle.pack(side='left')
+        self.section_scale = tk.Scale(sectionbar, from_=0, to=96, orient='horizontal',
+                                      variable=self.section_level, showvalue=True, length=175,
+                                      resolution=1, bg=c['panel'], highlightthickness=0,
+                                      command=lambda _: self._queue_section_change())
+        self.section_scale.pack(side='left', padx=(4, 7))
+        ttk.Label(sectionbar, text='上の階を一時的に隠します', style='Muted.TLabel').pack(side='left')
         self.section_scale.configure(state='disabled')
-        self.caption=tk.StringVar(value='表示待ち：AIモデル・エンジンが準備できたら生成できます。')
-        ttk.Label(right,textvariable=self.caption,wraplength=670).pack(anchor='w',pady=(7,0))
-        self.status=tk.StringVar(value='準備中')
-        foot=ttk.Label(outer,textvariable=self.status,anchor='w',wraplength=950,foreground='#34566e')
-        foot.pack(fill='x',pady=(9,0))
+        self.caption = tk.StringVar(value='建築のプレビューがここに表示されます')
+        ttk.Label(right, textvariable=self.caption, style='Muted.TLabel',
+                  wraplength=750).pack(anchor='w', pady=(3, 0))
+        self.status = tk.StringVar(value='準備中')
+        statusbar = ttk.Frame(root, style='App.TFrame')
+        statusbar.pack(fill='x', pady=(12, 0))
+        tk.Label(statusbar, textvariable=self.status, bg=c['bg'], fg='#3d5876',
+                 anchor='w', font=('Yu Gothic UI', 9)).pack(side='left', fill='x', expand=True)
+        tk.Label(statusbar, text='● 施工機能は無効', bg=c['bg'], fg=c['caution'],
+                 font=('Yu Gothic UI', 9)).pack(side='right')
+
+        # Advanced controls are constructed once, but never occupy normal view.
+        # Keeping the same widget identities preserves tests and all workflows.
+        # An on-demand overlay avoids adding a hidden top-level window to normal
+        # operation, which otherwise also intercepts history dialogs on Windows.
+        self._advanced = ttk.Frame(self, style='Panel.TFrame', padding=6)
+        advanced = ttk.Frame(self._advanced, style='Panel.TFrame', padding=20)
+        advanced.pack(fill='both', expand=True)
+        ttk.Label(advanced, text='エンジン管理・地形・Education',
+                  style='Section.TLabel').pack(anchor='w')
+        ttk.Label(advanced, text='普段の建築には不要です。SOURCE検証とワールド保護条件は変更しません。',
+                  style='Muted.TLabel').pack(anchor='w', pady=(3, 14))
+        self.engine_state = tk.StringVar(value='エンジンを確認中')
+        ttk.Label(advanced, text='MABエンジン', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(advanced, textvariable=self.engine_state, style='Muted.TLabel').pack(anchor='w', pady=3)
+        self.install_btn = ttk.Button(advanced, text='確認済みB143を導入', command=self.install_baseline)
+        self.install_btn.pack(fill='x', pady=(5, 6))
+        branchrow = ttk.Frame(advanced)
+        branchrow.pack(fill='x', pady=(0, 7))
+        branchrow.columnconfigure(0, weight=1)
+        ttk.Entry(branchrow, textvariable=self.branch).grid(row=0, column=0, sticky='ew', padx=(0, 6))
+        ttk.Button(branchrow, text='追跡先を保存', command=self.save_branch).grid(row=0, column=1)
+        updates = ttk.Frame(advanced)
+        updates.pack(fill='x', pady=(0, 10))
+        self.check_btn = ttk.Button(updates, text='GitHub更新を確認', command=self.check_update)
+        self.check_btn.pack(side='left', padx=(0, 6))
+        self.apply_btn = ttk.Button(updates, text='検証して更新', command=self.install_pending, state='disabled')
+        self.apply_btn.pack(side='left', padx=(0, 6))
+        self.rollback_btn = ttk.Button(updates, text='以前のエンジンへ戻す', command=self.rollback)
+        self.rollback_btn.pack(side='left')
+        ttk.Separator(advanced).pack(fill='x', pady=(7, 14))
+        ttk.Label(advanced, text='接続・設計履歴', style='Section.TLabel').pack(anchor='w')
+        quick = ttk.Frame(advanced)
+        quick.pack(fill='x', pady=(6, 13))
+        ttk.Button(quick, text='接続診断', command=self.diagnose).pack(side='left', padx=(0, 6))
+        self.load_btn = ttk.Button(quick, text='最後の設計を開く', command=self.load_saved_design)
+        self.load_btn.pack(side='left', padx=(0, 6))
+        self.browse_btn = ttk.Button(quick, text='保存済み一覧', command=self.browse_saved_designs)
+        self.browse_btn.pack(side='left')
+        ttk.Separator(advanced).pack(fill='x', pady=(1, 14))
+        ttk.Label(advanced, text='地形・Education（読み取り専用）', style='Section.TLabel').pack(anchor='w')
+        terrainbar = ttk.Frame(advanced)
+        terrainbar.pack(fill='x', pady=(9, 6))
+        ttk.Label(terrainbar, text='予定位置 XYZ').pack(side='left')
+        self.anchor_entry = ttk.Entry(terrainbar, textvariable=self.place_xyz, width=18)
+        self.anchor_entry.pack(side='left', padx=(8, 10))
+        self.anchor_entry.bind('<FocusOut>', lambda _: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
+        self.anchor_entry.bind('<Return>', lambda _: self._refresh_view() if self.view_mode.get()=='地形＋建築' else None)
+        self.import_terrain_btn = ttk.Button(terrainbar, text='.mcworldを読み取る', command=self.import_terrain)
+        self.import_terrain_btn.pack(side='left')
+        ttk.Button(terrainbar, text='B134結果を読み込む',
+                   command=self.import_education_diagnostic).pack(side='left', padx=(8, 0))
+        educationbar = ttk.Frame(advanced)
+        educationbar.pack(fill='x', pady=(0, 8))
+        self.edu_live_btn = ttk.Button(educationbar, text='Educationから階段を読取',
+                                       command=self.start_education_readonly)
+        self.edu_live_btn.pack(side='left', padx=(0, 6))
+        self.edu_stop_btn = ttk.Button(educationbar, text='読取待機を停止',
+                                       command=self.stop_education_readonly, state='disabled')
+        self.edu_stop_btn.pack(side='left')
+        self.edu_btn = ttk.Button(advanced, text='Minecraftに施工（未実装・利用不可）',
+                                  state='disabled')
+        self.edu_btn.pack(anchor='w', pady=(4, 4))
+        ttk.Label(advanced, text='B143は設計専用です。施工許可はありません。\n'
+                 'Educationへの直接接続は既存の1点読取診断に限定します。',
+                 style='Muted.TLabel').pack(anchor='w')
+        ttk.Button(advanced, text='閉じる', command=self._advanced.place_forget).pack(side='right', pady=(10, 0))
+
+    def _open_advanced(self):
+        self._advanced.place(relx=0.5, rely=0.5, anchor='center',
+                             relwidth=0.72, relheight=0.92)
+        self._advanced.lift()
+        self._advanced.focus_set()
 
     def _startup(self):
         self._update_engine_label()
@@ -362,6 +459,16 @@ class Studio(tk.Tk):
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
+        self.unload_btn.configure(state='normal' if not self.busy and bool(self.model.get().strip()) else 'disabled')
+        self.models_btn.configure(state='normal' if not self.busy else 'disabled')
+        self.model_box.configure(state='normal' if not self.busy else 'disabled')
+        self.provider_box.configure(state='readonly' if not self.busy else 'disabled')
+        if self.pending_revision is not None and not self._reviewbar_visible:
+            self.reviewbar.pack(fill='x', before=self.preview, pady=(0, 9))
+            self._reviewbar_visible = True
+        elif self.pending_revision is None and self._reviewbar_visible:
+            self.reviewbar.pack_forget()
+            self._reviewbar_visible = False
 
     def _coords(self):
         try:
@@ -661,6 +768,24 @@ class Studio(tk.Tk):
                 return
             self.status.set(f'{provider}: {len(names)}件のモデルを取得しました。')
         self._start(provider+'のモデル一覧を取得中',lambda:llm_models(provider),done,quiet=True)
+
+    def unload_selected_model(self):
+        # A click targets one exact loaded model, never every loaded model.
+        # The busy gate prevents this app from unloading its own in-flight request.
+        if self.busy:
+            messagebox.showwarning('アンロードを保留',
+                '生成や検証が実行中です。終了後にアンロードできます。')
+            return
+        provider = self.llm_provider.get()
+        model = self.model.get().strip()
+        if not model:
+            messagebox.showwarning('モデル未選択', 'アンロードするモデルを選択してください。')
+            return
+        def done(report):
+            self.status.set(provider + ' の ' + model + ' をアンロードしました。別のモデルには触れていません。')
+            # Retain the chosen ID for convenient future reload; never silently load.
+        self._start('選択したローカルAIモデルをメモリからアンロード中',
+                    lambda: unload_local_model(provider, model), done)
 
     def diagnose(self):
         provider = self.llm_provider.get()
