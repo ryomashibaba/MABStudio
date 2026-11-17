@@ -194,6 +194,8 @@ class Studio(tk.Tk):
                                 '同梱の RUN_STUDIO_NATIVE.bat を起動してください。\n'
                                 'アプリ内に表示します（ブラウザーは使いません）。')
             return
+        new_view = None
+        old_hidden = False
         try:
             new_view = VoxelPreview(self.viewer_host) if native else NativeVoxelPreview(self.viewer_host)
             new_view.on_scene_changed = None
@@ -203,20 +205,32 @@ class Studio(tk.Tk):
             new_view.zoom = old.zoom
             new_view.pan_x, new_view.pan_y = old.pan_x, old.pan_y
             new_view.set_cut_level(old.cut_level)
-            new_view.on_scene_changed = self._preview_updated
-            # Replace the display in the existing GUI without editing SOURCE.
+            # Rendering depends on the *visible* widget size. The old renderer
+            # must remain alive until the replacement has drawn successfully;
+            # a GPU/VTK error here must never leave the Studio preview blank.
             old.pack_forget()
+            old_hidden = True
             new_view.pack(fill='both', expand=True)
-            self.preview = new_view
-            old.destroy()
+            self.viewer_host.update_idletasks()
             new_view.draw()
-            self._preview_updated()
-            self.status.set('3D表示をアプリ内で切替えました（SOURCE・ワールド未変更）')
-        except (NativeViewerError, OSError, ValueError, RuntimeError) as exc:
-            if 'new_view' in locals() and new_view is not old:
+        except (NativeViewerError, OSError, ValueError, RuntimeError, tk.TclError) as exc:
+            if new_view is not None:
                 try: new_view.destroy()
                 except Exception: pass
+            if old_hidden and old.winfo_exists():
+                old.pack(fill='both', expand=True)
+            # Preserve active renderer, camera, preview popup and SOURCE history.
+            self.preview = old
+            self._preview_updated()
+            self.status.set('3D切替に失敗したため、元の表示を維持しました（SOURCE不変）')
             messagebox.showerror('3D表示を切替えられません', str(exc))
+            return
+        # Commit only AFTER a real, successful first frame.
+        new_view.on_scene_changed = self._preview_updated
+        self.preview = new_view
+        old.destroy()
+        self._preview_updated()
+        self.status.set('3D表示をアプリ内で切替えました（SOURCE・ワールド未変更）')
 
     def _preview_updated(self):
         self._sync_large_preview()

@@ -283,3 +283,75 @@ def test_native_drag_frame_reduced_then_restored_without_changing_source():
         assert scene==snapshot
     finally:
         root.destroy()
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_preview_switch_rolls_back_if_first_visible_frame_fails(studio, monkeypatch):
+    """A bad Windows GPU initialization must not destroy the usable preview.
+
+    The failing new widget needs to survive its initial *hidden* draws, then
+    fail after packing, just like a driver failing to present the first frame.
+    """
+    from app import main as studio_main
+    from app.preview import VoxelPreview
+    app, _ = studio
+    old = app.preview
+    source = copy.deepcopy(old.scene)
+    original_revision = app.history.head()['revisionId']
+    old.set_view('右側')
+    old.zoom, old.pan_x, old.pan_y = 1.75, 26, -13
+    app.open_large_preview()
+    popup = app._large_preview
+    errors = []
+
+    class BrokenNative(VoxelPreview):
+        def draw(self):
+            if self.winfo_manager() == 'pack':
+                raise RuntimeError('GPU_FIRST_FRAME_FAILED_TEST')
+            return super().draw()
+
+    monkeypatch.setattr(studio_main, 'native_dependencies_available', lambda: True)
+    monkeypatch.setattr(studio_main, 'NativeVoxelPreview', BrokenNative)
+    monkeypatch.setattr(studio_main.messagebox, 'showerror', lambda *args: errors.append(args))
+    app.open_gpu_preview()
+    assert app.preview is old and old.winfo_exists() and old.winfo_manager() == 'pack'
+    assert len(app.viewer_host.winfo_children()) == 1
+    assert app._large_preview is popup  # no invisible popup replacement
+    assert (old.zoom, old.pan_x, old.pan_y) == (1.75, 26, -13)
+    assert old.scene == source
+    assert app.history.head()['revisionId'] == original_revision
+    assert len(errors) == 1 and 'GPU_FIRST_FRAME_FAILED_TEST' in errors[0][1]
+    app._large_preview_window.destroy()
+    app._large_preview_window = app._large_preview = None
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_focus_loss_after_native_drag_restores_full_quality():
+    if not native_dependencies_available():
+        pytest.skip('VTK and Pillow unavailable')
+    from types import SimpleNamespace
+    import tkinter as tk
+    root = tk.Tk()
+    root.geometry('730x530')
+    widget = NativeVoxelPreview(root)
+    widget.pack(fill='both', expand=True)
+    try:
+        root.update()
+        scene={'primitives': [[x,y,z,(x+z)%2] for x in range(8)
+                              for y in range(4) for z in range(8)],
+               'previewPalette': ['#b1a18e','#65879c']}
+        widget.show(scene)
+        widget.draw()
+        full = widget._rendered_size
+        widget._start_rotate(SimpleNamespace(x=100,y=90,state=0))
+        widget._drag_to(SimpleNamespace(x=132,y=121))
+        widget.draw()
+        assert widget._interactive_preview and widget._drag is not None
+        assert widget._image.bind('<FocusOut>')
+        # The same handler is bound to actual focus loss (Alt+Tab/window switch).
+        widget._end_drag(SimpleNamespace())
+        widget.draw()
+        assert widget._drag is None and not widget._interactive_preview
+        assert widget._rendered_size == full
+        assert len(scene['primitives']) == 256
+    finally:
+        root.destroy()

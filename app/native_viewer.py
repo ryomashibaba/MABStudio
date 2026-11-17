@@ -268,6 +268,9 @@ class NativeVoxelPreview(tk.Frame):
         self._image.bind('<ButtonRelease-1>', self._end_drag)
         self._image.bind('<ButtonRelease-2>', self._end_drag)
         self._image.bind('<ButtonRelease-3>', self._end_drag)
+        # Alt+Tab, popup focus or losing the drag widget can swallow release.
+        # Recover full-detail rendering rather than staying in 72% preview.
+        self._image.bind('<FocusOut>', self._end_drag)
         self._image.bind('<MouseWheel>', self._wheel)
         self._image.bind('<Button-4>', lambda e: self._zoom_at(1.12, (e.x, e.y)))
         self._image.bind('<Button-5>', lambda e: self._zoom_at(1/1.12, (e.x, e.y)))
@@ -308,6 +311,8 @@ class NativeVoxelPreview(tk.Frame):
         self._schedule(16, coalesce=True)
 
     def _end_drag(self, e=None):
+        if self._drag is None:
+            return
         self._drag = None
         # Cancel any pending low-resolution drag frame; finish with full detail.
         self._schedule(12)
