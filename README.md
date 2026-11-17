@@ -34,7 +34,7 @@
 
 Windows CIのソースを独立したMAB Studioリポジトリのルートに置き、Actionsから `Windows GUI + pinned SOURCE release smoke` を実行すると、真正エンジンをGitHubの固定コミットから受信してSHAを確認した後、Windows runner上でPyInstaller EXEをビルド・起動して検証する。**原本のMAB本体repoにはコミットしない。**
 
-手動Windows開発ビルドは `build_windows.bat`。出力 `dist\MABStudio\MABStudio.exe` を起動し、Pythonがなくても利用できることは**Windows実機での検証後にのみ**確定する。
+手動Windows開発ビルドは `build_windows.bat`（PyInstallerはプロジェクト内の隔離 `.venv-build` のみに導入し、システムのPythonパッケージを更新しない）。出力 `dist\MABStudio\MABStudio.exe` を起動し、Pythonがなくても利用できることは**Windows実機での検証後にのみ**確定する。
 
 ## 追加依存ライブラリと未検証範囲
 
