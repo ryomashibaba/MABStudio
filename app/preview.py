@@ -222,6 +222,16 @@ def scene_bounds(points: list) -> dict:
 
 
 class VoxelPreview(tk.Canvas):
+    # Fixed, SOURCE-independent camera orientations. In this viewer +Z is front,
+    # +X is right, and +Y is above; these labels describe SOURCE axes only.
+    VIEWS = {
+        '斜め': (math.pi * 3 / 4, math.radians(27)),
+        '正面': (0.0, 0.0),
+        '背面': (math.pi, 0.0),
+        '左側': (-math.pi / 2, 0.0),
+        '右側': (math.pi / 2, 0.0),
+        '上面': (0.0, math.pi / 2),
+    }
     LIMIT = 2300
     DETAIL_LIMITS = {'なめらか（全体）': None, '標準（2,300）': 2300, '精細（8,000）': 8000,
                      '高精細（15,000）': 15000,
@@ -229,12 +239,12 @@ class VoxelPreview(tk.Canvas):
     def __init__(self, master, **kw):
         super().__init__(master, bg='#101b2b', highlightthickness=0, **kw)
         self.scene = None
-        self.angle = math.pi * 3 / 4
+        self.angle, self.elevation = self.VIEWS['斜め']
         self.zoom = 1.0
-        self.elevation = math.radians(27)
         self.pan_x = self.pan_y = 0.0
         self.pressed_at = None
         self.pan_pressed = None
+        self._shift_pan = False
         self.show_edges = False
         self.detail_limit = self.LIMIT
         self.mesh_mode = True
@@ -242,20 +252,42 @@ class VoxelPreview(tk.Canvas):
         self._mesh_cache = {}
         self.on_scene_changed = None
         self.bind('<Configure>', lambda e: self.draw())
-        self.bind('<ButtonPress-1>', lambda e: setattr(self, 'pressed_at', (e.x, e.y, self.angle, self.elevation)))
+        self.bind('<ButtonPress-1>', self._start_left_drag)
         self.bind('<B1-Motion>', self._drag)
+        self.bind('<ButtonRelease-1>', self._end_drag)
         self.bind('<MouseWheel>', self._wheel)
-        self.bind('<Button-4>', lambda e: self._zoom_by(1.12))
-        self.bind('<Button-5>', lambda e: self._zoom_by(1/1.12))
-        self.bind('<ButtonPress-2>', lambda e: setattr(self,'pan_pressed',(e.x,e.y,self.pan_x,self.pan_y)))
-        self.bind('<B2-Motion>', self._pan)
+        self.bind('<Button-4>', lambda e: self._zoom_by(1.12, (e.x, e.y)))
+        self.bind('<Button-5>', lambda e: self._zoom_by(1/1.12, (e.x, e.y)))
+        for button in (2, 3):
+            self.bind(f'<ButtonPress-{button}>', self._start_pan)
+            self.bind(f'<B{button}-Motion>', self._pan)
+            self.bind(f'<ButtonRelease-{button}>', self._end_drag)
         self.bind('<Double-Button-1>', lambda _: self.reset_view())
+        self.bind('<KeyPress-f>', lambda _: self.reset_view())
+        self.bind('<KeyPress-F>', lambda _: self.reset_view())
+
+    def _start_left_drag(self, e):
+        self.focus_set()
+        self._shift_pan = bool(e.state & 0x0001)
+        self.pressed_at = (e.x, e.y, self.angle, self.elevation)
+        if self._shift_pan:
+            self._start_pan(e)
+
+    def _start_pan(self, e):
+        self.focus_set()
+        self.pan_pressed = (e.x, e.y, self.pan_x, self.pan_y)
+
+    def _end_drag(self, _event=None):
+        self.pressed_at = self.pan_pressed = None
+        self._shift_pan = False
 
     def _drag(self, e):
-        if self.pressed_at:
+        if self._shift_pan:
+            self._pan(e)
+        elif self.pressed_at:
             x, y, angle, elevation = self.pressed_at
             self.angle = angle + (e.x-x)*0.009
-            self.elevation = max(math.radians(12), min(math.radians(74),
+            self.elevation = max(-math.radians(89), min(math.radians(89),
                                   elevation + (e.y-y)*0.006))
             self.draw()
 
@@ -265,20 +297,36 @@ class VoxelPreview(tk.Canvas):
             self.pan_x, self.pan_y = px + e.x - x, py + e.y - y
             self.draw()
 
-    def _zoom_by(self, factor):
-        self.zoom = max(.25, min(6.0, self.zoom*factor))
+    def _zoom_by(self, factor, cursor=None):
+        """Keep the world point under the cursor stationary when zooming."""
+        before = self.zoom
+        self.zoom = max(.25, min(6.0, before*factor))
+        if cursor is not None and self.zoom != before:
+            ratio = self.zoom / before
+            w, h = max(1, self.winfo_width()), max(1, self.winfo_height())
+            base_x = w / 2
+            base_y = 33 + max(1, h-65) / 2
+            self.pan_x += (1-ratio)*(cursor[0]-base_x-self.pan_x)
+            self.pan_y += (1-ratio)*(cursor[1]-base_y-self.pan_y)
         self.draw()
 
     def _wheel(self, e):
-        self._zoom_by(1.12 if e.delta > 0 else 1/1.12)
+        if e.delta:
+            self._zoom_by(1.12**max(-5, min(5, e.delta/120)), (e.x, e.y))
+
+    def set_view(self, view: str):
+        """Select one SOURCE-axis view and auto-fit, without editing scene data."""
+        if view not in self.VIEWS:
+            raise ValueError('Unknown camera view')
+        self.angle, self.elevation = self.VIEWS[view]
+        self.zoom = 1.0
+        self.pan_x = self.pan_y = 0.0
+        self._end_drag()
+        self.draw()
 
     def reset_view(self):
-        """Fit SOURCE geometry in the viewport; no SOURCE edits."""
-        self.zoom = 1.0
-        self.angle = math.pi*3/4
-        self.elevation = math.radians(27)
-        self.pan_x = self.pan_y = 0.0
-        self.draw()
+        """Fit SOURCE geometry in the initial isometric view."""
+        self.set_view('斜め')
 
     def set_edges(self, show: bool) -> None:
         self.show_edges = bool(show)
@@ -343,7 +391,7 @@ class VoxelPreview(tk.Canvas):
             label+='（高速表示・重なりはGPUで確認）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
         self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転・上下 / ホイール：拡大 / ダブルクリック：全体表示',fill='#91a4c4',anchor='e')
+        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#91a4c4',anchor='e')
 
     def draw(self):
         self.delete('all')
@@ -418,4 +466,4 @@ class VoxelPreview(tk.Canvas):
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
         self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転・上下 / ホイール：拡大 / ダブルクリック：全体表示',fill='#91a4c4',anchor='e')
+        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#91a4c4',anchor='e')

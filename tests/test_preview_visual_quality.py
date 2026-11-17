@@ -95,3 +95,54 @@ def test_source_launcher_avoids_stale_packaged_exe():
     assert b'py -3 -m app.main' in raw
     assert b'start_windows.bat' not in raw
     assert b'MABStudio.exe' not in raw
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk needs desktop')
+def test_camera_presets_and_zoom_anchor_do_not_change_source():
+    root=tk.Tk()
+    root.geometry('900x600')
+    try:
+        preview=VoxelPreview(root,width=880,height=550)
+        preview.pack(fill='both',expand=True)
+        root.update()
+        scene={'primitives':[[x,y,z,(x+z)%2,0]
+              for x in range(9) for z in range(6) for y in range(3+(x+z)%5)]}
+        original=json.dumps(scene)
+        preview.show(scene)
+        bounds=scene_bounds(scene['primitives'])
+        vertex=(4,5,2)
+        before=projected_camera(bounds,preview.winfo_width(),preview.winfo_height(),
+                                preview.angle,preview.elevation,preview.zoom,
+                                preview.pan_x,preview.pan_y)(*vertex)
+        preview._zoom_by(1.12,before)
+        after=projected_camera(bounds,preview.winfo_width(),preview.winfo_height(),
+                               preview.angle,preview.elevation,preview.zoom,
+                               preview.pan_x,preview.pan_y)(*vertex)
+        assert after==pytest.approx(before,abs=1e-7)
+        for name,(angle,elevation) in preview.VIEWS.items():
+            preview.set_view(name)
+            assert (preview.angle,preview.elevation)==(angle,elevation)
+            assert preview.zoom==1 and preview.pan_x==0 and preview.pan_y==0
+            assert preview.bbox('geometry') is not None
+        with pytest.raises(ValueError,match='Unknown camera'):
+            preview.set_view('other')
+        assert json.dumps(scene)==original
+    finally:
+        root.destroy()
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk needs desktop')
+def test_studio_camera_toolbar_and_large_view_inherits_camera(studio):
+    app,_=studio
+    initial=app.history.head()['revisionId']
+    assert set(app.camera_buttons)==set(VoxelPreview.VIEWS)
+    app.camera_buttons['上面'].invoke()
+    assert app.preview.elevation==math.pi/2
+    app.camera_buttons['右側'].invoke()
+    assert app.preview.angle==math.pi/2
+    app.preview._zoom_by(1.3,(300,280))
+    app.open_large_preview()
+    assert app._large_preview.angle==app.preview.angle
+    assert app._large_preview.zoom==app.preview.zoom
+    assert app.history.head()['revisionId']==initial
+    app._large_preview_window.destroy()

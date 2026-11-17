@@ -108,9 +108,17 @@ class Studio(tk.Tk):
         ttk.Label(tools, text='3Dプレビュー（表示のみ）').pack(side='left')
         ttk.Button(tools, text='全体表示', command=lambda: viewer.reset_view()).pack(side='right')
         viewer = VoxelPreview(frame)
+        for name in reversed(tuple(VoxelPreview.VIEWS)):
+            ttk.Button(tools, text=name,
+                       command=lambda selected=name: viewer.set_view(selected)).pack(side='right', padx=(0, 4))
         viewer.pack(fill='both', expand=True)
         viewer.set_detail(self.detail_mode.get())
         viewer.show(self.preview.scene)
+        viewer.angle, viewer.elevation = self.preview.angle, self.preview.elevation
+        viewer.zoom = self.preview.zoom
+        viewer.pan_x, viewer.pan_y = self.preview.pan_x, self.preview.pan_y
+        viewer.set_cut_level(self.preview.cut_level)
+        viewer.draw()
         self._large_preview_window = popup
         self._large_preview = viewer
         def close():
@@ -282,6 +290,20 @@ class Studio(tk.Tk):
                    style='Quiet.TButton').pack(side='left', padx=(8, 0))
         detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
         ttk.Label(tools, text='SOURCE検証済み・施工なし', style='Muted.TLabel').pack(side='right')
+
+        # One-click camera directions for reviewing different facades/floors.
+        # Pure view state; no new SOURCE computation, history, or world writes.
+        camera_bar = ttk.Frame(right, style='Panel.TFrame')
+        camera_bar.pack(fill='x', pady=(0, 7))
+        ttk.Label(camera_bar, text='視点', style='Muted.TLabel').pack(side='left', padx=(0, 7))
+        self.camera_buttons = {}
+        for name in VoxelPreview.VIEWS:
+            button = ttk.Button(camera_bar, text=name,
+                                command=lambda selected=name: self.preview.set_view(selected),
+                                style='Quiet.TButton')
+            button.pack(side='left', padx=(0, 3))
+            self.camera_buttons[name] = button
+        ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel').pack(side='right')
 
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
         ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel').pack(side='left', padx=(0, 12))

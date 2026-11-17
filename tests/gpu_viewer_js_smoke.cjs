@@ -25,16 +25,16 @@ const data={voxels:[[x,0,z,0],[x+1,0,z,0],[x,1,z,1],[x+1,1,z,1]],
 const elements={};
 function element(id){
   if(elements[id])return elements[id];
-  const obj={id,textContent:'',style:{},classList:{toggle(){}},listeners:{},
+  const obj={id,textContent:'',style:{},classList:{active:false,toggle(name,enabled){if(name==='active')this.active=enabled},add(){},remove(){}},listeners:{},
     addEventListener(event,cb){this.listeners[event]=cb},setAttribute(){},click(){},
-    getBoundingClientRect(){return {width:stress?300:1000,height:stress?1000:750}},clientHeight:stress?1000:750,
+    getBoundingClientRect(){return {left:0,top:0,width:stress?300:1000,height:stress?1000:750}},clientHeight:stress?1000:750,
     setPointerCapture(){},toDataURL(){return 'data:image/png;base64,aA=='},
   };
   if(id==='view')obj.getContext=()=>gl;
   if(id==='mab-data')obj.textContent=JSON.stringify(data);
   elements[id]=obj;return obj;
 }
-const document={getElementById:element,documentElement:{dataset:{}},createElement:()=>({click(){this.clicked=true}})};
+const document={getElementById:element,documentElement:{dataset:{}},createElement:()=>({click(){this.clicked=true}}),addEventListener(ev,cb){state.listeners[ev]=cb}};
 const context={document,window:{devicePixelRatio:1,addEventListener(){},},
   ResizeObserver:class{observe(){}},requestAnimationFrame:cb=>cb(),console,
   Float32Array,Map,Set,Number,Math,JSON,Array,parseInt,Error,String};
@@ -53,8 +53,54 @@ assert.match(element('scene-stats').textContent,/4セル/);
 element('orthographic').listeners.click();
 element('perspective').listeners.click();
 element('reset').listeners.click();
-element('view').listeners.wheel({preventDefault(){},deltaY:100});
+element('view').listeners.wheel({preventDefault(){},deltaY:100,clientX:100,clientY:100});
 element('save').listeners.click();
+
+// Preset buttons and keyboard shortcuts must provide geometrically valid views.
+function transform(m,v){return [0,1,2,3].map(row=>m[row]*v[0]+m[4+row]*v[1]+m[8+row]*v[2]+m[12+row]*v[3]);}
+function ndc(point){const e=transform(state.matrices.uView,[...point,1]);const c=transform(state.matrices.uProj,e);return [c[0]/c[3],c[1]/c[3]];}
+const sourceSnapshot=JSON.stringify(data);
+for(const name of ['iso','front','back','left','right','top']){
+  element('view-'+name).listeners.click();
+  assert.equal(element('view-'+name).classList.active,true);
+  for(let xx of [-1,1])for(let yy of [-1,1])for(let zz of [-0.5,0.5]){
+    const [u,v]=ndc([xx,yy,zz]);
+    assert.ok(Math.abs(u)<1 && Math.abs(v)<1,`perspective ${name} clipping: ${u}, ${v}`);
+  }
+  element('orthographic').listeners.click();
+  for(let xx of [-1,1])for(let yy of [-1,1])for(let zz of [-0.5,0.5]){
+    const [u,v]=ndc([xx,yy,zz]);
+    assert.ok(Math.abs(u)<1 && Math.abs(v)<1,`orthographic ${name} clipping: ${u}, ${v}`);
+  }
+  element('perspective').listeners.click();
+}
+// Zoom about the off-centre pointer without the pointed-to world point jumping.
+element('view-iso').listeners.click();
+for(const mode of ['perspective','orthographic']){
+  element(mode).listeners.click();
+  element('view-iso').listeners.click();
+  const view=state.matrices.uView, proj=state.matrices.uProj;
+  const rect=element('view').getBoundingClientRect(),aspect=rect.width/rect.height;
+  const half=mode==='perspective'?-view[14]*Math.tan(Math.PI/8):1/proj[5];
+  const nx=0.31,ny=-0.23;
+  const point=[0,1,2].map(i=>half*(nx*aspect*view[4*i]+ny*view[4*i+1]));
+  const initial=ndc(point);
+  assert.ok(Math.abs(initial[0]-nx)<1e-5 && Math.abs(initial[1]-ny)<1e-5);
+  element('view').listeners.wheel({preventDefault(){},deltaY:-160,
+    clientX:(nx+1)*rect.width/2,clientY:(1-ny)*rect.height/2});
+  const after=ndc(point);
+  assert.ok(Math.abs(after[0]-nx)<1e-5 && Math.abs(after[1]-ny)<1e-5,`cursor zoom drift for ${mode}`);
+}
+// Keyboard shortcuts do not intercept slider keys, and reset the full view.
+let stopped=false;
+state.listeners.keydown({target:{tagName:'INPUT'},key:'f',preventDefault(){stopped=true}});
+assert.equal(stopped,false);
+state.listeners.keydown({target:{tagName:'BODY'},key:'6',preventDefault(){stopped=true}});
+assert.equal(element('view-top').classList.active,true);
+state.listeners.keydown({target:{tagName:'BODY'},key:'f',preventDefault(){stopped=true}});
+assert.equal(element('view-iso').classList.active,true);
+assert.equal(stopped,true);
+assert.equal(JSON.stringify(data),sourceSnapshot);
 if(stress){
   // GPU buffers contain model-local positions, not six-digit SOURCE coordinates.
   const last=state.buffers.at(-1).arr;
@@ -62,7 +108,6 @@ if(stress){
     assert.ok(Math.abs(last[i+axis])<=2,'position must be rebased to scene center');
   // The actual view/projection matrices must fit a narrow portrait window.
   const view=state.matrices.uView,proj=state.matrices.uProj;
-  function transform(m,v){return [0,1,2,3].map(row=>m[row]*v[0]+m[4+row]*v[1]+m[8+row]*v[2]+m[12+row]*v[3]);}
   for(let xx of [-1,1])for(let yy of [-1,1])for(let zz of [-0.5,0.5]){
     const eye=transform(view,[xx,yy,zz,1]),clip=transform(proj,eye);
     assert.ok(Math.abs(clip[0]/clip[3])<1,'narrow-window horizontal clipping');

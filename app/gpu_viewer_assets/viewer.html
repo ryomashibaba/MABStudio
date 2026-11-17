@@ -11,6 +11,9 @@
 header{background:#121f33;border-bottom:1px solid #294158;min-height:65px;display:flex;align-items:center;padding:11px 22px;gap:20px;justify-content:space-between;z-index:1;flex-wrap:wrap}
 .heading strong{display:block;font-size:18px;font-weight:700;letter-spacing:.01em}.heading small{display:block;color:#a7bed8;font-size:11px;margin-top:4px}.controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 button{font:inherit;color:#e8f0fc;background:#233a56;border:1px solid #425f7d;border-radius:8px;cursor:pointer;padding:9px 13px;font-size:12px}button:hover{background:#365578}button:focus-visible,input:focus-visible{outline:2px solid #84bfff;outline-offset:3px}button.active{background:#255a96;border-color:#79baff}
+.view-presets{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.view-presets button{padding:7px 9px;font-size:12px}
+.view-presets .label{font-size:12px;color:#a7bed8;margin-right:3px}
 #stage{flex:1;position:relative;min-height:200px;background:radial-gradient(ellipse at 48% 40%,#1d334c,#0b1524 82%);overflow:hidden}
 canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas.dragging{cursor:grabbing}
 #hud{position:absolute;top:17px;left:20px;pointer-events:none;background:#0a1628cf;border:1px solid #39516b;border-radius:10px;padding:13px 16px;max-width:min(450px,70vw)}
@@ -27,12 +30,19 @@ canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas
 <div id="app">
 <header><div class="heading"><strong>MAB Studio <span style="color:#88c8ff">GPU 3Dプレビュー</span></strong><small>オフライン・SOURCE由来データのみ・Minecraftへの施工なし</small></div>
 <div class="controls">
+<div class="view-presets" role="group" aria-label="カメラの視点切替"><span class="label">視点</span>
+<button id="view-iso" class="active" aria-pressed="true" title="ショートカット 1">斜め</button>
+<button id="view-front" aria-pressed="false" title="ショートカット 2">正面</button>
+<button id="view-back" aria-pressed="false" title="ショートカット 3">背面</button>
+<button id="view-left" aria-pressed="false" title="ショートカット 4">左側</button>
+<button id="view-right" aria-pressed="false" title="ショートカット 5">右側</button>
+<button id="view-top" aria-pressed="false" title="ショートカット 6">上面</button></div>
 <button id="perspective" class="active" aria-pressed="true">遠近表示</button><button id="orthographic" aria-pressed="false">平行投影</button>
 <button id="reset">全体表示</button><button id="save">PNG保存</button>
 </div></header>
-<div id="stage"><canvas id="view" aria-label="マウスで回せる建築モデルのWebGLプレビュー"></canvas>
+<div id="stage"><canvas id="view" tabindex="0" aria-label="マウスで回せる建築モデルのWebGLプレビュー"></canvas>
 <div id="hud"><strong id="scene-name">建築プレビュー</strong><div class="sub" id="scene-stats">初期化中…</div></div>
-<div id="help">ドラッグ: 回転　Shift＋ドラッグ: 移動　ホイール: 拡大　ダブルクリック: 全体表示</div>
+<div id="help">ドラッグ: 回転　Shift／右ドラッグ: 移動　ホイール: カーソル位置で拡大　F: 全体　1〜6: 視点</div>
 <div id="status">GPUレンダラーを確認中…</div><div id="error" role="alert"></div></div>
 <div id="section"><label for="slice">Y断面（上の階を隠す）</label><input id="slice" type="range" step="1"><output id="slice-value">全体</output><button id="all">断面解除</button><span class="note">断面は表示のみ。SOURCEやワールドを変更しません。</span></div>
 </div>

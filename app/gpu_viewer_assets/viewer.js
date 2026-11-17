@@ -57,9 +57,22 @@
   const center=[(bounds.minX+bounds.maxX+1)/2,(bounds.minY+bounds.maxY+1)/2,(bounds.minZ+bounds.maxZ+1)/2];
   const sizes=[bounds.maxX-bounds.minX+1,bounds.maxY-bounds.minY+1,bounds.maxZ-bounds.minZ+1];
   const radius=Math.max(1,Math.hypot(...sizes)/2);
+  const halfSizes=sizes.map(v=>v/2);
+  // Axis-aligned SOURCE bounding-box corners in GPU-local coordinates.
+  // Camera framing uses all eight corners; a bounding sphere wastes substantial
+  // screen space on tall buildings or broad, flat roofs.
+  const corners=[];
+  for(const x of [-halfSizes[0],halfSizes[0]])
+    for(const y of [-halfSizes[1],halfSizes[1]])
+      for(const z of [-halfSizes[2],halfSizes[2]]) corners.push([x,y,z]);
   // Render near the origin, even when the SOURCE uses far-away world coordinates.
   // This avoids loss of single-block detail in WebGL float32 transforms.
   let yaw=0.78,pitch=0.39,scale=1.0,projection='perspective',target=[0,0,0],slice=null;
+  const views={
+    iso:[0.78,0.39],front:[0,0],back:[Math.PI,0],
+    left:[-Math.PI/2,0],right:[Math.PI/2,0],top:[0,Math.PI/2-0.0001]
+  };
+  let activeView='iso';
   let shown=0,quads=0;
   const clamp=(x,lo,hi)=>Math.max(lo,Math.min(hi,x));
   function colorFor(mat) {
@@ -176,15 +189,26 @@
   }
   let queued=false;
   function requestDraw(){if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;try{render();}catch(err){fail(String(err.message).slice(0,350));}});}
-  // A tall, narrow window needs a larger camera distance than a wide window.
-  // Keep the entire bounding sphere visible regardless of viewport aspect ratio.
-  function framing(aspect){
-    const halfFovY=Math.PI/8;
-    const halfFovX=Math.atan(Math.tan(halfFovY)*aspect);
+  function cameraBasis(){
+    const sy=Math.sin(yaw),cy=Math.cos(yaw),sp=Math.sin(pitch),cp=Math.cos(pitch);
     return {
-      distance:radius/Math.sin(Math.min(halfFovY,halfFovX))*1.23/scale,
-      orthoHalf:radius*1.18/Math.min(1,aspect)/scale,
+      forward:[sy*cp,sp,cy*cp],
+      right:[cy,0,-sy],
+      up:[-sy*sp,cp,-cy*sp]
     };
+  }
+  // Fit the actual projected bounding box, not a loose bounding sphere.
+  // For each vertex, distance must exceed its camera-forward coordinate plus
+  // the horizontal/vertical perspective footprint. Leave 18% safe margin.
+  function framing(aspect){
+    const halfTan=Math.tan(Math.PI/8),basis=cameraBasis(),safe=0.82;
+    let distance=0,orthoHalf=0;
+    for(const point of corners){
+      const forward=dot(point,basis.forward),x=Math.abs(dot(point,basis.right)),y=Math.abs(dot(point,basis.up));
+      distance=Math.max(distance,forward+Math.max(x/(halfTan*aspect*safe),y/(halfTan*safe)));
+      orthoHalf=Math.max(orthoHalf,x/(aspect*safe),y/safe);
+    }
+    return {distance:Math.max(0.5,distance)/scale,orthoHalf:Math.max(0.5,orthoHalf)/scale};
   }
   function render(){
     const aspect=resize();
@@ -200,14 +224,35 @@
     gl.disable(gl.BLEND);
     if(mainBuffer){gl.uniform1f(uniforms.uAlpha,1);gl.uniform1f(uniforms.uUnlit,0);bindBuffer(mainBuffer);gl.drawArrays(gl.TRIANGLES,0,mainVertices);}
   }
-  function reset(){yaw=0.78;pitch=0.39;scale=1;target=[0,0,0];requestDraw();}
+  function markView(name){
+    activeView=name;
+    for(const key of Object.keys(views)){
+      const button=$('view-'+key);
+      button.classList.toggle('active',key===name);
+      button.setAttribute('aria-pressed',String(key===name));
+    }
+  }
+  function selectView(name){
+    if(!(name in views))return;
+    [yaw,pitch]=views[name];scale=1;target=[0,0,0];markView(name);requestDraw();
+  }
+  function reset(){selectView('iso');}
   function chooseProjection(value){
     projection=value;
     for(const val of ['perspective','orthographic']){$(val).classList.toggle('active',val===value);$(val).setAttribute('aria-pressed',String(val===value));}
     requestDraw();
   }
   $('reset').addEventListener('click',reset);
+  for(const name of Object.keys(views)) $('view-'+name).addEventListener('click',()=>selectView(name));
   canvas.addEventListener('dblclick',reset);
+  document.addEventListener('keydown',ev=>{
+    // Never intercept keystrokes used to operate the Y section slider.
+    const tag=ev.target && ev.target.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||ev.ctrlKey||ev.altKey||ev.metaKey)return;
+    if(ev.key.toLowerCase()==='f'){reset();ev.preventDefault();}
+    const keys={'1':'iso','2':'front','3':'back','4':'left','5':'right','6':'top'};
+    if(keys[ev.key]){selectView(keys[ev.key]);ev.preventDefault();}
+  });
   $('perspective').addEventListener('click',()=>chooseProjection('perspective'));
   $('orthographic').addEventListener('click',()=>chooseProjection('orthographic'));
   const initialSection=data.sectionLevel;
@@ -221,7 +266,27 @@
   }
   slider.addEventListener('input',updateSection);
   $('all').addEventListener('click',()=>{slider.value=String(bounds.maxY);updateSection();});
-  canvas.addEventListener('wheel',ev=>{ev.preventDefault();scale=clamp(scale*Math.exp(-ev.deltaY*0.001),0.2,10);requestDraw();},{passive:false});
+  canvas.addEventListener('wheel',ev=>{
+    ev.preventDefault();
+    const rect=canvas.getBoundingClientRect();
+    const aspect=rect.width/Math.max(1,rect.height);
+    const before=framing(aspect);
+    const next=clamp(scale*Math.exp(-ev.deltaY*0.001),0.2,10);
+    if(next===scale)return;
+    scale=next;
+    const after=framing(aspect);
+    const basis=cameraBasis();
+    const mx=Number.isFinite(ev.clientX)?ev.clientX:rect.left+rect.width/2;
+    const my=Number.isFinite(ev.clientY)?ev.clientY:rect.top+rect.height/2;
+    const nx=2*(mx-rect.left)/Math.max(1,rect.width)-1;
+    const ny=1-2*(my-rect.top)/Math.max(1,rect.height);
+    const oldHalf=projection==='perspective'?before.distance*Math.tan(Math.PI/8):before.orthoHalf;
+    const newHalf=projection==='perspective'?after.distance*Math.tan(Math.PI/8):after.orthoHalf;
+    const offset=oldHalf-newHalf;
+    // Keep the point on the camera-target plane under the pointer in place.
+    target=target.map((v,i)=>v+offset*(nx*aspect*basis.right[i]+ny*basis.up[i]));
+    requestDraw();
+  },{passive:false});
   let drag=null;
   canvas.addEventListener('pointerdown',ev=>{drag={x:ev.clientX,y:ev.clientY,yaw,pitch,target:target.slice(),pan:ev.shiftKey||ev.button===1||ev.button===2};canvas.setPointerCapture(ev.pointerId);canvas.classList.add('dragging');});
   canvas.addEventListener('pointerup',()=>{drag=null;canvas.classList.remove('dragging');});
@@ -230,7 +295,7 @@
   canvas.addEventListener('pointermove',ev=>{
     if(!drag)return;
     const dx=ev.clientX-drag.x,dy=ev.clientY-drag.y;
-    if(!drag.pan){yaw=drag.yaw-dx*0.008;pitch=clamp(drag.pitch+dy*0.006,-1.45,1.45);}
+    if(!drag.pan){yaw=drag.yaw-dx*0.008;pitch=clamp(drag.pitch+dy*0.006,-1.55,1.55);markView(null);}
     else{
       const aspect=canvas.width/Math.max(1,canvas.height);
       const {distance,orthoHalf}=framing(aspect);
@@ -249,7 +314,7 @@
   if('ResizeObserver' in window)new ResizeObserver(requestDraw).observe(canvas);
   canvas.addEventListener('webglcontextlost',ev=>{ev.preventDefault();fail('GPUコンテキストが失われました。ビューアを再度開いてください。');});
   try{
-    recalcGrid();updateSection();
+    recalcGrid();updateSection();markView('iso');
     $('scene-name').textContent=data.title||'建築プレビュー';
     status.textContent='WebGL GPUビューア · 高DPI · 全方向の境界面メッシュ · オフライン';
     document.documentElement.dataset.ready='true';
