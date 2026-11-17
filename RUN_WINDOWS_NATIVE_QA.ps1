@@ -23,6 +23,8 @@ $summary = [ordered]@{
     nativeRenderSelfCheck = 'NOT_RUN'
     packagedNativeRenderSelfCheck = 'NOT_RUN'
     windowsExeSmoke = 'NOT_RUN'
+    portableZipNativeSelfCheck = 'NOT_RUN'
+    portableZipSourceGui = 'NOT_RUN'
     testDoubleGuiAcceptance = 'NOT_RUN'
 }
 $fixture = $null
@@ -107,7 +109,9 @@ try {
     }
     if ($smokeProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $smoke)) { throw 'REAL_WINDOWS_EXE_SMOKE_FAILED' }
     $receipt = Get-Content -Raw -LiteralPath $smoke -Encoding UTF8 | ConvertFrom-Json
-    if ($receipt.result -ne 'PASS' -or $receipt.sourceVoxels -ne 917 -or $receipt.worldWrites -ne 0) {
+    if ($receipt.result -ne 'PASS' -or $receipt.sourceVoxels -ne 917 -or $receipt.worldWrites -ne 0 -or
+        $receipt.guiRenderer -ne 'VTK_NATIVE_EMBEDDED' -or !$receipt.nativeScenePixelsVerified -or
+        $receipt.nativeCells -ne 917) {
         throw 'SMOKE_RECEIPT_INCONSISTENT'
     }
     $summary.windowsExeSmoke = 'PASS_PINNED_B143_AND_TK'
@@ -152,6 +156,58 @@ try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $work 'dist-native'),$release)
     $summary.previewZip = $release
     $summary.previewZipSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash.ToLowerInvariant()
+
+    # Test the EXACT archive to be delivered, extracted outside the build tree.
+    # Building and testing dist-native alone does not prove the portable ZIP.
+    $summary.stage = 'REEXTRACT_PORTABLE_RELEASE_ZIP'
+    $portable = Join-Path $results 'portable-extracted-qa'
+    New-Item -ItemType Directory -Path $portable | Out-Null
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($release, $portable)
+    $portableExe = Join-Path $portable 'MABStudio\MABStudio.exe'
+    if (!(Test-Path -LiteralPath $portableExe)) { throw 'PORTABLE_RELEASE_EXE_MISSING' }
+    $sourceExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+    $portableExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $portableExe).Hash.ToLowerInvariant()
+    if ($sourceExeHash -cne $portableExeHash) { throw 'PORTABLE_RELEASE_EXE_HASH_CHANGED' }
+    # The EXE executes from the extracted location, not a source/build folder.
+    $portableNative = Join-Path $results 'PORTABLE_EXE_NATIVE_3D.json'
+    $portableNativeArgs = @('--native-selfcheck','--extended','--report',('"'+$portableNative+'"'))
+    $portableProcess = Start-Process -FilePath $portableExe -ArgumentList $portableNativeArgs -WorkingDirectory $portable -PassThru
+    if (!$portableProcess.WaitForExit(120000)) {
+        Stop-Process -Id $portableProcess.Id -Force -ErrorAction SilentlyContinue
+        throw 'PORTABLE_NATIVE_3D_TIMEOUT'
+    }
+    if ($portableProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $portableNative)) {
+        throw 'PORTABLE_NATIVE_3D_FAILED'
+    }
+    $pNative = Get-Content -Raw -LiteralPath $portableNative -Encoding UTF8 | ConvertFrom-Json
+    if ($pNative.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
+        !$pNative.packagedRuntimeVerified -or $pNative.runtimeMode -ne 'PACKAGED_ONEDIR' -or
+        $pNative.extendedScene.cells -ne 3128 -or
+        !$pNative.extendedScene.cameraPixelChangeVerified -or
+        !$pNative.extendedScene.fullResolutionRestored -or
+        $pNative.worldWrites -ne 0 -or $pNative.worldContacts -ne 0) {
+        throw 'PORTABLE_NATIVE_3D_EVIDENCE_INVALID'
+    }
+    $summary.portableZipNativeSelfCheck = 'PASS_EXTRACTED_EXE_SYNTHETIC_3128'
+    $summary.stage = 'PORTABLE_EXE_PINNED_SOURCE_NATIVE_GUI'
+    $portableSmoke = Join-Path $results 'PORTABLE_EXE_B143_GUI.json'
+    $portableSmokeArgs = @('--smoke','--smoke-engine',('"'+$engine+'"'),'--smoke-report',('"'+$portableSmoke+'"'))
+    $portableGui = Start-Process -FilePath $portableExe -ArgumentList $portableSmokeArgs -WorkingDirectory $portable -PassThru
+    if (!$portableGui.WaitForExit(120000)) {
+        Stop-Process -Id $portableGui.Id -Force -ErrorAction SilentlyContinue
+        throw 'PORTABLE_NATIVE_B143_GUI_TIMEOUT'
+    }
+    if ($portableGui.ExitCode -ne 0 -or !(Test-Path -LiteralPath $portableSmoke)) {
+        throw 'PORTABLE_NATIVE_B143_GUI_FAILED'
+    }
+    $pSource = Get-Content -Raw -LiteralPath $portableSmoke -Encoding UTF8 | ConvertFrom-Json
+    if ($pSource.result -ne 'PASS' -or $pSource.sourceVoxels -ne 917 -or
+        $pSource.guiRenderer -ne 'VTK_NATIVE_EMBEDDED' -or !$pSource.nativeScenePixelsVerified -or
+        $pSource.nativeCells -ne 917 -or $pSource.worldWrites -ne 0 -or
+        $pSource.worldContacts -ne 0) { throw 'PORTABLE_NATIVE_B143_GUI_EVIDENCE_INVALID' }
+    $summary.portableZipSourceGui = 'PASS_EXTRACTED_EXE_PINNED_B143_NATIVE_GUI'
+    # Avoid keeping a second large runtime copy after the evidence is saved.
+    Remove-Item -LiteralPath $portable -Recurse -Force
     $summary.outcome = 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY'
     $summary.stage = 'COMPLETE'
 } catch {
@@ -170,6 +226,9 @@ try {
     if ($summary.error) { Write-Host ('Error: ' + $summary.error) }
     Remove-Item Env:MAB_STUDIO_NO_PAUSE -ErrorAction SilentlyContinue
     # Working files are isolated and disposable; do not alter original Studio.
+    if (Test-Path -LiteralPath (Join-Path $results 'portable-extracted-qa')) {
+        Remove-Item -LiteralPath (Join-Path $results 'portable-extracted-qa') -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Set-Location -LiteralPath $source
     if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }

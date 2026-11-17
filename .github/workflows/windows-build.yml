@@ -124,7 +124,9 @@ jobs:
           }
           if ($smokeProcess.ExitCode -ne 0 -or !(Test-Path $report)) { throw 'PACKAGED_GUI_SMOKE_FAILED' }
           $status = Get-Content -Raw $report | ConvertFrom-Json
-          if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or $status.worldWrites -ne 0) {
+          if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or
+              $status.guiRenderer -ne 'VTK_NATIVE_EMBEDDED' -or !$status.nativeScenePixelsVerified -or
+              $status.nativeCells -ne 917 -or $status.worldWrites -ne 0) {
             throw 'PACKAGED_REAL_B143_OR_GUI_FAILED'
           }
           Write-Host "Packed Windows GUI/source smoke: $($status.result), $($status.sourceVoxels) voxels"
@@ -162,10 +164,51 @@ jobs:
           } finally {
             Stop-Process -Id $fixture.Id -Force -ErrorAction SilentlyContinue
           }
+      - name: Re-extract the delivered portable ZIP and verify EXE native SOURCE render
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = Join-Path $env:RUNNER_TEMP 'MABStudio-Windows-Native-Preview.zip'
+          [System.IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path './dist').Path, $archive)
+          $portable = Join-Path $env:RUNNER_TEMP 'mab-extracted-portable'
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $portable)
+          $exe = Join-Path $portable 'MABStudio/MABStudio.exe'
+          if (!(Test-Path -LiteralPath $exe)) { throw 'PORTABLE_EXE_MISSING' }
+          if ((Get-FileHash -Algorithm SHA256 $exe).Hash -ne
+              (Get-FileHash -Algorithm SHA256 './dist/MABStudio/MABStudio.exe').Hash) {
+            throw 'PORTABLE_EXE_HASH_MISMATCH'
+          }
+          $report = Join-Path $env:RUNNER_TEMP 'mab-extracted-native.json'
+          $args = @('--native-selfcheck','--extended','--report',('"'+$report+'"'))
+          $proc = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $portable -PassThru
+          if (!$proc.WaitForExit(120000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw 'PORTABLE_NATIVE_3D_TIMEOUT'
+          }
+          if ($proc.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PORTABLE_NATIVE_3D_FAILED' }
+          $native = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
+          if ($native.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
+              !$native.packagedRuntimeVerified -or $native.extendedScene.cells -ne 3128 -or
+              !$native.extendedScene.cameraPixelChangeVerified -or !$native.extendedScene.fullResolutionRestored -or
+              $native.worldWrites -ne 0 -or $native.worldContacts -ne 0) { throw 'PORTABLE_NATIVE_EVIDENCE_INVALID' }
+          $smoke = Join-Path $env:RUNNER_TEMP 'mab-extracted-source-native.json'
+          $args = @('--smoke','--smoke-engine',('"'+$env:MAB_B143_VERIFIED_ENGINE+'"'), '--smoke-report',('"'+$smoke+'"'))
+          $proc = Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $portable -PassThru
+          if (!$proc.WaitForExit(120000)) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw 'PORTABLE_SOURCE_NATIVE_TIMEOUT'
+          }
+          if ($proc.ExitCode -ne 0 -or !(Test-Path -LiteralPath $smoke)) { throw 'PORTABLE_SOURCE_NATIVE_FAILED' }
+          $status = Get-Content -Raw -LiteralPath $smoke -Encoding UTF8 | ConvertFrom-Json
+          if ($status.result -ne 'PASS' -or $status.sourceVoxels -ne 917 -or
+              $status.guiRenderer -ne 'VTK_NATIVE_EMBEDDED' -or !$status.nativeScenePixelsVerified -or
+              $status.nativeCells -ne 917 -or $status.worldWrites -ne 0) { throw 'PORTABLE_SOURCE_NATIVE_EVIDENCE_INVALID' }
+          Write-Host 'EXTRACTED PORTABLE EXE native 3D and genuine pinned B143 917-cell GUI PASS (not real model).'
       - uses: actions/upload-artifact@v4
         if: success()
         with:
           name: MABStudio-Windows-Native-Preview
-          path: |
-            dist/MABStudio/**
+          path: ${{ runner.temp }}/MABStudio-Windows-Native-Preview.zip
           retention-days: 14

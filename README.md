@@ -356,3 +356,17 @@ Start **`RUN_STUDIO_SOURCE.bat`** to run the current Python/Tk GUI code without 
 The new default `なめらか（全体）` preview draws the visible boundaries of the same SOURCE cells with merged coplanar faces, without per-block grid lines. It auto-fits projected bounds, supports mouse drag for yaw/elevation and wheel zoom, and offers `全体表示` and an independent `3Dを大きく表示` window. The old voxel-detail views remain selectable. A Windows DPI-awareness request is made before Tk startup to reduce OS bitmap scaling; native Windows visual quality has not yet been verified.
 
 These settings affect **display only**. They cannot improve the architecture of the model's generated building or authorize Minecraft construction. Architectural quality belongs to the upstream MAB research workflow.
+
+### v0.3: portable ZIP EXE and embedded native B143 preview gate (2026-11-18)
+
+The Windows native QA now treats the *delivered ZIP* as the release candidate:
+re-extract it outside the build directory, compare the included EXE checksum,
+then launch the extracted EXE for the 3,128-cell synthetic VTK camera/section
+check and the 917-voxel **real pinned B143 SOURCE** GUI smoke. For the latter,
+`--smoke` checks the **embedded VTK framebuffer** (not the Tk Canvas API),
+counts visible native cells, and fails closed if a frozen build silently falls
+back to the lightweight renderer. Windows Actions validates the same portable
+archive before uploading it. These steps make no real model request and never
+contact or write to Minecraft. Local Linux/Xvfb tests do NOT certify that the
+portable ZIP or physical GPU succeeds on Windows; inspect the new portable
+receipts in `WINDOWS_NATIVE_QA.json` after an actual Windows run.
