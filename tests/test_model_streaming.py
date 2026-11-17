@@ -57,14 +57,16 @@ def test_sse_assembles_chunks_without_reasoning_content(monkeypatch):
                             on_progress=notices.append,timeout=1)==DESIGN
         assert len(seen)==1
         assert seen[0]['stream'] is True
-        assert seen[0]['response_format']['json_schema']['schema']['properties']['elements']['maxItems']==32
+        assert seen[0]['response_format']['json_schema']['schema']['properties']['elements']['maxItems']==18
 
 
 def test_sse_length_never_uses_partial_json(monkeypatch):
     with fake_lm_stream('length') as (url, seen):
         monkeypatch.setattr(core,'LM_STUDIO_BASE',url)
-        with pytest.raises(core.ModelOutputLimitError,match='トークン上限'):
+        with pytest.raises(core.ModelOutputLimitError,match='トークン上限') as info:
             core.ask_llm('LM Studio','gemma-4-test','未来的な4階建てのビル')
+        assert 'JSON本文' in str(info.value)
+        assert '思考用出力7文字' in str(info.value)
         assert len(seen)==1
 
 
@@ -88,7 +90,10 @@ def test_qwen38_requests_nonthinking_without_changing_model_load(monkeypatch):
 
 def test_model_generation_schema_does_not_change_mab_contract():
     assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems']==160
-    assert core.MODEL_GENERATION_SCHEMA['properties']['elements']['maxItems']==32
+    assert core.MODEL_GENERATION_SCHEMA['properties']['elements']['maxItems']==18
+    assert core.MODEL_GENERATION_SCHEMA['properties']['title']['maxLength']==48
+    assert core.MODEL_GENERATION_SCHEMA['properties']['brief']['maxLength']==120
+    assert core.B143_JSON_SCHEMA['properties']['brief']['maxLength']==500
 
 
 def test_revision_does_not_shrink_existing_40_element_design(monkeypatch):
@@ -100,4 +105,7 @@ def test_revision_does_not_shrink_existing_40_element_design(monkeypatch):
         constraint = seen[0]['response_format']['json_schema']['schema']
         assert constraint['properties']['elements']['maxItems']==48
         assert '最大48' in seen[0]['messages'][0]['content']
+        assert constraint['properties']['title']['maxLength']==100
+        assert constraint['properties']['brief']['maxLength']==500
+        assert constraint['properties']['elements']['items']['properties']['id'].get('maxLength') is None
         assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems']==160

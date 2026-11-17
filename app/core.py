@@ -387,21 +387,31 @@ def parse_llm_json(text: str) -> dict:
     return d
 
 
-SYSTEM_PROMPT = """あなたはMinecraftAIBuilder B143の設計JSON生成器です。
-JSONオブジェクトだけを出力してください。前置きやMarkdownは禁止。
-必須形式：
+COMMON_SYSTEM_PROMPT = """あなたはMinecraftAIBuilder B143の設計JSON生成器です。
+ユーザーの日本語の建築意図を保持した概念建築を生成します。
+出力はB143設計JSONオブジェクト1個のみ。前置き・Markdown・思考過程・解説は不要です。
+必須形式（省略禁止）：
 {"schema":"minecraftaibuilder-b143-building-dsl-v1","id":"lowercase-id","title":"短い題名","brief":"短い説明","designOnly":true,"bounds":{"width":32,"height":24,"depth":32},"elements":[...]}
-各elementsは例えば
+要素例（各shapeに必要なプロパティだけを書く）：
 {"id":"wall","shape":"box","mode":"add","material":"stone","origin":[1,1,1],"size":[10,5,10],"shell":1}
 {"id":"opening","shape":"box","mode":"cut","origin":[4,1,1],"size":[3,4,2]}
-を使えます。形状は box / ellipsoid(center,radii) / cylinder(origin,axis,radius,length)。
-materialは stone, concrete, metal, glass, wood, glow, accent の7種。
-整数、各要素がbounds内、SOURCE仕様上はelements最大160、今回のAI生成は最大32。縦軸はy。全体積50万以下。概念建築のみ。
-構造の美観を優先し、外装・屋根・窓・入口・内装を可能な範囲で工夫。
-設計JSONのelementsは最大32個。箱やシェル・切り抜き・円柱を利用して、窓の多い4階建てでも独創的な外装と機能を簡潔に表現。
-要素IDと説明文は短く、余分な説明・推論・空白を出力せず、完全なJSONだけで必ず終了する。
-Minecraftワールド座標、実行可能なコマンド、プログラム、URLを出力しない。
+形状は box / ellipsoid(center,radii) / cylinder(origin,axis,radius,length)。
+材質は stone, concrete, metal, glass, wood, glow, accent の7種。
+各要素の座標はbounds内の整数。最大160要素はB143エンジン自体の上限です。
+cutにmaterialを付けない。shapeに無関係なキーは出力しない。
+Minecraftコマンド、ワールド座標、URLは出力しない。
+末尾まで完結したJSONで終え、続きの説明を出力しない。
 """
+
+INITIAL_GENERATION_GUIDANCE = """【初回設計】
+まず短く完結させる。10～14要素を目安とし、最大18要素以内で建築意図を表現する。
+外観のシルエット、建築的特徴、複数階の床と入口を優先する。4階建てなら4階を保つ。
+窓列や装飾帯はbox/cut/shellでまとめ、同種の窓を1個ずつ書き並べない。
+タイトルは48文字以内、説明は120文字以内、要素IDは24文字以内。
+生成予算を使い切る前にJSONを閉じる。完全なB143 JSONだけを返す。
+"""
+
+SYSTEM_PROMPT = COMMON_SYSTEM_PROMPT + INITIAL_GENERATION_GUIDANCE
 
 
 # Schema is a transport/output constraint, NOT a replacement for the pinned B143
@@ -466,12 +476,29 @@ DEFAULT_OUTPUT_TOKENS = 6400
 MAX_OUTPUT_TOKENS = 8000
 # A complete B143 source is still verified by the pinned MAB engine. The output
 # grammar only bounds the FIRST proposal so a normal building fits in one reply.
-MAX_MODEL_ELEMENTS = 32
+MAX_MODEL_ELEMENTS = 18
+# Compact output is a first-proposal transport boundary, not a new MAB
+# architecture engine. Full B143 source (including richer revisions) is still
+# checked by the unchanged pinned MAB validate/compile/verify functions.
 MODEL_GENERATION_SCHEMA = {
     **B143_JSON_SCHEMA,
-    "properties": {**B143_JSON_SCHEMA["properties"],
-                   "elements": {**B143_JSON_SCHEMA["properties"]["elements"],
-                                "maxItems": MAX_MODEL_ELEMENTS}},
+    "properties": {
+        **B143_JSON_SCHEMA["properties"],
+        "title": {**B143_JSON_SCHEMA["properties"]["title"], "maxLength": 48},
+        "brief": {**B143_JSON_SCHEMA["properties"]["brief"], "maxLength": 120},
+        "elements": {
+            **B143_JSON_SCHEMA["properties"]["elements"],
+            "maxItems": MAX_MODEL_ELEMENTS,
+            "items": {
+                **B143_JSON_SCHEMA["properties"]["elements"]["items"],
+                "properties": {
+                    **B143_JSON_SCHEMA["properties"]["elements"]["items"]["properties"],
+                    "id": {**B143_JSON_SCHEMA["properties"]["elements"]["items"]["properties"]["id"],
+                           "maxLength": 24},
+                },
+            },
+        },
+    },
 }
 # Long local GGUF inferences can need several minutes; while streaming, these
 # limits apply to idle reads and the complete request, not the total first-byte
@@ -543,9 +570,16 @@ def _truncated_error(provider: str, reply: dict, budget: int,
     consumed = usage.get('completion_tokens') if isinstance(usage, dict) else None
     count = f'、生成済み{consumed}' if type(consumed) is int and consumed >= 0 else ''
     ctx = f'、ロード済み文脈{context}' if context is not None else ''
+    metrics = reply.get('_studio_stream_metrics')
+    detail = ''
+    if isinstance(metrics, dict):
+        body_chars = metrics.get('jsonBodyChars')
+        thought_chars = metrics.get('reasoningChars')
+        if type(body_chars) is int and type(thought_chars) is int:
+            detail = f'、JSON本文{body_chars}文字・思考用出力{thought_chars}文字'
     return ModelOutputLimitError(
         f'{provider}の設計JSON生成がトークン上限で途中終了しました'
-        f'（出力上限{budget}{count}{ctx}）。MAB SOURCEはまだ検証していません。'
+        f'（出力上限{budget}{count}{ctx}{detail}）。MAB SOURCEはまだ検証していません。'
         '同じ条件での無駄な再推論は中止しました。'
         'LM Studioではモデルのコンテキスト長・生成上限を確認してください。'
         'コンテキスト長を増やすとRAM/VRAM使用量も増える可能性があります。')
@@ -559,6 +593,7 @@ def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
     """
     content = []
     chars = 0
+    reasoning_chars = 0
     finish = None
     usage = None
     saw_done = False
@@ -593,6 +628,11 @@ def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
             if not isinstance(choice, dict):
                 raise ModelTransportError('ローカルAIの候補形式が不正です')
             delta = choice.get('delta')
+            if isinstance(delta, dict):
+                # Count only. Never save or expose private reasoning text.
+                thought = delta.get('reasoning_content', delta.get('reasoning'))
+                if isinstance(thought, str):
+                    reasoning_chars += len(thought)
             part = delta.get('content') if isinstance(delta, dict) else None
             if part is not None and not isinstance(part, str):
                 raise ModelTransportError('ローカルAIの本文形式が不正です')
@@ -605,12 +645,15 @@ def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
                 finish = choice['finish_reason']
         now = time.monotonic()
         if on_progress is not None and now - last_notice >= 1.0:
-            on_progress('ローカルAIが生成中：JSON本文 '+str(chars)+'文字（SOURCE未検証）')
+            on_progress('ローカルAIが生成中：JSON本文 '+str(chars)+
+                        '文字／思考用出力 '+str(reasoning_chars)+'文字（SOURCE未検証）')
             last_notice = now
     if not saw_done or finish is None:
         raise ModelTransportError('ローカルAIのストリームが完了前に切断されました。追加推論はしません')
     return {'choices': [{'message': {'content': ''.join(content)},
-                         'finish_reason': finish}], 'usage': usage or {}}
+                         'finish_reason': finish}], 'usage': usage or {},
+            '_studio_stream_metrics': {'jsonBodyChars': chars,
+                                       'reasoningChars': reasoning_chars}}
 
 
 def _model_response(url: str, payload: dict, timeout: int, on_progress=None) -> dict:
@@ -789,14 +832,16 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         if not isinstance(existing, list) or not 1 <= len(existing) <= 160:
             raise StudioError('修正元の要素数がB143の範囲外です')
         max_elements = min(160, max(MAX_MODEL_ELEMENTS, len(existing) + 8))
-        system_prompt = SYSTEM_PROMPT.replace('今回のAI生成は最大32',
-                                              f'今回の修正案は最大{max_elements}').replace(
-                                                  '設計JSONのelementsは最大32個',
-                                                  f'設計JSONのelementsは最大{max_elements}個')
-    generation_schema = MODEL_GENERATION_SCHEMA if max_elements == MAX_MODEL_ELEMENTS else {
-        **MODEL_GENERATION_SCHEMA,
-        'properties': {**MODEL_GENERATION_SCHEMA['properties'],
-                       'elements': {**MODEL_GENERATION_SCHEMA['properties']['elements'],
+        # A revision must not inherit first-proposal shortening limits:
+        # the entire approved B143 source must remain representable.
+        system_prompt = COMMON_SYSTEM_PROMPT + (
+            f'【修正専用】既存の全要素・title・briefを保持できる最大{max_elements}要素。\n'
+            '修正指示に必要な箇所以外のSOURCEを保持し、省略なく完全なJSONを返す。'
+        )
+    generation_schema = MODEL_GENERATION_SCHEMA if revision_base is None else {
+        **B143_JSON_SCHEMA,
+        'properties': {**B143_JSON_SCHEMA['properties'],
+                       'elements': {**B143_JSON_SCHEMA['properties']['elements'],
                                     'maxItems': max_elements}},
     }
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]

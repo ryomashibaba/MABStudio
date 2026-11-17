@@ -27,6 +27,8 @@ def run_acceptance(argv: list[str]) -> int:
     parser.add_argument('--model', required=True)
     parser.add_argument('--prompt', default=DEFAULT_PROMPT)
     parser.add_argument('--report', required=True)
+    parser.add_argument('--console-progress', action='store_true',
+                        help='Source acceptance: print counts, never model content')
     parser.add_argument('--test-double', action='store_true',
                         help='Explicit localhost CI fixture, never a real LLM acceptance result')
     parser.add_argument('--fixture-port', type=int, default=None,
@@ -99,7 +101,18 @@ def run_acceptance(argv: list[str]) -> int:
             report['actualProviderRequestAttempted'] = True
         llm_started = time.monotonic()
         try:
-            design = ask_llm(ns.provider, ns.model, ns.prompt)
+            def progress(note: str) -> None:
+                # Counts only; never print original instructions or AI response.
+                if ns.console_progress:
+                    now = time.monotonic()
+                    if now - progress.last_time >= 8:
+                        print('[LOCAL MODEL] ' + note, flush=True)
+                        progress.last_time = now
+            progress.last_time = llm_started
+            if ns.console_progress:
+                print('[LOCAL MODEL] One inference started; no automatic retry.', flush=True)
+            design = ask_llm(ns.provider, ns.model, ns.prompt,
+                             on_progress=progress if ns.console_progress else None)
         finally:
             # Keep elapsed time even when the model errors or hits a token limit;
             # otherwise the real-model diagnostic cannot distinguish those cases.

@@ -1,3 +1,28 @@
+## 2026-11-17 — LM Studio 6209-token genuine-model stop: source-only retest
+
+The Windows REAL_MODEL_CHECK reached the already loaded Gemma but failed at
+`LOCAL_MODEL_REQUEST` after the output limit (6209 tokens, context 8192, ~322 s).
+That is not an MAB SOURCE rejection or an Education issue. Model response text
+was not captured, so the exact cause of the long output remains unknown.
+
+This patch changes the **first** model-authored B143 candidate to a compact
+18-element maximum (10–14 recommended, grouped window bands and structural
+features) with short title/brief/element IDs. It does not alter the real B143
+engine's 160-element limit, and it preserves full allowed title, brief and
+existing-element counts for revision candidates. The model output must still
+pass the original pinned MAB compiler; aesthetic quality is not certified.
+
+For the next attempt use `RUN_SOURCE_REAL_MODEL_CHECK.bat` after extracting this
+ZIP and loading **one** local model. It uses the already installed Python and
+Node.js, runs a single real-model request and writes a SOURCE-only report under
+`%LOCALAPPDATA%\MABStudio\diagnostics\source-model-*`. No PyInstaller
+rebuild, model load/unload, Minecraft writes, or world connection occurs. The
+console displays character counts, not your prompt or model response. The
+source-only success is **not** a new Windows EXE success. Once it passes, build
+one updated EXE using the existing Windows QA script. If the model still ends
+at the output limit, record JSON text versus reasoning character counts from
+the error rather than increasing context by default.
+
 # MAB Studio v0.3 — Windows実用化パッチ（2026-11-17）
 
 **元のv0.3を継承した改良版であり、新しいMAB本体・バージョン体系ではありません。**
