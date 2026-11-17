@@ -81,6 +81,23 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python -m app.release_audit dist/MABStudio
           if ($LASTEXITCODE -ne 0) { throw 'RUNTIME_MANIFEST_AUDIT_FAILED' }
+      - name: Verify native 3D INSIDE the distributed EXE (not source Python)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = Join-Path $env:RUNNER_TEMP 'mab-exe-native-render.json'
+          $exePath = (Resolve-Path './dist/MABStudio/MABStudio.exe').Path
+          $args = @('--native-selfcheck', '--report', ('"'+$report+'"'))
+          $proc = Start-Process -FilePath $exePath -ArgumentList $args -Wait -PassThru
+          if ($proc.ExitCode -ne 0 -or !(Test-Path -LiteralPath $report)) { throw 'PACKAGED_NATIVE_RENDER_FAILED' }
+          $check = Get-Content -Raw -LiteralPath $report -Encoding UTF8 | ConvertFrom-Json
+          if ($check.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
+              !$check.packagedRuntimeVerified -or $check.runtimeMode -ne 'PACKAGED_ONEDIR' -or
+              $check.cells -ne 64 -or $check.renderTimings.samples -lt 4 -or
+              $check.worldContacts -ne 0 -or $check.worldWrites -ne 0) {
+            throw 'PACKAGED_NATIVE_RENDER_EVIDENCE_INVALID'
+          }
+          Write-Host 'Actual packaged EXE native VTK rendering PASS (synthetic SOURCE only).'
       - name: Launch real packaged EXE and render 917 verified B143 voxels
         shell: pwsh
         run: |

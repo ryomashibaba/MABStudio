@@ -21,6 +21,7 @@ $summary = [ordered]@{
     sourcePinnedHash = '537aa9e4a2b4e027f16179ef7a306b604ca4d850713d6de23940667ed2348e16'
     releaseLicenseClearance = 'NOT_CERTIFIED'
     nativeRenderSelfCheck = 'NOT_RUN'
+    packagedNativeRenderSelfCheck = 'NOT_RUN'
     windowsExeSmoke = 'NOT_RUN'
     testDoubleGuiAcceptance = 'NOT_RUN'
 }
@@ -68,6 +69,21 @@ try {
     $summary.nativeRenderSelfCheck = 'PASS_SYNTHETIC_IN_MEMORY'
     $exe = Join-Path $work 'dist-native\MABStudio\MABStudio.exe'
     if (!(Test-Path -LiteralPath $exe)) { throw 'WINDOWS_EXE_MISSING' }
+    $summary.stage = 'PACKAGED_NATIVE_3D_RENDER_QA'
+    $packedNative = Join-Path $results 'EXE_NATIVE_3D_RENDER.json'
+    $packedNativeArgs = @('--native-selfcheck','--report',('"'+$packedNative+'"'))
+    $packedNativeProcess = Start-Process -FilePath $exe -ArgumentList $packedNativeArgs -WorkingDirectory $work -Wait -PassThru
+    if ($packedNativeProcess.ExitCode -ne 0 -or !(Test-Path -LiteralPath $packedNative)) {
+        throw 'PACKAGED_NATIVE_3D_RENDER_FAILED'
+    }
+    $packedCheck = Get-Content -Raw -LiteralPath $packedNative -Encoding UTF8 | ConvertFrom-Json
+    if ($packedCheck.result -ne 'PASS_NATIVE_READONLY_SELF_CHECK' -or
+        !$packedCheck.packagedRuntimeVerified -or $packedCheck.runtimeMode -ne 'PACKAGED_ONEDIR' -or
+        $packedCheck.cells -ne 64 -or $packedCheck.renderTimings.samples -lt 4 -or
+        $packedCheck.worldContacts -ne 0 -or $packedCheck.worldWrites -ne 0) {
+        throw 'PACKAGED_NATIVE_3D_EVIDENCE_INVALID'
+    }
+    $summary.packagedNativeRenderSelfCheck = 'PASS_EXE_SYNTHETIC_64_CELLS'
     $summary.stage = 'REAL_WINDOWS_EXE_SMOKE'
     $smoke = Join-Path $results 'EXE_SMOKE.json'
     $smokeArgs = @('--smoke','--smoke-engine',('"'+$engine+'"'),'--smoke-report',('"'+$smoke+'"'))

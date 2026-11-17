@@ -92,29 +92,8 @@ class Studio(tk.Tk):
         gc.collect()
         super().destroy()
 
-    def open_large_preview(self):
-        """Temporary viewer of verified current scene; no model or world writes."""
-        if self._large_preview_window is not None:
-            try:
-                self._large_preview_window.lift()
-                return
-            except tk.TclError:
-                pass
-        popup = tk.Toplevel(self)
-        popup.title('MAB Studio — 3Dプレビュー')
-        popup.geometry('1320x900')
-        popup.minsize(700, 500)
-        frame = ttk.Frame(popup, padding=10)
-        frame.pack(fill='both', expand=True)
-        tools = ttk.Frame(frame)
-        tools.pack(fill='x', pady=(0, 7))
-        ttk.Label(tools, text='3Dプレビュー（表示のみ）').pack(side='left')
-        ttk.Button(tools, text='全体表示', command=lambda: viewer.reset_view()).pack(side='right')
-        viewer = VoxelPreview(frame)
-        for name in reversed(tuple(VoxelPreview.VIEWS)):
-            ttk.Button(tools, text=name,
-                       command=lambda selected=name: viewer.set_view(selected)).pack(side='right', padx=(0, 4))
-        viewer.pack(fill='both', expand=True)
+    def _inherit_preview_state(self, viewer):
+        """Copy only the display state, never SOURCE/history/construction data."""
         viewer.set_detail(self.detail_mode.get())
         viewer.show(self.preview.scene)
         viewer.angle, viewer.elevation = self.preview.angle, self.preview.elevation
@@ -122,11 +101,59 @@ class Studio(tk.Tk):
         viewer.pan_x, viewer.pan_y = self.preview.pan_x, self.preview.pan_y
         viewer.set_cut_level(self.preview.cut_level)
         viewer.draw()
+
+    def open_large_preview(self):
+        """Open the SAME renderer as the main viewer (native stays native)."""
+        if self._large_preview_window is not None:
+            try:
+                if self._large_preview_window.winfo_exists():
+                    self._large_preview_window.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._large_preview_window = self._large_preview = None
+        popup = tk.Toplevel(self)
+        popup.title('MAB Studio — 3Dプレビュー（表示のみ）')
+        popup.geometry('1320x900')
+        popup.minsize(700, 500)
+        frame = ttk.Frame(popup, padding=10)
+        frame.pack(fill='both', expand=True)
+        tools = ttk.Frame(frame)
+        tools.pack(fill='x', pady=(0, 7))
+        native = isinstance(self.preview, NativeVoxelPreview)
+        label = ttk.Label(tools, text=('ネイティブ3D（表示のみ）' if native else
+                                       '軽量3D（表示のみ）'))
+        label.pack(side='left')
+        viewer = None
+        try:
+            viewer = NativeVoxelPreview(frame) if native else VoxelPreview(frame)
+            viewer.pack(fill='both', expand=True)
+            popup.update_idletasks()  # Full-size native framebuffer on first open.
+            self._inherit_preview_state(viewer)
+        except (NativeViewerError, OSError, ValueError, RuntimeError, tk.TclError):
+            if viewer is not None:
+                viewer.destroy()
+            if not native:
+                popup.destroy()
+                raise
+            # Out-of-memory/driver failure: explicitly labelled lightweight
+            # fallback, never report this as a successful native 3D render.
+            label.configure(text='ネイティブ拡大表示に失敗：軽量3Dで表示（SOURCE不変）')
+            viewer = VoxelPreview(frame)
+            viewer.pack(fill='both', expand=True)
+            self._inherit_preview_state(viewer)
+        ttk.Button(tools, text='全体表示', command=viewer.reset_view).pack(side='right')
+        for name in reversed(tuple(VoxelPreview.VIEWS)):
+            ttk.Button(tools, text=name,
+                       command=lambda selected=name: viewer.set_view(selected)).pack(
+                           side='right', padx=(0, 4))
         self._large_preview_window = popup
         self._large_preview = viewer
+        self._large_preview_target_mode = native
         def close():
             self._large_preview = None
             self._large_preview_window = None
+            self._large_preview_target_mode = None
             popup.destroy()
         popup.protocol('WM_DELETE_WINDOW', close)
 
@@ -135,11 +162,20 @@ class Studio(tk.Tk):
         if viewer is None:
             return
         try:
-            viewer.show(self.preview.scene)
-            viewer.set_cut_level(self.preview.cut_level)
+            if not viewer.winfo_exists():
+                self._large_preview = self._large_preview_window = None
+                return
+            if self._large_preview_target_mode != isinstance(self.preview, NativeVoxelPreview):
+                # Switching native/lightweight must also switch the popup.
+                self._large_preview_window.destroy()
+                self._large_preview = self._large_preview_window = None
+                self.open_large_preview()
+                return
+            if viewer.scene is self.preview.scene and viewer.cut_level == self.preview.cut_level:
+                return  # Preserve independent popup orbit/zoom during UI updates.
+            self._inherit_preview_state(viewer)
         except tk.TclError:
-            self._large_preview = None
-            self._large_preview_window = None
+            self._large_preview = self._large_preview_window = None
 
     def open_gpu_preview(self):
         """Toggle *embedded* native 3D / lightweight Tk; never open a browser.
@@ -301,7 +337,7 @@ class Studio(tk.Tk):
         self.gpu_view_btn = ttk.Button(top, text='高精細3D（アプリ内）', command=self.open_gpu_preview,
                                        style='Primary.TButton', state='disabled')
         self.gpu_view_btn.pack(side='right', padx=(7, 0))
-        ttk.Button(top, text='軽量3Dを拡大', command=self.open_large_preview,
+        ttk.Button(top, text='3Dを拡大', command=self.open_large_preview,
                    style='Quiet.TButton').pack(side='right', padx=(7, 0))
         self.export_btn = ttk.Button(top, text='設計を保存', command=self.export_design,
                                      style='Quiet.TButton', state='disabled')
@@ -363,6 +399,7 @@ class Studio(tk.Tk):
             self.preview = VoxelPreview(self.viewer_host)
         self._large_preview_window = None
         self._large_preview = None
+        self._large_preview_target_mode = None
         self.preview.on_scene_changed = self._preview_updated
         self.preview.pack(fill='both', expand=True)
         sectionbar = ttk.Frame(right, style='Panel.TFrame')
@@ -1289,6 +1326,11 @@ class Studio(tk.Tk):
 
 
 def main():
+    if '--native-selfcheck' in sys.argv:
+        # Exercise native VTK from INSIDE the actual frozen executable.
+        # Synthetic read-only geometry only; never invokes the LLM or Minecraft.
+        from app.native_selfcheck import main as native_main
+        return native_main([v for v in sys.argv[1:] if v != '--native-selfcheck'])
     if '--acceptance' in sys.argv:
         # Explicit model-inference acceptance. Reports evidence to the chosen
         # path, but does not save a user project or touch Minecraft.

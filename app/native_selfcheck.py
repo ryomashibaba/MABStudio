@@ -15,6 +15,9 @@ from pathlib import Path
 
 def inspect_native_viewer() -> dict:
     import tkinter as tk
+    from app.release_runtime import verify_packaged_runtime
+    # A packaged EXE must pass its private runtime audit before 3D is certified.
+    runtime = verify_packaged_runtime()
     from app.native_viewer import NativeVoxelPreview, native_dependencies_available
 
     if not native_dependencies_available():
@@ -55,6 +58,9 @@ def inspect_native_viewer() -> dict:
                 'renderer': 'VTK_OFFSCREEN_TK', 'source': 'SYNTHETIC_IN_MEMORY',
                 'cells': 64, 'views': 4, 'framebuffer': list(size),
                 'elapsedSeconds': round(time.monotonic()-started, 3),
+                'packagedRuntimeVerified': runtime['packagedRuntimeVerified'],
+                'runtimeMode': runtime['mode'],
+                'renderTimings': widget.render_statistics(),
                 'localAiCalls': 0, 'worldContacts': 0, 'worldWrites': 0}
     finally:
         try:
@@ -73,6 +79,7 @@ def main(argv=None) -> int:
     except Exception as exc:
         result = {'result': 'FAIL_NATIVE_READONLY_SELF_CHECK',
                   'error': type(exc).__name__, 'reason': str(exc)[:240],
+                  'packagedRuntimeVerified': False,
                   'worldContacts': 0, 'worldWrites': 0}
         status = 1
     if args.report:

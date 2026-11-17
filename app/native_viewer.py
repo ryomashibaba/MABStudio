@@ -11,8 +11,9 @@ previous offline renderer, not raw design or model output.
 from __future__ import annotations
 
 import math
+import time
 import tkinter as tk
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from app.gpu_viewer import GPUViewerError, compact_display_data
@@ -162,9 +163,13 @@ class NativeVoxelPreview(tk.Frame):
         self._bounds = None
         self._visible_count = 0
         self._rendered_size = (0, 0)
+        self._last_frame_ms = {}
+        self._frame_ms = deque(maxlen=60)
         self._drag = None
         self._closed = False
         self._edge_actor = None
+        self._material_actor = None
+        self._material_boundary_count = 0
         self._seam_actor = None
         self._floor_actors = []
         self._axes_actor = None
@@ -177,6 +182,12 @@ class NativeVoxelPreview(tk.Frame):
         self._window.SetOffScreenRendering(True)
         self._window.SetMultiSamples(4)
         self._window.AddRenderer(self._render)
+        # Reuse the VTK readback pipeline; recreating a filter per orbit frame
+        # forces allocation and obscures whether VTK or Tk is the bottleneck.
+        self._capture = self._vtk['vtkWindowToImageFilter']()
+        self._capture.SetInput(self._window)
+        self._capture.SetInputBufferTypeToRGB()
+        self._capture.ReadFrontBufferOff()
         self._render.GetActiveCamera().SetViewAngle(34.0)
         # Local directional sky light + diffuse fill. Renderer never touches world.
         for position, intensity, color in (
@@ -237,7 +248,7 @@ class NativeVoxelPreview(tk.Frame):
             self.angle = angle + (e.x-x)*.009
             self.elevation = max(-math.radians(88.5), min(math.radians(88.5),
                                  elevation + (e.y-y)*.007))
-        self._schedule(25)
+        self._schedule(45)
 
     def _end_drag(self, e=None):
         self._drag = None
@@ -306,6 +317,10 @@ class NativeVoxelPreview(tk.Frame):
         if self._edge_actor:
             self._render.RemoveActor(self._edge_actor)
             self._edge_actor = None
+        if self._material_actor:
+            self._render.RemoveActor(self._material_actor)
+            self._material_actor = None
+        self._material_boundary_count = 0
         for item in self._floor_actors:
             self._render.RemoveActor(item)
         self._floor_actors.clear()
@@ -321,6 +336,7 @@ class NativeVoxelPreview(tk.Frame):
         try:
             data, visible, faces = native_mesh_scene(self.scene, self.cut_level)
         except (GPUViewerError, NativeViewerError) as exc:
+            self._photo = None
             self._image.configure(text=f'3D表示を安全に停止しました: {exc}', fg='#ecbec6',
                                   image='', bg='#101a2a')
             self._bounds = None
@@ -350,7 +366,8 @@ class NativeVoxelPreview(tk.Frame):
         ox, oy, oz = (b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2
         edge_points = v['vtkPoints']()
         edge_cells = v['vtkCellArray']()
-        seen_edges = set()
+        edge_owner = {}
+        material_boundary_edges = set()
         for surf in faces:
             idx = [points.InsertNextPoint(x-ox, y-oy, z-oz) for x,y,z in surf.corners]
             poly_cells.InsertNextCell(4)
@@ -363,9 +380,15 @@ class NativeVoxelPreview(tk.Frame):
             for j in range(4):
                 a, bpt = corners[j], corners[(j+1)%4]
                 identity = tuple(sorted((a, bpt)))
-                if identity in seen_edges:
+                if identity in edge_owner:
+                    # Multiple visible planes can meet at the same edge; keep
+                    # material comparison per-plane (not arbitrary first face).
+                    same_plane_mat = edge_owner[identity].get(surf.normal)
+                    if same_plane_mat is not None and same_plane_mat != surf.material:
+                        material_boundary_edges.add((identity, surf.normal))
+                    edge_owner[identity][surf.normal] = surf.material
                     continue
-                seen_edges.add(identity)
+                edge_owner[identity] = {surf.normal: surf.material}
                 off = tuple(n*.012 for n in surf.normal)
                 p = edge_points.InsertNextPoint(*(a[i]-(ox,oy,oz)[i]+off[i] for i in range(3)))
                 q = edge_points.InsertNextPoint(*(bpt[i]-(ox,oy,oz)[i]+off[i] for i in range(3)))
@@ -408,6 +431,32 @@ class NativeVoxelPreview(tk.Frame):
         edge_actor.GetProperty().LightingOff()
         self._render.AddActor(edge_actor)
         self._edge_actor = edge_actor
+        # Keep actual material boundaries readable at mid-distance, without
+        # inventing voxel geometry or texture assets. Only SOURCE-exposed edges.
+        self._material_boundary_count = len(material_boundary_edges)
+        if material_boundary_edges:
+            accent_points = v['vtkPoints']()
+            accent_cells = v['vtkCellArray']()
+            for ((a, bpt), normal) in sorted(material_boundary_edges):
+                ids = [accent_points.InsertNextPoint(*(
+                    point[i]-(ox,oy,oz)[i]+normal[i]*.030 for i in range(3)))
+                       for point in (a,bpt)]
+                accent_cells.InsertNextCell(2)
+                for idx in ids:
+                    accent_cells.InsertCellPoint(idx)
+            accent = v['vtkPolyData']()
+            accent.SetPoints(accent_points)
+            accent.SetLines(accent_cells)
+            accent_mapper = v['vtkPolyDataMapper']()
+            accent_mapper.SetInputData(accent)
+            actor = v['vtkActor']()
+            actor.SetMapper(accent_mapper)
+            actor.GetProperty().SetColor(.025,.065,.11)
+            actor.GetProperty().SetOpacity(.75)
+            actor.GetProperty().SetLineWidth(1.6)
+            actor.GetProperty().LightingOff()
+            self._render.AddActor(actor)
+            self._material_actor = actor
         self._add_seams(faces, (ox,oy,oz))
 
     def _add_seams(self, faces, offset):
@@ -534,6 +583,7 @@ class NativeVoxelPreview(tk.Frame):
         if w < 20 or h < 20:
             return
         if self._bounds is None:
+            self._photo = None
             self._image.configure(text='表示するSOURCE建築がありません' if not self.scene else
                                   'この断面には表示セルがありません', image='',
                                   bg='#101a2a', fg='#b4cee4')
@@ -562,22 +612,44 @@ class NativeVoxelPreview(tk.Frame):
         camera.OrthogonalizeViewUp()
         camera.SetClippingRange(max(.01, distance/self.zoom-radius*1.6),
                                 distance/self.zoom+radius*3.0+10)
-        self._window.SetSize(w, h)
+        tick = time.perf_counter()
+        if self._rendered_size != (w, h):
+            self._window.SetSize(w, h)
         self._window.Render()
-        capture = self._vtk['vtkWindowToImageFilter']()
-        capture.SetInput(self._window)
-        capture.SetInputBufferTypeToRGB()
-        capture.ReadFrontBufferOff()
-        capture.Update()
-        pixels = self._vtk['vtk_to_numpy'](capture.GetOutput().GetPointData().GetScalars())
+        rendered = time.perf_counter()
+        self._capture.Modified()  # VTK must grab the newly rendered framebuffer.
+        self._capture.Update()
+        pixels = self._vtk['vtk_to_numpy'](self._capture.GetOutput().GetPointData().GetScalars())
         from PIL import Image
         bitmap = Image.fromarray(pixels.reshape(h, w, 3), 'RGB').transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-        photo = self._vtk['ImageTk'].PhotoImage(bitmap, master=self._image)
-        self._photo = photo
-        self._image.configure(image=photo, text='', bg='#101a2a')
+        captured = time.perf_counter()
+        # Reuse Tk's PhotoImage allocation on orbit/zoom; pixel copy remains
+        # required, but the widget/image do not need to be recreated.
+        if self._photo is not None and self._rendered_size == (w, h):
+            self._photo.paste(bitmap)
+        else:
+            self._photo = self._vtk['ImageTk'].PhotoImage(bitmap, master=self._image)
+        self._image.configure(image=self._photo, text='', bg='#101a2a')
+        presented = time.perf_counter()
         self._rendered_size = w, h
+        self._last_frame_ms = {'vtkRender': round((rendered-tick)*1000, 2),
+                               'readback': round((captured-rendered)*1000, 2),
+                               'tkPresentation': round((presented-captured)*1000, 2),
+                               'total': round((presented-tick)*1000, 2)}
+        self._frame_ms.append(self._last_frame_ms['total'])
+
+    def render_statistics(self) -> dict:
+        """Bounded in-memory timings; not FPS, hardware-GPU or quality proof."""
+        samples = sorted(self._frame_ms)
+        return {'samples': len(samples), 'materialBoundaryEdges': self._material_boundary_count,
+                'lastFrameMs': dict(self._last_frame_ms),
+                'medianMs': samples[len(samples)//2] if samples else None,
+                'p95Ms': samples[min(len(samples)-1, math.ceil(len(samples)*.95)-1)] if samples else None,
+                'framebuffer': list(self._rendered_size)}
 
     def destroy(self):
+        if self._closed:
+            return
         self._closed = True
         if self._after is not None:
             try: self.after_cancel(self._after)
@@ -585,4 +657,10 @@ class NativeVoxelPreview(tk.Frame):
             self._after = None
         if hasattr(self, '_window'):
             self._window.Finalize()
+        # A parent/window test harness may already have cancelled a Tk.after
+        # callback from outside this widget. Tk's base destroy assumes every
+        # registered Tcl command still exists; omit externally-deleted names.
+        if self._tclCommands:
+            self._tclCommands = [name for name in self._tclCommands
+                                 if self.tk.call('info', 'commands', name)]
         super().destroy()

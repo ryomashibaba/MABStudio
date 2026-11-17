@@ -3,6 +3,7 @@ import copy
 import math
 import os
 import pytest
+from tests.test_gui_review_flow import studio
 
 from app.native_viewer import (Surface, exposed_surfaces, native_mesh_scene,
                                colored_surface, native_dependencies_available)
@@ -95,3 +96,80 @@ def test_native_tk_embedded_renderer_rotation_and_section():
         assert widget._window.GetClassName().endswith('RenderWindow')
     finally:
         root.destroy()
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_native_multiple_frames_reuse_capture_and_expose_in_memory_perf():
+    if not native_dependencies_available():
+        pytest.skip('VTK and Pillow missing')
+    import tkinter as tk
+    from app.native_viewer import NativeVoxelPreview
+    root=tk.Tk()
+    root.geometry('580x430')
+    try:
+        widget=NativeVoxelPreview(root)
+        widget.pack(fill='both', expand=True)
+        root.update()
+        scene={'primitives': [[x,y,z,(x+y+z)%2] for x in range(9)
+                              for y in range(6) for z in range(7)],
+               'previewPalette':['#c9b397','#548e9e']}
+        before=copy.deepcopy(scene)
+        widget.show(scene)
+        widget.draw()
+        capture=widget._capture
+        photo=widget._photo
+        widget.angle+=.3
+        widget.draw()
+        assert widget._capture is capture
+        assert widget._photo is photo
+        assert widget._material_boundary_count > 0
+        metrics=widget.render_statistics()
+        assert metrics['samples']>=2
+        assert metrics['lastFrameMs']['total']>0
+        assert metrics['medianMs']>0 and metrics['p95Ms']>0
+        assert metrics['framebuffer'][0]>=500
+        widget.set_cut_level(2)
+        widget.draw()
+        assert widget._visible_count==9*3*7
+        assert scene==before
+    finally:
+        root.destroy()
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_native_popup_uses_same_renderer_and_inherits_camera(studio):
+    if not native_dependencies_available():
+        pytest.skip('VTK and Pillow missing')
+    from app.native_viewer import NativeVoxelPreview
+    app, _ = studio
+    assert app.preview.scene is not None
+    app.open_gpu_preview()
+    assert isinstance(app.preview, NativeVoxelPreview)
+    app.preview.set_view('右側')
+    app.preview.zoom = 1.6
+    app.preview.pan_x = 12
+    app.preview.pan_y = -8
+    app.preview.set_cut_level(1)
+    initial = app.history.head()['revisionId']
+    app.open_large_preview()
+    app.update_idletasks()
+    popup = app._large_preview
+    assert isinstance(popup, NativeVoxelPreview)
+    assert popup.scene is app.preview.scene
+    assert (popup.angle, popup.elevation) == (app.preview.angle, app.preview.elevation)
+    assert (popup.zoom, popup.pan_x, popup.pan_y) == (1.6, 12, -8)
+    assert popup.cut_level==1
+    assert popup._image.winfo_width()>100
+    popup.draw()
+    assert popup._photo is not None
+    app.preview.set_cut_level(None)
+    assert popup.cut_level is None
+    assert app.history.head()['revisionId']==initial
+    # Changing renderer with popup open must also change enlarged renderer.
+    app.open_gpu_preview()
+    from app.preview import VoxelPreview
+    assert isinstance(app.preview, VoxelPreview)
+    assert isinstance(app._large_preview, VoxelPreview)
+    assert app._large_preview.scene is app.preview.scene
+    assert app.history.head()['revisionId']==initial
+    app._large_preview_window.destroy()
+    app._large_preview = app._large_preview_window = None
