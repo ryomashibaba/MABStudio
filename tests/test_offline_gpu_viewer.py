@@ -82,21 +82,31 @@ def test_windows_onedir_includes_viewer_assets_and_integrity_manifest():
 
 
 @pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk needs display')
-def test_real_app_gpu_button_tracks_preview_and_uses_current_section(studio,monkeypatch):
+def test_app_native_button_never_opens_external_browser(studio,monkeypatch):
     from app import main
+    from app.native_viewer import NativeVoxelPreview, native_dependencies_available
     app,_=studio
-    viewed=[]
-    monkeypatch.setattr(main,'open_offline_preview',lambda scene,root,cut_level=None:viewed.append((scene,root,cut_level)))
+    opened=[]
+    import webbrowser
+    monkeypatch.setattr(webbrowser,'open',lambda *a,**k:opened.append(a))
     app._refresh_buttons()
     assert str(app.gpu_view_btn['state'])=='normal'
+    if not native_dependencies_available():
+        # Optional dependency unavailable: deterministic lightweight fallback.
+        assert not isinstance(app.preview,NativeVoxelPreview)
+        return
     app.section_enabled.set(True)
     app._section_changed()
+    old_scene=app.preview.scene
     app.open_gpu_preview()
-    assert len(viewed)==1
-    assert viewed[0][0] is app.preview.scene
-    assert viewed[0][2]==app.preview.cut_level
-    app.preview.show(None)
-    assert str(app.gpu_view_btn['state'])=='disabled'
+    assert isinstance(app.preview,NativeVoxelPreview)
+    assert app.preview.scene is old_scene
+    assert app.preview.cut_level==app.section_level.get()
+    assert not opened
+    app.open_gpu_preview()
+    assert not isinstance(app.preview,NativeVoxelPreview)
+    assert app.preview.scene is old_scene
+    assert not opened
 
 
 def test_actual_gpu_viewer_javascript_contract_with_node():

@@ -1,6 +1,7 @@
 """MAB Studio Windows GUI. Offline-first, test-world only. No world-writing calls."""
 from __future__ import annotations
 import json
+import os
 import gc
 from pathlib import Path
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from app.core import (
     ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
-from app.gpu_viewer import open_offline_preview, GPUViewerError
+from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_dependencies_available
 from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
@@ -139,21 +140,51 @@ class Studio(tk.Tk):
             self._large_preview_window = None
 
     def open_gpu_preview(self):
-        """Open a read-only, offline, GPU-backed view of the CURRENT preview."""
+        """Toggle *embedded* native 3D / lightweight Tk; never open a browser.
+
+        Only SOURCE-verified scene primitives are used. The old widget is
+        disposed after the new one is initialized, preserving safe fallback.
+        """
         if self.busy or not self.preview.scene:
             messagebox.showinfo('高精細3D', '表示する設計がありません。先に設計を開いてください。')
             return
+        old = self.preview
+        native = isinstance(old, NativeVoxelPreview)
+        if not native and not native_dependencies_available():
+            messagebox.showinfo('アプリ内3Dの準備',
+                                '高精細のネイティブ3DにはVTKが必要です。\n'
+                                '同梱の RUN_STUDIO_NATIVE.bat を起動してください。\n'
+                                'アプリ内に表示します（ブラウザーは使いません）。')
+            return
         try:
-            open_offline_preview(self.preview.scene, self.manager.root,
-                                 cut_level=self.preview.cut_level)
-            self.status.set('高精細3Dビューアを開きました。SOURCE・Minecraftワールドは変更していません。')
-        except (GPUViewerError, OSError, ValueError) as exc:
-            messagebox.showerror('高精細3Dを開けません', str(exc))
+            new_view = VoxelPreview(self.viewer_host) if native else NativeVoxelPreview(self.viewer_host)
+            new_view.on_scene_changed = None
+            new_view.set_detail(self.detail_mode.get())
+            new_view.show(old.scene)
+            new_view.angle, new_view.elevation = old.angle, old.elevation
+            new_view.zoom = old.zoom
+            new_view.pan_x, new_view.pan_y = old.pan_x, old.pan_y
+            new_view.set_cut_level(old.cut_level)
+            new_view.on_scene_changed = self._preview_updated
+            # Replace the display in the existing GUI without editing SOURCE.
+            old.pack_forget()
+            new_view.pack(fill='both', expand=True)
+            self.preview = new_view
+            old.destroy()
+            new_view.draw()
+            self._preview_updated()
+            self.status.set('3D表示をアプリ内で切替えました（SOURCE・ワールド未変更）')
+        except (NativeViewerError, OSError, ValueError, RuntimeError) as exc:
+            if 'new_view' in locals() and new_view is not old:
+                try: new_view.destroy()
+                except Exception: pass
+            messagebox.showerror('3D表示を切替えられません', str(exc))
 
     def _preview_updated(self):
         self._sync_large_preview()
         if hasattr(self, 'gpu_view_btn'):
-            self.gpu_view_btn.configure(state='normal' if self.preview.scene and not self.busy else 'disabled')
+            self.gpu_view_btn.configure(state='normal' if self.preview.scene and not self.busy else 'disabled',
+                                        text='軽量3Dに切替' if isinstance(self.preview, NativeVoxelPreview) else '高精細3D（アプリ内）')
 
     def _make_ui(self):
         """Creation-first desktop layout. Technical controls live in a separate window."""
@@ -265,7 +296,7 @@ class Studio(tk.Tk):
         top = ttk.Frame(right, style='Panel.TFrame')
         top.pack(fill='x', pady=(0, 10))
         ttk.Label(top, text='3Dプレビュー', style='Section.TLabel').pack(side='left')
-        self.gpu_view_btn = ttk.Button(top, text='高精細3D（GPU）', command=self.open_gpu_preview,
+        self.gpu_view_btn = ttk.Button(top, text='高精細3D（アプリ内）', command=self.open_gpu_preview,
                                        style='Primary.TButton', state='disabled')
         self.gpu_view_btn.pack(side='right', padx=(7, 0))
         ttk.Button(top, text='軽量3Dを拡大', command=self.open_large_preview,
@@ -315,7 +346,19 @@ class Studio(tk.Tk):
                                            command=self.reject_revision, state='disabled')
         self.reject_draft_btn.pack(side='left')
         self._reviewbar_visible = False
-        self.preview = VoxelPreview(right)
+        self.viewer_host = ttk.Frame(right, style='Panel.TFrame')
+        self.viewer_host.pack(fill='both', expand=True)
+        # The one-click native launcher activates the embedded engine from
+        # startup; ordinary Python sources continue to work without VTK.
+        prefer_native = (os.environ.get('MAB_STUDIO_NATIVE') == '1' or
+                         (getattr(sys, 'frozen', False) and native_dependencies_available()))
+        if prefer_native and native_dependencies_available():
+            try:
+                self.preview = NativeVoxelPreview(self.viewer_host)
+            except (NativeViewerError, OSError, RuntimeError):
+                self.preview = VoxelPreview(self.viewer_host)
+        else:
+            self.preview = VoxelPreview(self.viewer_host)
         self._large_preview_window = None
         self._large_preview = None
         self.preview.on_scene_changed = self._preview_updated
@@ -552,13 +595,14 @@ class Studio(tk.Tk):
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
-        self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled')
+        self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled',
+                                    text='軽量3Dに切替' if isinstance(self.preview, NativeVoxelPreview) else '高精細3D（アプリ内）')
         self.unload_btn.configure(state='normal' if not self.busy and bool(self.model.get().strip()) else 'disabled')
         self.models_btn.configure(state='normal' if not self.busy else 'disabled')
         self.model_box.configure(state='normal' if not self.busy else 'disabled')
         self.provider_box.configure(state='readonly' if not self.busy else 'disabled')
         if self.pending_revision is not None and not self._reviewbar_visible:
-            self.reviewbar.pack(fill='x', before=self.preview, pady=(0, 9))
+            self.reviewbar.pack(fill='x', before=self.viewer_host, pady=(0, 9))
             self._reviewbar_visible = True
         elif self.pending_revision is None and self._reviewbar_visible:
             self.reviewbar.pack_forget()
