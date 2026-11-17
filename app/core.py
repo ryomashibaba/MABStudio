@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import time
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -395,9 +396,10 @@ JSONオブジェクトだけを出力してください。前置きやMarkdown�
 {"id":"opening","shape":"box","mode":"cut","origin":[4,1,1],"size":[3,4,2]}
 を使えます。形状は box / ellipsoid(center,radii) / cylinder(origin,axis,radius,length)。
 materialは stone, concrete, metal, glass, wood, glow, accent の7種。
-整数、各要素がbounds内、elements最大160、縦軸はy。全体積50万以下。概念建築のみ。
+整数、各要素がbounds内、SOURCE仕様上はelements最大160、今回のAI生成は最大32。縦軸はy。全体積50万以下。概念建築のみ。
 構造の美観を優先し、外装・屋根・窓・入口・内装を可能な範囲で工夫。
-建築の必要な要素は省略せず、要素IDと説明文を簡潔にし、JSON以外にトークンを使わない。
+設計JSONのelementsは最大32個。箱やシェル・切り抜き・円柱を利用して、窓の多い4階建てでも独創的な外装と機能を簡潔に表現。
+要素IDと説明文は短く、余分な説明・推論・空白を出力せず、完全なJSONだけで必ず終了する。
 Minecraftワールド座標、実行可能なコマンド、プログラム、URLを出力しない。
 """
 
@@ -462,6 +464,20 @@ class ModelOutputLimitError(StudioError):
 # without silently changing or reloading the user's model (which costs VRAM).
 DEFAULT_OUTPUT_TOKENS = 6400
 MAX_OUTPUT_TOKENS = 8000
+# A complete B143 source is still verified by the pinned MAB engine. The output
+# grammar only bounds the FIRST proposal so a normal building fits in one reply.
+MAX_MODEL_ELEMENTS = 32
+MODEL_GENERATION_SCHEMA = {
+    **B143_JSON_SCHEMA,
+    "properties": {**B143_JSON_SCHEMA["properties"],
+                   "elements": {**B143_JSON_SCHEMA["properties"]["elements"],
+                                "maxItems": MAX_MODEL_ELEMENTS}},
+}
+# Long local GGUF inferences can need several minutes; while streaming, these
+# limits apply to idle reads and the complete request, not the total first-byte
+# to last-byte HTTP buffering delay of a non-streaming reply.
+MODEL_STREAM_IDLE_TIMEOUT = 300
+MODEL_STREAM_TOTAL_TIMEOUT = 900
 
 
 def _loaded_lm_studio_context(model: str, timeout: float = 2.5) -> int | None:
@@ -510,7 +526,7 @@ def _output_budget(provider: str, model: str, messages: list[dict]) -> tuple[int
     # Conservative headroom for instructions, schema, generation bookkeeping and
     # tokenization differences. This is only an estimate, not a tokenizer.
     request_chars = len(json.dumps({'messages': messages,
-                                   'schema': B143_JSON_SCHEMA}, ensure_ascii=False))
+                                   'schema': MODEL_GENERATION_SCHEMA}, ensure_ascii=False))
     reserve = max(1800, (request_chars + 1) // 2 + 480)
     remaining = context - reserve
     if remaining < 800:
@@ -535,17 +551,83 @@ def _truncated_error(provider: str, reply: dict, budget: int,
         'コンテキスト長を増やすとRAM/VRAM使用量も増える可能性があります。')
 
 
-def _model_response(url: str, payload: dict, timeout: int) -> dict:
+def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
+    """Read a single OpenAI-compatible SSE response, without repeating inference.
+
+    Only the final assistant content is used. Reasoning tokens are never
+    mistaken for JSON; invalid/unfinished events and timeout fail closed.
+    """
+    content = []
+    chars = 0
+    finish = None
+    usage = None
+    saw_done = False
+    last_notice = started
+    while True:
+        if time.monotonic() - started > MODEL_STREAM_TOTAL_TIMEOUT:
+            raise ModelTransportError('ローカルAI生成が安全な総時間上限を超えました（15分）。追加推論せず停止しました')
+        line = res.readline(MAX_RESPONSE + 1)
+        if not line:
+            break
+        if len(line) > MAX_RESPONSE:
+            raise ModelTransportError('ローカルAIのストリーム1行が大きすぎます')
+        if not line.startswith(b'data:'):
+            continue
+        item = line[5:].strip()
+        if item == b'[DONE]':
+            saw_done = True
+            break
+        try:
+            packet = json.loads(item)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ModelTransportError('ローカルAIのストリーム応答が壊れています') from exc
+        if not isinstance(packet, dict):
+            raise ModelTransportError('ローカルAIのストリーム形式が不正です')
+        if 'error' in packet:
+            raise ModelTransportError('ローカルAIが生成中にエラーを返しました。LM Studioのログを確認してください')
+        if isinstance(packet.get('usage'), dict):
+            usage = packet['usage']
+        choices = packet.get('choices')
+        if isinstance(choices, list) and choices:
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise ModelTransportError('ローカルAIの候補形式が不正です')
+            delta = choice.get('delta')
+            part = delta.get('content') if isinstance(delta, dict) else None
+            if part is not None and not isinstance(part, str):
+                raise ModelTransportError('ローカルAIの本文形式が不正です')
+            if part:
+                content.append(part)
+                chars += len(part)
+                if chars > MAX_RESPONSE:
+                    raise ModelTransportError('ローカルAIの出力が大きすぎます')
+            if choice.get('finish_reason') is not None:
+                finish = choice['finish_reason']
+        now = time.monotonic()
+        if on_progress is not None and now - last_notice >= 1.0:
+            on_progress('ローカルAIが生成中：JSON本文 '+str(chars)+'文字（SOURCE未検証）')
+            last_notice = now
+    if not saw_done or finish is None:
+        raise ModelTransportError('ローカルAIのストリームが完了前に切断されました。追加推論はしません')
+    return {'choices': [{'message': {'content': ''.join(content)},
+                         'finish_reason': finish}], 'usage': usage or {}}
+
+
+def _model_response(url: str, payload: dict, timeout: int, on_progress=None) -> dict:
     req = urllib.request.Request(url,
         json.dumps(payload, ensure_ascii=False).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'User-Agent': 'MABStudio/0.3'})
     try:
-        with LOCAL_HTTP.open(req, timeout=timeout) as res:
+        # The streaming transport is only used for LM Studio. Fake/test servers
+        # may still return one JSON body; that is handled without another POST.
+        with LOCAL_HTTP.open(req, timeout=(MODEL_STREAM_IDLE_TIMEOUT if payload.get('stream') else timeout)) as res:
+            if payload.get('stream') and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
+                return _read_lm_studio_stream(res, time.monotonic(), on_progress)
             raw = res.read(MAX_RESPONSE + 1)
     except urllib.error.HTTPError:
         raise
     except (OSError, TimeoutError) as exc:
-        raise ModelTransportError('ローカルAIサーバーとの通信に失敗しました: ' + str(exc)[:200]) from exc
+        raise ModelTransportError('ローカルAIとの通信がタイムアウト/切断されました。LM Studioの推論速度・VRAMとサーバー状態を確認してください（追加推論なし）: ' + str(exc)[:150]) from exc
     if len(raw) > MAX_RESPONSE:
         raise StudioError('LLMの応答が大きすぎます')
     try:
@@ -570,7 +652,7 @@ def llm_models(provider: str, timeout: int = 5) -> list[str]:
 
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
-            revision_base: dict | None = None) -> dict:
+            revision_base: dict | None = None, on_progress=None) -> dict:
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの接続先が不正です")
     if not model or len(model) > 180 or not user_prompt.strip() or len(user_prompt) > 2000:
@@ -593,25 +675,47 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             prior = json.dumps(previous_design, ensure_ascii=False, separators=(",", ":"))
             task += "\n修正する前回の設計JSON: " + prior[:12000]
         task += "\n元の建築意図を保ち、エラーだけ直した完全なJSONを返してください。"
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+    # A compact FIRST proposal must never shrink a previously approved design.
+    # Revision candidates can preserve all source elements plus bounded additions;
+    # B143 remains the only source/voxel validation authority.
+    max_elements = MAX_MODEL_ELEMENTS
+    system_prompt = SYSTEM_PROMPT
+    if revision_base is not None:
+        existing = revision_base.get('elements')
+        if not isinstance(existing, list) or not 1 <= len(existing) <= 160:
+            raise StudioError('修正元の要素数がB143の範囲外です')
+        max_elements = min(160, max(MAX_MODEL_ELEMENTS, len(existing) + 8))
+        system_prompt = SYSTEM_PROMPT.replace('今回のAI生成は最大32',
+                                              f'今回の修正案は最大{max_elements}').replace(
+                                                  '設計JSONのelementsは最大32個',
+                                                  f'設計JSONのelementsは最大{max_elements}個')
+    generation_schema = MODEL_GENERATION_SCHEMA if max_elements == MAX_MODEL_ELEMENTS else {
+        **MODEL_GENERATION_SCHEMA,
+        'properties': {**MODEL_GENERATION_SCHEMA['properties'],
+                       'elements': {**MODEL_GENERATION_SCHEMA['properties']['elements'],
+                                    'maxItems': max_elements}},
+    }
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]
     output_budget, context_length = _output_budget(provider, model, messages)
     if provider == 'Ollama':
         url = OLLAMA_BASE + '/api/chat'
         payload = {'model': model, 'messages': messages, 'stream': False,
-                   'format': B143_JSON_SCHEMA,
+                   'format': generation_schema,
                    'options': {'temperature': 0.3, 'num_predict': output_budget}}
         fallback = {**payload, 'format': 'json'}
     else:
         url = LM_STUDIO_BASE + '/v1/chat/completions'
         payload = {'model': model, 'messages': messages, 'temperature': 0.3,
-                   'max_tokens': output_budget, 'stream': False,
+                   'max_tokens': output_budget, 'stream': True,
                    'response_format': {
                        'type': 'json_schema',
-                       'json_schema': {'name': 'mab_b143_design', 'schema': B143_JSON_SCHEMA},
+                       'json_schema': {'name': 'mab_b143_design', 'schema': generation_schema},
                    }}
+        if re.search(r'qwen[.\/_-]?3[.]?8', model, re.I):
+            payload['chat_template_kwargs'] = {'enable_thinking': False}
         fallback = {**payload, 'response_format': {'type': 'json_object'}}
     try:
-        reply = _model_response(url, payload, timeout)
+        reply = _model_response(url, payload, timeout, on_progress)
     except urllib.error.HTTPError as exc:
         # HTTP 400 can also mean an unknown model, insufficient resources, or
         # invalid prompt. Never double-infer just because the status is 400.
@@ -628,7 +732,7 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         # Fall back only if the server actually identifies schema/grammar
         # incompatibility; never repeat a failed inference for unrelated 400s.
         try:
-            reply = _model_response(url, fallback, timeout)
+            reply = _model_response(url, fallback, timeout, on_progress)
         except urllib.error.HTTPError as fallback_error:
             raise ModelTransportError(f'{provider}がJSON出力を受け付けません (HTTP {fallback_error.code})') from fallback_error
     if provider == 'Ollama':

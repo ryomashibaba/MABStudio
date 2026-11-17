@@ -53,9 +53,9 @@ def test_structured_request_on_local_protocol(provider,monkeypatch):
         assert len(requests)==1
         schema=requests[0]['format'] if provider=='Ollama' else requests[0]['response_format']['json_schema']['schema']
         assert schema['properties']['schema']['const']==core.SCHEMA
-        assert schema['properties']['elements']['maxItems']==160
+        assert schema['properties']['elements']['maxItems']==core.MAX_MODEL_ELEMENTS
         assert requests[0]['messages'][1]['content']=='図書館を作って'
-        assert requests[0]['stream'] is False
+        assert requests[0]['stream'] is (provider=='LM Studio')
 
 @pytest.mark.parametrize('provider',['Ollama','LM Studio'])
 def test_explicit_unsupported_schema_falls_back_once(provider,monkeypatch):

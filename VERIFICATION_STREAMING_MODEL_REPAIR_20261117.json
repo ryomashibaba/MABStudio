@@ -1,0 +1,20 @@
+{
+  "schema": "mab-studio-streaming-repair-verification-v1",
+  "result": "PASS_LOCAL_TESTS_ONLY",
+  "localTests": 155,
+  "skipped": 0,
+  "failed": 0,
+  "engineSourceSha256": "537aa9e4a2b4e027f16179ef7a306b604ca4d850713d6de23940667ed2348e16",
+  "verifiedEngineRootIsExternal": true,
+  "windowsExeNativeRetest": "NOT_RUN",
+  "realGemmaQwenInference": "NOT_RUN",
+  "minecraftEducationConnected": false,
+  "worldWrites": 0,
+  "changes": [
+    "bounded first-generation JSON",
+    "revision-size preserving output bound",
+    "LM Studio SSE stream with time/size limits",
+    "Qwen3.8 nonthinking request",
+    "GUI progress messages"
+  ]
+}

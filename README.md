@@ -200,3 +200,11 @@ LICENSE notice or the exact release tag's official `LICENSE` from
 if no credible license notice can be retrieved. The independent runtime manifest
 continues to hash the copied binary and notice. No license check is bypassed.
 The `RUN_WINDOWS_NATIVE_QA.bat` acceptance entry point is unchanged.
+
+### LM Studioで長い生成が途中終了／Qwenがタイムアウトした場合（2026-11-17）
+
+- この開発版は**新規設計**の出力JSONを最大32要素に抑え、短い属性・箱/円柱/切り抜きで建築の主要部分を表します。B143本体の160要素上限は変更しません。既存建築の部分修正では原本要素数に応じて上限を引き上げ、省略を強制しません。
+- LM Studioには1回の生成をストリーミングで依頼し、画面下部に生成中のJSON本文文字数を表示します。生成ストリームの無通信が300秒に達した場合、または総時間が15分に達した場合は中止します。待機・出力が長すぎる状況に対処するためのもので、実モデルの生成成功を保証しません。
+- Qwen3.8のモデルIDに限り、公式モデルカードにあるリクエスト単位の `chat_template_kwargs.enable_thinking=false` を送ります。LM Studioの実行環境による対応差は実機確認が必要です。モデルの自動ロード/再設定/VRAM割当変更はしません。
+- JSONの未完了・切断・検証不一致は失敗として処理します。失敗した生成からMinecraft書込コマンドを作ることはありません。AI修正案はDRAFTとして表示し、明示承認まで履歴を変更しません。
+- Linux上のローカル試験ではLM StudioのSSEを模擬し、MABの固定B143原本でSOURCE検証しています。**真正Gemma/Qwenの生成、Windows上の新EXE実行、建築の美観・用途忠実度、Education実機施工は未実証**です。

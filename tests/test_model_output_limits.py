@@ -55,7 +55,7 @@ def test_loaded_context_8192_expands_old_4500_ceiling(monkeypatch):
         assert len(posts)==1
         assert 5500<=posts[0]['max_tokens']<=6600
         assert posts[0]['response_format']['type']=='json_schema'
-        assert posts[0]['stream'] is False
+        assert posts[0]['stream'] is True
 
 
 def test_loaded_context_4096_bounds_request(monkeypatch):

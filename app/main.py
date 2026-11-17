@@ -314,6 +314,10 @@ class Studio(tk.Tk):
         try:
             while True:
                 kind,title,result,callback,quiet=self.pending_events.get_nowait()
+                if kind=='progress':
+                    if self.busy:
+                        self.status.set(str(result))
+                    continue
                 self.busy=False
                 if title.startswith('Education直接読取'):
                     self._education_running=False
@@ -693,7 +697,9 @@ class Studio(tk.Tk):
             for attempt in range(2):
                 previous = design
                 try:
-                    design = ask_llm(provider, model, prompt, error, previous_design=previous)
+                    design = ask_llm(provider, model, prompt, error, previous_design=previous,
+                                     on_progress=lambda message: self.pending_events.put(
+                                         ('progress', 'LOCAL_LLM', message, None, True)))
                     scene = run_bridge(engine, design)
                     return design, scene, attempt
                 except (ModelTransportError, ModelOutputLimitError):
@@ -788,7 +794,9 @@ class Studio(tk.Tk):
                 prev = draft
                 try:
                     draft = ask_llm(provider, model, instruction, error,
-                                    previous_design=prev, revision_base=original)
+                                    previous_design=prev, revision_base=original,
+                                    on_progress=lambda message: self.pending_events.put(
+                                        ('progress', 'LOCAL_LLM', message, None, True)))
                     scene = run_bridge(engine, draft)
                     return draft, scene, attempt
                 except (ModelTransportError, ModelOutputLimitError):
