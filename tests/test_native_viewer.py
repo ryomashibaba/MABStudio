@@ -6,7 +6,8 @@ import pytest
 from tests.test_gui_review_flow import studio
 
 from app.native_viewer import (Surface, exposed_surfaces, native_mesh_scene,
-                               colored_surface, native_dependencies_available)
+                               colored_surface, native_dependencies_available,
+                               interactive_frame_size, NativeVoxelPreview)
 
 
 def example():
@@ -201,3 +202,84 @@ def test_extended_native_qa_fixture_is_pure_synthetic_and_exact_size():
     assert len({(x,y,z) for x,y,z,_ in scene['primitives']}) == 3128
     assert len(scene['previewPalette']) == 11
     assert not any(k in scene for k in ('model', 'design', 'world', 'credentials'))
+
+
+def test_interactive_frame_budget_keeps_small_viewers_crisp_and_inputs_bounded():
+    assert interactive_frame_size(960, 730, False) == (960, 730)
+    assert interactive_frame_size(960, 730, True) == (691, 526)
+    assert interactive_frame_size(480, 400, True) == (480, 400)
+    assert interactive_frame_size(1920, 1080, True) == (1382, 778)
+
+
+def test_mouse_motion_coalesces_without_ever_debouncing_indefinitely():
+    class Scheduled:
+        _closed = False
+        _after = None
+        def __init__(self):
+            self.queue = {}
+            self.created = 0
+            self.cancelled = []
+        def after(self, ms, callback):
+            self.created += 1
+            name = str(self.created)
+            self.queue[name] = (ms, callback)
+            return name
+        def after_cancel(self, name):
+            self.cancelled.append(name)
+            self.queue.pop(name, None)
+        def draw(self):
+            self._after = None
+
+    fake = Scheduled()
+    # Rapid mouse events must keep the original 16ms slot instead of
+    # cancelling and restarting it 120 times per second.
+    for i in range(120):
+        NativeVoxelPreview._schedule(fake, 16, coalesce=True)
+    assert fake.created == 1 and fake.cancelled == []
+    assert fake.queue['1'][0] == 16
+    # Releasing the mouse preempts the low-resolution pending draw.
+    NativeVoxelPreview._schedule(fake, 12)
+    assert fake.created == 2 and fake.cancelled == ['1']
+    fake.queue['2'][1]()
+    NativeVoxelPreview._schedule(fake, 16, coalesce=True)
+    assert fake.created == 3
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_native_drag_frame_reduced_then_restored_without_changing_source():
+    if not native_dependencies_available():
+        pytest.skip('VTK and Pillow unavailable')
+    from types import SimpleNamespace
+    import tkinter as tk
+    root = tk.Tk()
+    root.geometry('800x600')
+    widget = NativeVoxelPreview(root)
+    widget.pack(fill='both', expand=True)
+    try:
+        root.update()
+        scene={'primitives': [[x, y, z, (x+z)%2] for x in range(8)
+                              for y in range(5) for z in range(9)],
+               'previewPalette': ['#b1a18e', '#65879c']}
+        snapshot=copy.deepcopy(scene)
+        widget.show(scene)
+        widget.draw()
+        full_size=widget._rendered_size
+        full_photo=widget._photo
+        assert full_size==(800,600)
+        widget._start_rotate(SimpleNamespace(x=100,y=100,state=0))
+        widget._drag_to(SimpleNamespace(x=140,y=125))
+        widget.draw()
+        assert widget._interactive_preview
+        assert widget._rendered_size[0]<full_size[0]
+        assert widget._rendered_size[1]<full_size[1]
+        assert widget._photo_size==full_size
+        assert widget._photo is full_photo
+        widget._end_drag()
+        widget.draw()
+        assert widget._rendered_size==full_size
+        assert widget._photo_size==full_size
+        assert not widget._interactive_preview
+        assert widget._photo is full_photo
+        assert scene==snapshot
+    finally:
+        root.destroy()

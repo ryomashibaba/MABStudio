@@ -150,6 +150,18 @@ def native_mesh_scene(scene: dict, cut_level: int | None = None):
     return validated, visible, exposed_surfaces(visible) if visible else []
 
 
+def interactive_frame_size(width: int, height: int, dragging: bool) -> tuple[int, int]:
+    """Lower *only* the temporary drag framebuffer; keep the display full-size.
+
+    The SOURCE mesh, camera, section, material data, and resting image remain
+    unchanged. This reduces expensive OpenGL readback while orbiting a large
+    scene through the VTK -> Pillow -> Tk bridge.
+    """
+    if not dragging or min(width, height) < 420:
+        return width, height
+    return max(1, round(width * .72)), max(1, round(height * .72))
+
+
 def normal_shade(normal: tuple[int, int, int]) -> float:
     # Intentionally *different* from the old flat palette renderer:
     # directional sun/sky lighting over six side-specific visible surfaces.
@@ -203,7 +215,9 @@ class NativeVoxelPreview(tk.Frame):
         self._surfaces = []
         self._bounds = None
         self._visible_count = 0
-        self._rendered_size = (0, 0)
+        self._rendered_size = (0, 0)  # actual VTK framebuffer size
+        self._photo_size = (0, 0)  # displayed Tk image size (full resolution)
+        self._interactive_preview = False
         self._last_frame_ms = {}
         self._frame_ms = deque(maxlen=60)
         self._drag = None
@@ -245,7 +259,7 @@ class NativeVoxelPreview(tk.Frame):
         self._image = tk.Label(self, bg='#101a2a', bd=0, highlightthickness=0,
                                takefocus=True, cursor='fleur')
         self._image.pack(fill='both', expand=True)
-        self._image.bind('<Configure>', lambda _: self._schedule(140))
+        self._image.bind('<Configure>', lambda _: self._schedule(55, coalesce=True))
         self._image.bind('<ButtonPress-1>', self._start_rotate)
         self._image.bind('<B1-Motion>', self._move_left)
         for button in (2, 3):
@@ -289,11 +303,14 @@ class NativeVoxelPreview(tk.Frame):
             self.angle = angle + (e.x-x)*.009
             self.elevation = max(-math.radians(88.5), min(math.radians(88.5),
                                  elevation + (e.y-y)*.007))
-        self._schedule(45)
+        # Coalesce, do NOT debounce: frequent pointer events must not starve
+        # rendering until the mouse stops moving.
+        self._schedule(16, coalesce=True)
 
     def _end_drag(self, e=None):
         self._drag = None
-        self._schedule(20)
+        # Cancel any pending low-resolution drag frame; finish with full detail.
+        self._schedule(12)
 
     def _zoom_at(self, ratio, cursor):
         old = self.zoom
@@ -303,7 +320,9 @@ class NativeVoxelPreview(tk.Frame):
         h = max(1, self._image.winfo_height())
         self.pan_x += (1-actual)*(cursor[0] - w/2 - self.pan_x)
         self.pan_y += (1-actual)*(cursor[1] - h/2 - self.pan_y)
-        self._schedule(25)
+        # Scroll wheels/trackpads may send many events per frame; use the
+        # latest zoom without postponing the pending render indefinitely.
+        self._schedule(16, coalesce=True)
 
     def _wheel(self, e):
         if e.delta:
@@ -597,16 +616,26 @@ class NativeVoxelPreview(tk.Frame):
         self._render.AddActor(actor)
         self._floor_actors.append(actor)
 
-    def _schedule(self, ms=30):
+    def _schedule(self, ms=30, *, coalesce=False):
         if self._closed:
             return
         if self._after is not None:
+            if coalesce:
+                # Pending frame renders the most recent camera state. Repeated
+                # mouse/resize events never postpone it indefinitely.
+                return
             try: self.after_cancel(self._after)
             except tk.TclError: pass
         self._after = self.after(ms, self.draw)
 
     def draw(self):
+        # Explicit draw() calls during previews/QA must not leave an older
+        # Tk.after callback behind, causing a duplicate costly framebuffer copy.
+        pending = self._after
         self._after = None
+        if pending is not None:
+            try: self.after_cancel(pending)
+            except tk.TclError: pass
         if self._closed or not self.winfo_exists():
             return
         w, h = max(1, self._image.winfo_width()), max(1, self._image.winfo_height())
@@ -642,26 +671,33 @@ class NativeVoxelPreview(tk.Frame):
         camera.OrthogonalizeViewUp()
         camera.SetClippingRange(max(.01, distance/self.zoom-radius*1.6),
                                 distance/self.zoom+radius*3.0+10)
+        rw, rh = interactive_frame_size(w, h, self._drag is not None)
         tick = time.perf_counter()
-        if self._rendered_size != (w, h):
-            self._window.SetSize(w, h)
+        if self._rendered_size != (rw, rh):
+            self._window.SetSize(rw, rh)
         self._window.Render()
         rendered = time.perf_counter()
         self._capture.Modified()  # VTK must grab the newly rendered framebuffer.
         self._capture.Update()
         pixels = self._vtk['vtk_to_numpy'](self._capture.GetOutput().GetPointData().GetScalars())
         from PIL import Image
-        bitmap = Image.fromarray(pixels.reshape(h, w, 3), 'RGB').transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        bitmap = Image.fromarray(pixels.reshape(rh, rw, 3), 'RGB').transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        if (rw, rh) != (w, h):
+            # Stretch just the transient drag image, not the SOURCE geometry.
+            # A full-resolution render follows on mouse release.
+            bitmap = bitmap.resize((w, h), Image.Resampling.BILINEAR)
         captured = time.perf_counter()
-        # Reuse Tk's PhotoImage allocation on orbit/zoom; pixel copy remains
-        # required, but the widget/image do not need to be recreated.
-        if self._photo is not None and self._rendered_size == (w, h):
+        # Reuse a full-display-size Tk image even when the underlying OpenGL
+        # framebuffer changes between drag and idle frames.
+        if self._photo is not None and self._photo_size == (w, h):
             self._photo.paste(bitmap)
         else:
             self._photo = self._vtk['ImageTk'].PhotoImage(bitmap, master=self._image)
         self._image.configure(image=self._photo, text='', bg='#101a2a')
         presented = time.perf_counter()
-        self._rendered_size = w, h
+        self._rendered_size = rw, rh
+        self._photo_size = w, h
+        self._interactive_preview = (rw, rh) != (w, h)
         self._last_frame_ms = {'vtkRender': round((rendered-tick)*1000, 2),
                                'readback': round((captured-rendered)*1000, 2),
                                'tkPresentation': round((presented-captured)*1000, 2),
@@ -675,7 +711,9 @@ class NativeVoxelPreview(tk.Frame):
                 'lastFrameMs': dict(self._last_frame_ms),
                 'medianMs': samples[len(samples)//2] if samples else None,
                 'p95Ms': samples[min(len(samples)-1, math.ceil(len(samples)*.95)-1)] if samples else None,
-                'framebuffer': list(self._rendered_size)}
+                'framebuffer': list(self._rendered_size),
+                'displaySize': list(self._photo_size),
+                'interactivePreview': self._interactive_preview}
 
     def destroy(self):
         if self._closed:

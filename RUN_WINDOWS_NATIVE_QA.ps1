@@ -88,6 +88,9 @@ try {
         $packedCheck.extendedScene.cells -ne 3128 -or
         $packedCheck.extendedScene.paletteEntries -ne 11 -or
         !$packedCheck.extendedScene.pixelChangeVerified -or
+        !$packedCheck.extendedScene.cameraPixelChangeVerified -or
+        !$packedCheck.extendedScene.dragPreviewVerified -or
+        !$packedCheck.extendedScene.fullResolutionRestored -or
         $packedCheck.extendedScene.renderTimings.materialBoundaryEdges -lt 1 -or
         $packedCheck.renderTimings.samples -lt 10 -or
         $packedCheck.worldContacts -ne 0 -or $packedCheck.worldWrites -ne 0) {

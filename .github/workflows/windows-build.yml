@@ -101,6 +101,9 @@ jobs:
               $check.extendedScene.cells -ne 3128 -or
               $check.extendedScene.paletteEntries -ne 11 -or
               !$check.extendedScene.pixelChangeVerified -or
+              !$check.extendedScene.cameraPixelChangeVerified -or
+              !$check.extendedScene.dragPreviewVerified -or
+              !$check.extendedScene.fullResolutionRestored -or
               $check.extendedScene.renderTimings.materialBoundaryEdges -lt 1 -or
               $check.renderTimings.samples -lt 10 -or
               $check.worldContacts -ne 0 -or $check.worldWrites -ne 0) {

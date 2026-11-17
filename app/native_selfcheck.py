@@ -58,7 +58,7 @@ def inspect_native_viewer(*, extended: bool = False) -> dict:
     root.title('MAB Studio native 3D self-check')
     # VTK uses its own offscreen OpenGL context. An offscreen-positioned Tk
     # window provides actual widget dimensions without disturbing the desktop.
-    root.geometry('520x400+-2100+-2100')
+    root.geometry('720x540+-2100+-2100' if extended else '520x400+-2100+-2100')
     widget = None
     try:
         widget = NativeVoxelPreview(root)
@@ -102,10 +102,12 @@ def inspect_native_viewer(*, extended: bool = False) -> dict:
             if widget._visible_count != 3128:
                 raise RuntimeError('NATIVE_3D_EXTENDED_SCENE_COUNT')
             all_image = _image_signature(widget)
+            camera_images = set()
             for direction in ('正面', '右側', '上面', '斜め'):
                 widget.set_view(direction)
-                if not _image_signature(widget):
-                    raise RuntimeError('NATIVE_3D_EXTENDED_CAMERA')
+                camera_images.add(_image_signature(widget))
+            if len(camera_images) < 2:
+                raise RuntimeError('NATIVE_3D_EXTENDED_CAMERA_UNCHANGED')
             widget.set_cut_level(4)
             widget.draw()
             if widget._visible_count != 1280 or _image_signature(widget) == all_image:
@@ -113,9 +115,32 @@ def inspect_native_viewer(*, extended: bool = False) -> dict:
             widget.set_cut_level(None)
             if widget._visible_count != 3128:
                 raise RuntimeError('NATIVE_3D_EXTENDED_SECTION_RESTORE')
+            # A packaged EXE must preserve interaction quality: a drag frame
+            # may use fewer pixels, but the actual Tk image remains full-size
+            # and a crisp VTK framebuffer is restored on release.
+            from types import SimpleNamespace
+            full_width, full_height = widget._rendered_size
+            widget._start_rotate(SimpleNamespace(x=100, y=80, state=0))
+            widget._drag_to(SimpleNamespace(x=145, y=110))
+            widget.draw()
+            drag_width, drag_height = widget._rendered_size
+            if (drag_width >= full_width or drag_height >= full_height or
+                    widget._photo_size != (full_width, full_height) or
+                    not widget._interactive_preview):
+                raise RuntimeError('NATIVE_3D_DRAG_PREVIEW_NOT_REDUCED')
+            widget._end_drag()
+            widget.draw()
+            if (widget._rendered_size != (full_width, full_height) or
+                    widget._photo_size != (full_width, full_height) or
+                    widget._interactive_preview):
+                raise RuntimeError('NATIVE_3D_FULL_QUALITY_NOT_RESTORED')
             stress = {'cells': 3128, 'paletteEntries': 11,
                       'views': 4, 'sectionCells': 1280,
                       'pixelChangeVerified': True,
+                      'cameraPixelChangeVerified': True,
+                      'dragPreviewVerified': True,
+                      'fullResolutionRestored': True,
+                      'dragFramebuffer': [drag_width, drag_height],
                       'renderTimings': widget.render_statistics()}
         return {'result': 'PASS_NATIVE_READONLY_SELF_CHECK',
                 'renderer': 'VTK_OFFSCREEN_TK', 'source': 'SYNTHETIC_IN_MEMORY',
