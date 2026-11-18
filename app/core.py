@@ -1281,6 +1281,15 @@ def llm_models(provider: str, timeout: int = 5) -> list[str]:
     return [x["id"] for x in data.get("data", []) if isinstance(x.get("id"), str)]
 
 
+def _ollama_qwen3_thinking_can_be_disabled(model: str) -> bool:
+    """Only opt known Qwen3-family IDs into Ollama's supported think=False.
+
+    Do not send this setting to unrelated models: support for disabling
+    thinking varies by model. This is a request option, not a server change.
+    """
+    return bool(re.search(r'(?<![A-Za-z0-9])qwen3(?=$|[.:/_-])', model, re.I))
+
+
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
             revision_base: dict | None = None, on_progress=None,
@@ -1371,6 +1380,10 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         payload = {'model': model, 'messages': messages, 'stream': False,
                    'format': generation_schema,
                    'options': {'temperature': 0.3, 'num_predict': output_budget}}
+        if _ollama_qwen3_thinking_can_be_disabled(model):
+            # Ollama native /api/chat: Qwen3 supports an explicit non-thinking
+            # answer. Keep the strict JSON Schema and B143 validation unchanged.
+            payload['think'] = False
     else:
         url = LM_STUDIO_BASE + '/v1/chat/completions'
         payload = {'model': model, 'messages': messages, 'temperature': 0.3,
@@ -1430,6 +1443,11 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         message = choices[0].get('message')
         content = message.get('content', '') if isinstance(message, dict) else ''
     if not isinstance(content, str) or not content.strip():
+        if provider == 'Ollama' and isinstance(message, dict) and message.get('thinking'):
+            raise ModelOutputLimitError(
+                'Ollamaが思考用出力だけを返し、設計JSON本文が空でした。'
+                'SOURCEは未検証です。選択モデルのThinking設定を確認してください。'
+                '同じ条件での自動再推論は行いません。')
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
     draft = parse_llm_json(content)
     _raise_if_cancelled(cancel_event)

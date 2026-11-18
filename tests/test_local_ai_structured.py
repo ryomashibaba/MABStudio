@@ -106,3 +106,60 @@ def test_generic_bad_request_is_not_mistaken_for_schema_unsupported(provider,mon
         with pytest.raises(core.ModelTransportError,match='HTTP 400'):
             core.ask_llm(provider,'unloaded-model','図書館を作って')
         assert len(requests)==1  # avoid unnecessary expensive retry
+
+
+@pytest.mark.parametrize('name', [
+    'qwen3:14b', 'qwen3:8b', 'QWEN3:latest', 'qwen3.8-27b',
+    'qwen.qwen3.8-27b', 'library/qwen3:14b',
+])
+def test_qwen3_ollama_requests_non_thinking_without_loosening_schema(name, monkeypatch):
+    with model_server('valid') as (url, requests):
+        monkeypatch.setattr(core, 'OLLAMA_BASE', url)
+        assert core.ask_llm('Ollama', name, '衛星の整備施設を作って') == DESIGN
+        assert len(requests) == 1
+        req = requests[0]
+        assert req['think'] is False
+        assert req['stream'] is False
+        assert req['format']['properties']['schema']['const'] == core.SCHEMA
+        assert req['format']['properties']['elements']['maxItems'] == core.MAX_MODEL_ELEMENTS
+        assert 'keep_alive' not in req
+
+
+@pytest.mark.parametrize('name', ['test-model', 'gemma4:26b', 'qwen2.5:14b', 'myqwen3:14b', 'qwen3ish'])
+def test_other_ollama_models_do_not_inherit_qwen_thinking_setting(name, monkeypatch):
+    with model_server('valid') as (url, requests):
+        monkeypatch.setattr(core, 'OLLAMA_BASE', url)
+        assert core.ask_llm('Ollama', name, '図書館を作って') == DESIGN
+        assert len(requests) == 1
+        assert 'think' not in requests[0]
+
+
+def test_qwen3_delta_revision_keeps_thinking_off_and_delta_schema(monkeypatch):
+    from tests.test_local_llm_flow import DESIGN
+    from unittest.mock import patch
+    delta = {'schema': core.REVISION_DELTA_SCHEMA_ID,
+             'replace': [{'id': 'base', 'shape': 'box', 'mode': 'add',
+                          'material': 'glass', 'origin': [2, 1, 2], 'size': [8, 3, 8]}],
+             'add': [], 'removeIds': []}
+    payloads = []
+    def fake_response(url, payload, timeout, on_progress=None, cancel_event=None):
+        payloads.append(payload)
+        return {'message': {'content': json.dumps(delta)}, 'done': True, 'done_reason': 'stop'}
+    with patch.object(core, '_model_response', side_effect=fake_response):
+        revised = core.ask_llm('Ollama', 'qwen3:14b', '床をガラスに変える',
+                               revision_base=DESIGN, revision_mode='delta')
+    assert len(payloads) == 1
+    assert payloads[0]['think'] is False
+    assert payloads[0]['format']['properties']['schema']['const'] == core.REVISION_DELTA_SCHEMA_ID
+    assert revised['elements'][0]['material'] == 'glass'
+    assert DESIGN['elements'][0]['material'] == 'stone'
+
+
+def test_ollama_thought_only_does_not_become_a_design(monkeypatch):
+    from unittest.mock import patch
+    reply = {'message': {'content': '', 'thinking': 'nonempty thought'},
+             'done': True, 'done_reason': 'stop'}
+    with patch.object(core, '_model_response', return_value=reply) as request:
+        with pytest.raises(core.ModelOutputLimitError, match='思考用出力だけ'):
+            core.ask_llm('Ollama', 'qwen3:14b', '図書館を作って')
+    assert request.call_count == 1
