@@ -6,6 +6,13 @@ param(
 )
 . (Join-Path $PSScriptRoot 'GET_STUDIO_SOURCE_FINGERPRINT.ps1')
 $ErrorActionPreference = 'Stop'
+function Get-NativeSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try { return [System.BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
+}
 $source = $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $studioDataRoot = Join-Path $env:LOCALAPPDATA 'MABStudio'
@@ -70,7 +77,7 @@ try {
     New-Item -ItemType Directory -Force (Split-Path $js -Parent) | Out-Null
     $url = 'https://raw.githubusercontent.com/ryomashibaba/MinecraftAIBuilder/' + $summary.sourceCommit + '/source/ai/b143-building-dsl.mjs'
     Invoke-WebRequest -Uri $url -OutFile $js
-    $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $js).Hash.ToLowerInvariant()
+    $digest = Get-NativeSha256 -Path $js
     if ($digest -cne $summary.sourcePinnedHash) { throw 'PINNED_B143_HASH_MISMATCH' }
 
     $summary.stage = 'WINDOWS_BUILD_IN_SANDBOX'
@@ -175,7 +182,7 @@ try {
     [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $work 'dist-native'),$release)
     $summary.previewZip = $release
     $summary.previewZipBytes = (Get-Item -LiteralPath $release).Length
-    $summary.previewZipSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash.ToLowerInvariant()
+    $summary.previewZipSha256 = Get-NativeSha256 -Path $release
     $summary.thirdPartyLicenseFilesIncluded = (Get-ChildItem -LiteralPath (Join-Path $work 'dist-native\MABStudio\THIRD_PARTY_LICENSES') -Recurse -File | Measure-Object).Count -ge 1
 
     # Test the EXACT archive to be delivered, extracted outside the build tree.
@@ -186,8 +193,8 @@ try {
     [System.IO.Compression.ZipFile]::ExtractToDirectory($release, $portable)
     $portableExe = Join-Path $portable 'MABStudio\MABStudio.exe'
     if (!(Test-Path -LiteralPath $portableExe)) { throw 'PORTABLE_RELEASE_EXE_MISSING' }
-    $sourceExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
-    $portableExeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $portableExe).Hash.ToLowerInvariant()
+    $sourceExeHash = Get-NativeSha256 -Path $exe
+    $portableExeHash = Get-NativeSha256 -Path $portableExe
     if ($sourceExeHash -cne $portableExeHash) { throw 'PORTABLE_RELEASE_EXE_HASH_CHANGED' }
     # The EXE executes from the extracted location, not a source/build folder.
     $portableNative = Join-Path $results 'PORTABLE_EXE_NATIVE_3D.json'

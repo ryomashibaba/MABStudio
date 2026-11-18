@@ -1,6 +1,13 @@
 # Shared Windows PS 5.1 fingerprint for the app actually packaged in the EXE.
 # Ignore build caches and generated node_modules; include code, embedded assets,
 # and the two build-input scripts. No writes or network requests.
+function Get-StudioFileSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try { return [System.BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
+}
 function Get-StudioSourceFingerprint {
     param([Parameter(Mandatory=$true)][string]$Root)
     $base = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\','/')
@@ -20,7 +27,7 @@ function Get-StudioSourceFingerprint {
     $items = @(
         foreach ($file in $files) {
             $relative = $file.FullName.Substring($base.Length+1).Replace('\','/')
-            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            $hash = Get-StudioFileSha256 -Path $file.FullName
             $relative + '|' + $hash
         }
     ) | Sort-Object -CaseSensitive

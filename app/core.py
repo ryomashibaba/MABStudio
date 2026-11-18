@@ -638,6 +638,8 @@ INITIAL_GENERATION_GUIDANCE = """【初回設計】
 まず短く完結させる。10～14要素を目安とし、最大18要素以内で建築意図を表現する。
 外観のシルエット、建築的特徴、複数階の床と入口を優先する。4階建てなら4階を保つ。
 窓列や装飾帯はbox/cut/shellでまとめ、同種の窓を1個ずつ書き並べない。
+B143のshell制約を守る。boxでshell>0なら3軸すべて size>2*shell、ellipsoidの各radiiとcylinderのradiusはshellより大きくする。初回はshell=0を基本にし、薄い中空壁だけshell=1を使う。shell=2以上は避ける。厚い殻は使わず、必要な厚みは複数のadd要素で表現する。
+すべての座標はbounds内の0始まりローカル座標。boxはorigin+sizeが各bounds以下、ellipsoidはcenter±radiiが0..bounds-1、cylinderは軸方向のorigin+lengthと半径方向の外周がbounds内に収まることを確認する。屋上部材の高さ分だけbounds.heightに余裕を取り、ドームやアンテナを上端からはみ出させない。
 タイトルは48文字以内、説明は120文字以内、要素IDは24文字以内。
 titleとbriefは必ず1行の普通の文字列とし、省略・改行・<・>は禁止。
 生成予算を使い切る前にJSONを閉じる。完全なB143 JSONだけを返す。

@@ -63,6 +63,20 @@ def test_revision_output_grammar_preserves_full_b143_limits():
                for a in full['properties']['elements']['items']['anyOf'])
 
 
+def test_initial_prompt_explains_b143_shell_thickness_constraints():
+    guidance=core.INITIAL_GENERATION_GUIDANCE
+    assert 'size>2*shell' in guidance
+    assert 'shell=0を基本' in guidance
+    assert 'shell=2以上は避ける' in guidance
+
+
+def test_initial_prompt_explains_b143_bounds_for_rooftop_shapes():
+    guidance=core.INITIAL_GENERATION_GUIDANCE
+    assert 'ellipsoidはcenter±radii' in guidance
+    assert 'bounds.heightに余裕' in guidance
+    assert 'はみ出させない' in guidance
+
+
 def test_failure_diagnostics_do_not_record_model_content_or_autofix():
     original={'title':'SECRET_REQUEST', 'elements':[
        {'id':'x','shape':'box','mode':'add','origin':[1,2,3],'size':[4,5,6]},

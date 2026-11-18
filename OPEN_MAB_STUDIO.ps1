@@ -45,7 +45,7 @@ try {
             $receipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $valid = ($receipt.sourceFingerprintSha256 -ceq $sourceHash -and
                       $receipt.previewZipSha256 -ceq $selected.Sha -and
-                      $receipt.exeSha256 -ceq (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant() -and
+                      $receipt.exeSha256 -ceq (Get-StudioFileSha256 -Path $exe) -and
                       (Test-Path -LiteralPath (Join-Path $cache 'MABStudio\node.exe') -PathType Leaf) -and
                       (Test-Path -LiteralPath (Join-Path $cache 'MABStudio\NODE_LICENSE.txt') -PathType Leaf))
         } catch { $valid = $false }
@@ -55,7 +55,7 @@ try {
             throw 'CACHED_EXE_INVALID: existing cached runtime failed verification. Nothing was overwritten.'
         }
         # First launch only: extract a QA-accepted ZIP into a persistent private runtime.
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $selected.Zip).Hash.ToLowerInvariant()
+        $actual = Get-StudioFileSha256 -Path $selected.Zip
         if ($actual -cne $selected.Sha) { throw 'WINDOWS_QA_ZIP_HASH_MISMATCH' }
         New-Item -ItemType Directory -Force -Path $cacheBase | Out-Null
         $tmp = Join-Path $cacheBase ('install-' + [Guid]::NewGuid().ToString('N'))
@@ -71,7 +71,7 @@ try {
             $newReceipt = [ordered]@{
                 sourceFingerprintSha256 = $sourceHash
                 previewZipSha256 = $selected.Sha
-                exeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $newExe).Hash.ToLowerInvariant()
+                exeSha256 = Get-StudioFileSha256 -Path $newExe
                 sourceQa = $selected.Qa
             }
             $newReceipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $tmp 'FAST_START_RECEIPT.json') -Encoding UTF8
