@@ -156,7 +156,9 @@ try {
     if ($acceptance.outcome -ne 'PASS_TEST_DOUBLE_SOURCE_AND_GUI_ONLY' -or
         !$acceptance.testDoubleUsed -or !$acceptance.testDoubleRequestAttempted -or
         $acceptance.actualProviderRequestAttempted -or !$acceptance.sourceValid -or
-        !$acceptance.guiRendered -or $acceptance.source.voxelCount -ne 917 -or
+        !$acceptance.guiRendered -or $acceptance.guiRenderer -cne 'VTK_NATIVE_EMBEDDED' -or
+        !$acceptance.nativeScenePixelsVerified -or $acceptance.nativeCells -ne 917 -or
+        $acceptance.source.voxelCount -ne 917 -or
         $acceptance.worldWrites -ne 0) { throw 'EXE_TEST_DOUBLE_RESULT_INCONSISTENT' }
     $summary.testDoubleGuiAcceptance = 'PASS_FAKE_MODEL_ONLY'
 

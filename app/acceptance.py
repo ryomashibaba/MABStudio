@@ -1,4 +1,4 @@
-"""Single-run local Windows acceptance: an actual endpoint request -> B143 -> Tk canvas.
+"""Single-run local Windows acceptance: an actual endpoint request -> B143 -> native 3D.
 
 Never talks to Minecraft and never claims semantic/aesthetic merit from source
 validity. Successful real-model results may be saved as a NEW, source-only Studio
@@ -100,7 +100,7 @@ def save_verified_design_in_studio(*, root: Path, design: dict, scene: dict,
 
 
 def run_acceptance(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description='MAB Studio actual local-model acceptance (no Minecraft calls)')
+    parser = argparse.ArgumentParser(description='MAB Studio actual local-model / native 3D acceptance (no Minecraft calls)')
     parser.add_argument('--acceptance', action='store_true', required=True)
     parser.add_argument('--provider', required=True, choices=('Ollama', 'LM Studio'))
     parser.add_argument('--model', required=True)
@@ -238,27 +238,50 @@ def run_acceptance(argv: list[str]) -> int:
             'voxelCount': scene['stats']['voxels'],
             'readiness': scene['readiness'],
         }
-        report['stage'] = 'TK_SOURCE_PREVIEW'
-        # Uses the same visualization component and actual compiled primitives as
-        # the Windows GUI; does not create a project, import a world, or write JSON
-        # containing model output. Hidden canvas is still actively rendered.
+        report['stage'] = 'SOURCE_PREVIEW_RENDER'
+        # The actual Windows Studio uses the embedded VTK/OpenGL renderer.
+        # Certify the same backend for the model-authored SOURCE, not a
+        # lightweight Tk canvas that could pass even if native display fails.
         import tkinter as tk
-        from app.preview import VoxelPreview
+        from app.native_viewer import NativeVoxelPreview, native_dependencies_available
         window = tk.Tk()
         window.title('MAB Studio source-only acceptance')
         window.geometry('900x630')
-        preview = VoxelPreview(window, width=860, height=580)
+        can_render_native = native_dependencies_available()
+        if getattr(sys, 'frozen', False) and not can_render_native:
+            raise StudioError('配布EXEのネイティブVTK 3Dを利用できません')
+        if can_render_native:
+            from app.native_selfcheck import _image_signature
+            preview = NativeVoxelPreview(window, width=860, height=580)
+        else:
+            # Only non-packaged SOURCE-only developer checks may use Tk.
+            from app.preview import VoxelPreview
+            preview = VoxelPreview(window, width=860, height=580)
         preview.pack(fill='both', expand=True)
-        window.update_idletasks()
-        preview.set_detail('全体メッシュ（境界面）')
+        window.update()  # map and size the actual Tk display before VTK readback
         preview.show(scene)
-        window.update_idletasks()
-        items = len(preview.find_all())
-        if items < 4:
-            raise StudioError('設計SOURCEの3D描画が完了しませんでした')
-        report['guiRendered'] = True
-        report['guiCanvasItems'] = items
-        report['previewMode'] = 'GREEDY_SURFACE_MESH'
+        if can_render_native:
+            preview.draw()
+            cells = scene['stats']['voxels']
+            if preview._visible_count != cells or preview._photo is None:
+                raise StudioError('真正SOURCEをネイティブVTK 3Dへ表示できませんでした')
+            # A nonempty Tk PhotoImage alone is not sufficient proof of pixels.
+            signature = _image_signature(preview)
+            report.update(guiRendered=True, guiRenderer='VTK_NATIVE_EMBEDDED',
+                          nativeScenePixelsVerified=True,
+                          nativeFramebuffer=list(preview._rendered_size),
+                          nativeCells=preview._visible_count,
+                          nativePixelSignatureSha256=signature,
+                          previewMode='NATIVE_VTK_SOURCE')
+        else:
+            preview.set_detail('全体メッシュ（境界面）')
+            window.update_idletasks()
+            items = len(preview.find_all())
+            if items < 4:
+                raise StudioError('設計SOURCEの軽量3D描画が完了しませんでした')
+            report.update(guiRendered=True, guiRenderer='TK_LIGHTWEIGHT_SOURCE_ONLY',
+                          nativeScenePixelsVerified=False, guiCanvasItems=items,
+                          previewMode='GREEDY_SURFACE_MESH')
         if ns.save_to_studio:
             report['stage'] = 'STUDIO_PROJECT_SAVE'
             # This persistence is source-only. The next normal Studio launch

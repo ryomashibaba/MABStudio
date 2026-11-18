@@ -74,7 +74,14 @@ def test_acceptance_one_real_request_path_with_test_double(tmp_path, monkeypatch
         assert code==0 and report['outcome']=='PASS_SOURCE_AND_GUI_ONLY'
         assert report['source']['voxelCount']==192
         assert report['sourceValid'] and report['guiRendered']
-        assert report['guiCanvasItems']>=4
+        if report['guiRenderer'] == 'VTK_NATIVE_EMBEDDED':
+            assert report['nativeScenePixelsVerified']
+            assert report['nativeCells'] == report['source']['voxelCount']
+            assert len(report['nativePixelSignatureSha256']) == 64
+        else:
+            assert report['guiRenderer'] == 'TK_LIGHTWEIGHT_SOURCE_ONLY'
+            assert report['nativeScenePixelsVerified'] is False
+            assert report['guiCanvasItems'] >= 4
         assert report['providerIdentityIndependentlyVerified'] is False
         assert report['humanVisualQualityVerified'] is False
         assert report['worldContacts']==report['worldWrites']==0
@@ -176,6 +183,9 @@ def test_explicit_ephemeral_fixture_real_engine_and_tk(tmp_path):
         assert not data['actualProviderRequestAttempted']
         assert data['sourceValid'] and data['guiRendered']
         assert data['source']['voxelCount'] == 917
+        if data['guiRenderer'] == 'VTK_NATIVE_EMBEDDED':
+            assert data['nativeScenePixelsVerified']
+            assert data['nativeCells'] == 917
         assert data['worldContacts'] == data['worldWrites'] == 0
     finally:
         process.terminate()
@@ -184,3 +194,35 @@ def test_explicit_ephemeral_fixture_real_engine_and_tk(tmp_path):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+
+
+def test_frozen_acceptance_refuses_lightweight_only_after_source_compiles(tmp_path, monkeypatch):
+    """A packaged EXE must not mark lightweight-only model output as native QA."""
+    import sys
+    from app import acceptance, native_viewer
+    from tests.test_local_llm_flow import DESIGN
+    from tests.test_gui_review_flow import _scene
+
+    class Manager:
+        root = tmp_path
+        active_path = tmp_path / 'engine'
+
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(acceptance, 'verify_packaged_runtime', lambda: {'mode': 'PACKAGED_ONEDIR'})
+    monkeypatch.setattr(acceptance, 'EngineManager', Manager)
+    monkeypatch.setattr(acceptance, 'compatibility_check', lambda engine: {'geometrySha256': 'smoke'})
+    monkeypatch.setattr(acceptance, 'verify_loaded_model',
+                        lambda provider, model: {'loaded': True, 'verifiedBy': 'MOCK', 'inferenceModel': model})
+    monkeypatch.setattr(acceptance, 'ask_llm', lambda *args, **kwargs: DESIGN)
+    monkeypatch.setattr(acceptance, 'run_bridge', lambda engine, design: _scene(design))
+    monkeypatch.setattr(native_viewer, 'native_dependencies_available', lambda: False)
+    receipt = tmp_path / 'native-unavailable.json'
+    assert acceptance.run_acceptance(['--acceptance', '--provider', 'LM Studio',
+                                      '--model', 'preloaded', '--report', str(receipt)]) == 1
+    result = json.loads(receipt.read_text(encoding='utf-8'))
+    assert result['sourceValid'] and not result['guiRendered']
+    assert result['stage'] == 'SOURCE_PREVIEW_RENDER'
+    assert result['outcome'] == 'FAIL'
+    assert result['studioProject']['saved'] is False
+    assert result['worldWrites'] == 0
+    assert 'VTK' in result['error']
