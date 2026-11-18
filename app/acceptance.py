@@ -90,7 +90,8 @@ def save_verified_design_in_studio(*, root: Path, design: dict, scene: dict,
     current_id = current['revisionId'] if current else None
     if current_id != initial_head:
         raise StudioError('生成中にStudioの履歴が変更されました。元の設計を保持して保存を中止しました')
-    item = store.commit(design, scene, engine_commit=engine_commit, operation='new')
+    item = store.commit(design, scene, engine_commit=engine_commit,
+                        operation='new', expected_head_id=initial_head)
     return {'saved': True, 'projectId': item['projectId'],
             'revisionId': item['revisionId'], 'sourceSha256': item['sourceSha256'],
             'geometrySha256': item['geometrySha256'], 'sourceOnly': True,

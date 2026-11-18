@@ -1127,6 +1127,12 @@ class Studio(tk.Tk):
             messagebox.showwarning('入力不足','日本語指示とローカルLLMモデルを選んでください。')
             return
         self._remember_model_choice()
+        try:
+            existing = self.history.head()
+            expected_head_id = existing['revisionId'] if existing else None
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないため生成を開始しません: '+str(exc))
+            return
         cancel_event = threading.Event()
         def work():
             error = ''
@@ -1151,7 +1157,8 @@ class Studio(tk.Tk):
         def done(res):
             design, scene, retry = res
             self._display_design(design, scene, provider, model,
-                                 '自動修正1回' if retry else '初回成功')
+                                 '自動修正1回' if retry else '初回成功',
+                                 expected_head_id=expected_head_id)
         self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
                     cancel_event=cancel_event)
 
@@ -1163,8 +1170,15 @@ class Studio(tk.Tk):
             messagebox.showwarning('未導入','先にMABエンジンを導入してください。')
             return
         doc = example_library()
+        try:
+            existing = self.history.head()
+            expected_head_id = existing['revisionId'] if existing else None
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないためサンプルを開けません: '+str(exc))
+            return
         def done(scene):
-            self._display_design(doc, scene, 'OFFLINE_SAMPLE', '', 'サンプル / AI未使用')
+            self._display_design(doc, scene, 'OFFLINE_SAMPLE', '', 'サンプル / AI未使用',
+                                 expected_head_id=expected_head_id)
         self._start('本物のMABでサンプル設計をSOURCE検証中',
                     lambda: run_bridge(engine, doc), done)
 
@@ -1183,7 +1197,8 @@ class Studio(tk.Tk):
             'geometrySha256':scene['geometrySha256'],'provider':provider,'model':model,
             'readiness':'NOT_PREPARED','worldWrites':0})
 
-    def _display_design(self, design, scene, provider, model, qualifier, *, operation='new'):
+    def _display_design(self, design, scene, provider, model, qualifier, *,
+                        operation='new', expected_head_id=...):
         if operation == 'revision':
             previous = self.current_snapshot
             if previous is None:
@@ -1193,8 +1208,10 @@ class Studio(tk.Tk):
                                            operation='revision', previous_id=previous['revisionId'])
         else:
             delta = None
+            commit_options = ({'expected_head_id': expected_head_id}
+                              if expected_head_id is not ... else {})
             snapshot = self.history.commit(design, scene, engine_commit=self.manager.active_sha,
-                                           operation='new')
+                                           operation='new', **commit_options)
         self.current_snapshot = snapshot
         self.delta = delta
         self.scene = scene

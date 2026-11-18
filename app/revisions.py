@@ -16,6 +16,7 @@ PROJECT_SCHEMA = 'mab-studio-local-revisions-v1'
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 MAX_CELLS = 160000
+_UNCHECKED_HEAD = object()  # Legacy callers do not require an active-head lease.
 
 
 def _digest(obj: object) -> str:
@@ -199,7 +200,8 @@ class RevisionStore:
         return target
 
     def commit(self, design: dict, scene: dict, *, engine_commit: str,
-               operation: str = 'new', previous_id: str | None = None) -> dict:
+               operation: str = 'new', previous_id: str | None = None,
+               expected_head_id: str | None | object = _UNCHECKED_HEAD) -> dict:
         _cells(scene)
         if not isinstance(design, dict) or design.get('schema') != SCHEMA:
             raise StudioError('設計形式が不正です')
@@ -208,6 +210,11 @@ class RevisionStore:
         if operation not in ('new', 'revision', 'restore'):
             raise StudioError('不正な履歴操作です')
         old = self.head()
+        # An in-flight AI request may finish after another Studio has switched
+        # projects. Never silently replace the newer active selection.
+        if expected_head_id is not _UNCHECKED_HEAD and (
+                (old['revisionId'] if old else None) != expected_head_id):
+            raise StudioError('生成中に別のStudioが履歴を更新しました。新しい履歴を保護して保存を中止しました')
         if operation == 'new':
             project_id = uuid4().hex
             parent = None
