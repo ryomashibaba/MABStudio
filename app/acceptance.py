@@ -18,7 +18,7 @@ import sys
 from app.release_runtime import verify_packaged_runtime
 from app.core import (BASELINE_SHA, EngineManager, ModelTransportError,
                       StudioError, ask_llm, atomic_json, compatibility_check,
-                      run_bridge, MODEL_GENERATION_SCHEMA)
+                      run_bridge, MODEL_GENERATION_SCHEMA, verify_loaded_model)
 
 DEFAULT_PROMPT = '海辺の小さな天文観測所。地上階の入口、窓、屋上の丸い展望ドームを備えた独創的な建物を設計して。'
 
@@ -178,9 +178,16 @@ def run_acceptance(argv: list[str]) -> int:
             from app.revisions import RevisionStore
             active = RevisionStore(manager.root / 'projects').head()
             expected_studio_head = active['revisionId'] if active else None
+        if not ns.test_double:
+            # A direct CLI/Windows EXE acceptance has the same no-autoload gate
+            # as the ordinary GUI, even when launched without a .ps1 preflight.
+            report['stage'] = 'READ_ONLY_LOADED_MODEL_PREFLIGHT'
+            report['selectedModelLoaded'] = False
+            model_status = verify_loaded_model(ns.provider, ns.model)
+            report['selectedModelLoaded'] = model_status['loaded']
+            report['loadedModelCheck'] = model_status['verifiedBy']
         report['stage'] = 'LOCAL_MODEL_REQUEST'
-        # Exactly ONE explicit inference for diagnostic predictability. Retry is
-        # separately available in ordinary GUI design, not hidden in this test.
+        # Exactly ONE explicit inference. Neither CLI nor GUI silently retries.
         original_base = None
         if ns.test_double:
             # An isolated ephemeral loopback fixture must never be counted as a real model.

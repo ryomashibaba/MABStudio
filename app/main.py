@@ -12,9 +12,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
-    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError, ModelCancelled,
-    ModelOutputLimitError,
-    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
+    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelCancelled,
+    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, verify_loaded_model, run_bridge, atomic_json
 )
 from app.preview import VoxelPreview
 from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_dependencies_available
@@ -1135,29 +1134,21 @@ class Studio(tk.Tk):
             return
         cancel_event = threading.Event()
         def work():
-            error = ''
-            design = None
-            # No world writes. Exactly one bounded correction attempt.
-            for attempt in range(2):
-                previous = design
-                try:
-                    design = ask_llm(provider, model, prompt, error, previous_design=previous,
-                                     on_progress=lambda message: self.pending_events.put(
-                                         ('progress', 'LOCAL_LLM', message, None, True)),
-                                     cancel_event=cancel_event)
-                    if cancel_event.is_set():
-                        raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
-                    scene = run_bridge(engine, design)
-                    return design, scene, attempt
-                except (ModelCancelled, ModelTransportError, ModelOutputLimitError):
-                    raise  # no duplicate expensive inference on HTTP or output-limit failure
-                except StudioError as e:
-                    error = str(e)
-            raise StudioError('AI設計の検証に2回失敗しました（最後の理由）: ' + error)
+            # An installed-but-idle Ollama model would otherwise auto-load here.
+            # Only the user's already loaded, exact selection may be used.
+            verify_loaded_model(provider, model)
+            # One user action permits one model inference, not a hidden retry.
+            design = ask_llm(provider, model, prompt,
+                             on_progress=lambda message: self.pending_events.put(
+                                 ('progress', 'LOCAL_LLM', message, None, True)),
+                             cancel_event=cancel_event)
+            if cancel_event.is_set():
+                raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
+            scene = run_bridge(engine, design)
+            return design, scene
         def done(res):
-            design, scene, retry = res
-            self._display_design(design, scene, provider, model,
-                                 '自動修正1回' if retry else '初回成功',
+            design, scene = res
+            self._display_design(design, scene, provider, model, '1回の生成でSOURCE合格',
                                  expected_head_id=expected_head_id)
         self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
                     cancel_event=cancel_event)
@@ -1245,32 +1236,22 @@ class Studio(tk.Tk):
         original = self.design
         pinned_hash = self.scene['geometrySha256']
         def work():
+            # Read-only loaded-model gate, followed by exactly ONE inference.
+            verify_loaded_model(provider, model)
             check = run_bridge(engine, original)
             if check['geometrySha256'] != pinned_hash:
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
-            error = ''
-            draft = None
-            for attempt in range(2):
-                prev = draft
-                try:
-                    draft = ask_llm(provider, model, instruction, error,
-                                    previous_design=prev, revision_base=original,
-                                    on_progress=lambda message: self.pending_events.put(
-                                        ('progress', 'LOCAL_LLM', message, None, True)),
-                                    cancel_event=cancel_event)
-                    if cancel_event.is_set():
-                        raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
-                    scene = run_bridge(engine, draft)
-                    return draft, scene, attempt
-                except (ModelCancelled, ModelTransportError, ModelOutputLimitError):
-                    raise  # an output-limit failure is NOT a SOURCE geometry rejection
-                except StudioError as exc:
-                    error = str(exc)
-            raise StudioError('AI修正候補の検証に失敗しました（最後の理由）: '+error)
+            draft = ask_llm(provider, model, instruction, revision_base=original,
+                            on_progress=lambda message: self.pending_events.put(
+                                ('progress', 'LOCAL_LLM', message, None, True)),
+                            cancel_event=cancel_event)
+            if cancel_event.is_set():
+                raise ModelCancelled('修正生成をキャンセルしました。回答を破棄しました。')
+            scene = run_bridge(engine, draft)
+            return draft, scene
         def done(data):
-            revised, scene, retry = data
-            # The model response is only a DRAFT.  No RevisionStore.commit,
-            # no latest-design overwrite until the user explicitly approves.
+            revised, scene = data
+            # The model response is only a DRAFT. No commit before approval.
             if self.current_snapshot is None or self.scene is None:
                 raise StudioError('修正元が消えたため修正案を破棄しました')
             delta = compare_scenes(self.scene, scene)

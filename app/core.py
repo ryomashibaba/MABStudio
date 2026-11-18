@@ -903,6 +903,56 @@ def _ollama_is_running(result: dict, model: str) -> bool:
                for item in items)
 
 
+def verify_loaded_model(provider: str, model: str) -> dict:
+    """Read-only preflight: an explicit request must not implicitly load another model.
+
+    Ollama's /api/chat can auto-load an installed but idle model, so /api/tags
+    is NOT an adequate readiness check. LM Studio's catalog may also contain
+    downloaded but unloaded models. Only an exact, unique loaded selection is
+    accepted. No inference, load/unload, or configuration endpoint is called.
+    """
+    if provider not in ('Ollama', 'LM Studio') or not isinstance(model, str) or (
+            not model.strip() or model != model.strip() or len(model) > 180
+            or any(ord(c) < 32 for c in model)):
+        raise StudioError('選択したローカルAIモデルが不正です。推論を開始しません')
+    if provider == 'Ollama':
+        running = _local_model_json('/api/ps', provider=provider, timeout=6.0)
+        items = running.get('models')
+        if not isinstance(items, list):
+            raise StudioError('Ollamaのロード中モデル一覧を確認できません。推論を開始しません')
+        matched = [item for item in items if isinstance(item, dict) and (
+            item.get('name') == model or item.get('model') == model)]
+        if len(matched) != 1:
+            raise StudioError('選択したOllamaモデルが一意にロード済みではありません。'
+                              'Studioは自動ロードせず、推論を開始しません')
+        return {'provider': provider, 'selectedModel': model, 'loaded': True,
+                'verifiedBy': 'READ_ONLY_API_PS', 'worldWrites': 0}
+    listing = _local_model_json('/api/v1/models', provider=provider, timeout=6.0)
+    entries = listing.get('models')
+    if not isinstance(entries, list):
+        raise StudioError('LM Studioのロード済みモデル情報を確認できません。推論を開始しません')
+    loaded = []
+    for entry in entries[:200]:
+        if not isinstance(entry, dict) or entry.get('type') != 'llm':
+            continue
+        instances = entry.get('loaded_instances')
+        if not isinstance(instances, list):
+            raise StudioError('LM Studioのロード状態が不正です。推論を開始しません')
+        for instance in instances[:100]:
+            if not isinstance(instance, dict):
+                continue
+            instance_id = instance.get('id')
+            if isinstance(instance_id, str) and instance_id and (
+                    instance_id == model or entry.get('key') == model):
+                loaded.append(instance_id)
+    if len(set(loaded)) != 1 or len(loaded) != 1:
+        raise StudioError('選択したLM Studioモデルが一意にロード済みではありません。'
+                          'Studioはモデルを切り替えず、推論を開始しません')
+    return {'provider': provider, 'selectedModel': model,
+            'loadedInstance': loaded[0], 'loaded': True,
+            'verifiedBy': 'READ_ONLY_API_V1_MODELS', 'worldWrites': 0}
+
+
 def unload_local_model(provider: str, model: str) -> dict:
     """Explicitly unload only a currently running selected model, with no inference.
 
@@ -1009,7 +1059,6 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         payload = {'model': model, 'messages': messages, 'stream': False,
                    'format': generation_schema,
                    'options': {'temperature': 0.3, 'num_predict': output_budget}}
-        fallback = {**payload, 'format': 'json'}
     else:
         url = LM_STUDIO_BASE + '/v1/chat/completions'
         payload = {'model': model, 'messages': messages, 'temperature': 0.3,
@@ -1020,7 +1069,6 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                    }}
         if re.search(r'qwen[.\/_-]?3[.]?8', model, re.I):
             payload['chat_template_kwargs'] = {'enable_thinking': False}
-        fallback = {**payload, 'response_format': {'type': 'json_object'}}
     try:
         reply = _model_response(url, payload, timeout, on_progress, cancel_event)
     except urllib.error.HTTPError as exc:
@@ -1037,12 +1085,12 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                                             'invalid format', 'grammar'))
         if not structured_rejected:
             raise ModelTransportError(f'{provider}からHTTP {exc.code}を受信しました。モデル/サーバーを確認してください') from exc
-        # Fall back only if the server actually identifies schema/grammar
-        # incompatibility; never repeat a failed inference for unrelated 400s.
-        try:
-            reply = _model_response(url, fallback, timeout, on_progress, cancel_event)
-        except urllib.error.HTTPError as fallback_error:
-            raise ModelTransportError(f'{provider}がJSON出力を受け付けません (HTTP {fallback_error.code})') from fallback_error
+        # This server rejected our JSON-Schema contract. Sending a second POST
+        # would be an unapproved automatic retry and may trigger expensive
+        # inference or a different, less strictly constrained response.
+        raise ModelTransportError(
+            f'{provider}が構造化JSON Schemaを拒否しました (HTTP {exc.code})。'
+            '自動再試行・別形式への切替は行いません。') from exc
     _raise_if_cancelled(cancel_event)
     if provider == 'Ollama':
         if reply.get('done_reason') == 'length':

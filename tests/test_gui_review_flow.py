@@ -45,6 +45,7 @@ def studio(tmp_path,monkeypatch):
         return copy.deepcopy(scenes[design['title']])
     monkeypatch.setattr(studio_main,'run_bridge',fake_bridge)
     monkeypatch.setattr(studio_main,'ask_llm',lambda *a,**kw:copy.deepcopy(revised))
+    monkeypatch.setattr(studio_main,'verify_loaded_model', lambda *a,**kw: {'loaded': True})
     root=studio_main.Studio()
     root.model.set('fixture-model')
     root._display_design(orig,scenes[orig['title']],'OFFLINE_SAMPLE','','original')

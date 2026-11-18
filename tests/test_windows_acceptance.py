@@ -116,7 +116,7 @@ def test_acceptance_http_error_does_not_retry(tmp_path,monkeypatch):
     with model_server('server-error') as (url,requests):
         monkeypatch.setattr(core,'OLLAMA_BASE',url)
         report_path=tmp_path/'transport-fail.json'
-        assert run_acceptance(['--acceptance','--provider','Ollama','--model','model-which-fails',
+        assert run_acceptance(['--acceptance','--provider','Ollama','--model','test-model',
                 '--engine',str(engine),'--report',str(report_path)])==1
         report=json.loads(report_path.read_text())
         assert report['outcome']=='FAIL'

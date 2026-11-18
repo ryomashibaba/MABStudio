@@ -12,7 +12,7 @@ def test_real_model_request_failure_receipt_keeps_request_duration(tmp_path, mon
         monkeypatch.setattr(core, 'OLLAMA_BASE', url)
         report_path = tmp_path / 'receipt.json'
         rc = run_acceptance(['--acceptance', '--provider', 'Ollama',
-                             '--model', 'sample-model', '--engine', str(engine),
+                             '--model', 'test-model', '--engine', str(engine),
                              '--report', str(report_path)])
         receipt = json.loads(report_path.read_text(encoding='utf-8'))
         assert rc == 1 and receipt['stage'] == 'LOCAL_MODEL_REQUEST'

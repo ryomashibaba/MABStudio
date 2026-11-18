@@ -13,6 +13,20 @@ def model_server(mode):
     seen=[]
     class Model(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
+        def do_GET(self):
+            if self.path == '/api/ps':
+                body = {'models': [{'name': 'test-model'}]}
+            elif self.path == '/api/v1/models':
+                body = {'models': [{'key': 'test-model', 'type': 'llm',
+                          'loaded_instances': [{'id': 'test-model'}]}]}
+            else:
+                self.send_error(404)
+                return
+            raw = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
         def do_POST(self):
             body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             seen.append(body)
@@ -58,15 +72,13 @@ def test_structured_request_on_local_protocol(provider,monkeypatch):
         assert requests[0]['stream'] is (provider=='LM Studio')
 
 @pytest.mark.parametrize('provider',['Ollama','LM Studio'])
-def test_explicit_unsupported_schema_falls_back_once(provider,monkeypatch):
+def test_explicit_unsupported_schema_fails_without_second_post(provider,monkeypatch):
     with model_server('reject-structured') as (url,requests):
         monkeypatch.setattr(core,'OLLAMA_BASE',url)
         monkeypatch.setattr(core,'LM_STUDIO_BASE',url)
-        assert core.ask_llm(provider,'test-model','図書館を作って')==DESIGN
-        assert len(requests)==2
-        assert (requests[1]['format']=='json' if provider=='Ollama' else
-                requests[1]['response_format']['type']=='json_object')
-        assert requests[0]['messages']==requests[1]['messages']
+        with pytest.raises(core.ModelTransportError, match='自動再試行'):
+            core.ask_llm(provider,'test-model','図書館を作って')
+        assert len(requests)==1
 
 @pytest.mark.parametrize('provider',['Ollama','LM Studio'])
 def test_http500_no_repeat_inference(provider,monkeypatch):
