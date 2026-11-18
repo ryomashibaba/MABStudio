@@ -1136,9 +1136,12 @@ class Studio(tk.Tk):
         def work():
             # An installed-but-idle Ollama model would otherwise auto-load here.
             # Only the user's already loaded, exact selection may be used.
-            verify_loaded_model(provider, model)
+            model_status = verify_loaded_model(provider, model)
+            # The picker may hold a catalog key, but the LM Studio request must
+            # use the one exact already-loaded instance, not a JIT-loadable key.
+            inference_model = model_status['inferenceModel']
             # One user action permits one model inference, not a hidden retry.
-            design = ask_llm(provider, model, prompt,
+            design = ask_llm(provider, inference_model, prompt,
                              on_progress=lambda message: self.pending_events.put(
                                  ('progress', 'LOCAL_LLM', message, None, True)),
                              cancel_event=cancel_event)
@@ -1237,11 +1240,12 @@ class Studio(tk.Tk):
         pinned_hash = self.scene['geometrySha256']
         def work():
             # Read-only loaded-model gate, followed by exactly ONE inference.
-            verify_loaded_model(provider, model)
+            model_status = verify_loaded_model(provider, model)
+            inference_model = model_status['inferenceModel']
             check = run_bridge(engine, original)
             if check['geometrySha256'] != pinned_hash:
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
-            draft = ask_llm(provider, model, instruction, revision_base=original,
+            draft = ask_llm(provider, inference_model, instruction, revision_base=original,
                             on_progress=lambda message: self.pending_events.put(
                                 ('progress', 'LOCAL_LLM', message, None, True)),
                             cancel_event=cancel_event)

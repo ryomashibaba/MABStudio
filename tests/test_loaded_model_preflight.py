@@ -160,3 +160,83 @@ def test_acceptance_cli_unloaded_selection_never_attempts_inference(tmp_path,mon
         assert not receipt['studioProject']['saved']
         assert not posts  # A real-model POST was never made.
         assert receipt['worldWrites'] == 0
+
+
+def test_lm_studio_rejects_unusable_loaded_instance_id_without_inference(monkeypatch):
+    server = LocalAPI([{'models': [{'key': 'saved-key', 'type': 'llm',
+                                    'loaded_instances': [{'id': 'bad id\n'}]}]}])
+    monkeypatch.setattr(core, 'LOCAL_HTTP', server)
+    with pytest.raises(core.StudioError, match='インスタンスIDが不正'):
+        core.verify_loaded_model('LM Studio', 'saved-key')
+    assert server.calls == [(core.LM_STUDIO_BASE + '/api/v1/models', 'GET')]
+
+
+@pytest.mark.parametrize('operation', ['generate', 'revise'])
+def test_gui_uses_exact_loaded_instance_not_catalog_key(studio, monkeypatch, operation):
+    app, _calls = studio
+    app.llm_provider.set('LM Studio')
+    app.model.set('saved-key')
+    model_calls = []
+    from tests.test_gui_review_flow import _complete
+    from app.examples import example_library
+    from tests.test_gui_review_flow import _scene
+    import copy
+
+    def preflight(provider, chosen):
+        assert (provider, chosen) == ('LM Studio', 'saved-key')
+        return {'loaded': True, 'inferenceModel': 'already-loaded-instance',
+                'selectedModel': chosen}
+
+    def answer(provider, model, prompt, **kwargs):
+        model_calls.append((provider, model, kwargs.get('revision_base')))
+        document = copy.deepcopy(example_library())
+        document['title'] = 'approved draft candidate'
+        return document
+
+    monkeypatch.setattr(studio_main, 'verify_loaded_model', preflight)
+    monkeypatch.setattr(studio_main, 'ask_llm', answer)
+    if operation == 'generate':
+        app.prompt.delete('1.0', 'end')
+        app.prompt.insert('1.0', '日本語の未知要求から展望台')
+        app.generate_btn.invoke()
+    else:
+        app.revise_btn.invoke()
+    _complete(app)
+    assert len(model_calls) == 1
+    assert model_calls[0][0:2] == ('LM Studio', 'already-loaded-instance')
+    assert (model_calls[0][2] is None) == (operation == 'generate')
+    assert app.model.get() == 'saved-key'  # keep the user's picker unchanged
+    if operation == 'revise':
+        assert app.pending_revision is not None
+    else:
+        assert app.history.head()['design']['title'] == 'approved draft candidate'
+
+
+def test_acceptance_uses_exact_loaded_instance_not_catalog_key(tmp_path, monkeypatch):
+    from app import acceptance
+    from app.examples import example_library
+    from tests.test_gui_review_flow import _scene
+    import os
+    if os.name != 'nt' and not os.environ.get('DISPLAY'):
+        pytest.skip('Tk rendering requires DISPLAY')
+    engine = tmp_path/'isolated-engine'
+    engine.mkdir()
+    model_calls = []
+    monkeypatch.setattr(acceptance, 'verify_packaged_runtime', lambda: {'mode': 'SOURCE'})
+    monkeypatch.setattr(acceptance, 'compatibility_check', lambda _: {'geometrySha256': 'fake-smoke'})
+    monkeypatch.setattr(acceptance, 'verify_loaded_model', lambda provider, model: {
+        'provider': provider, 'selectedModel': model, 'inferenceModel': 'already-loaded-instance',
+        'loaded': True, 'verifiedBy': 'READ_ONLY_API_V1_MODELS'})
+    monkeypatch.setattr(acceptance, 'ask_llm', lambda provider, model, prompt, **kw:
+                        (model_calls.append((provider, model)), example_library())[1])
+    monkeypatch.setattr(acceptance, 'run_bridge', lambda e, d: _scene(d))
+    report = tmp_path/'receipt.json'
+    rc = acceptance.run_acceptance(['--acceptance', '--provider','LM Studio', '--model',
+                                     'selected-catalog-key', '--engine', str(engine),
+                                     '--report', str(report)])
+    receipt = json.loads(report.read_text(encoding='utf-8'))
+    assert rc == 0 and receipt['outcome'] == 'PASS_SOURCE_AND_GUI_ONLY'
+    assert model_calls == [('LM Studio', 'already-loaded-instance')]
+    assert receipt['model'] == 'selected-catalog-key'
+    assert receipt['inferenceModel'] == 'already-loaded-instance'
+    assert receipt['worldWrites'] == 0

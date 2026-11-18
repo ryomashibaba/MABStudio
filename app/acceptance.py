@@ -178,6 +178,7 @@ def run_acceptance(argv: list[str]) -> int:
             from app.revisions import RevisionStore
             active = RevisionStore(manager.root / 'projects').head()
             expected_studio_head = active['revisionId'] if active else None
+        inference_model = ns.model
         if not ns.test_double:
             # A direct CLI/Windows EXE acceptance has the same no-autoload gate
             # as the ordinary GUI, even when launched without a .ps1 preflight.
@@ -186,6 +187,8 @@ def run_acceptance(argv: list[str]) -> int:
             model_status = verify_loaded_model(ns.provider, ns.model)
             report['selectedModelLoaded'] = model_status['loaded']
             report['loadedModelCheck'] = model_status['verifiedBy']
+            inference_model = model_status['inferenceModel']
+            report['inferenceModel'] = inference_model
         report['stage'] = 'LOCAL_MODEL_REQUEST'
         # Exactly ONE explicit inference. Neither CLI nor GUI silently retries.
         original_base = None
@@ -212,7 +215,7 @@ def run_acceptance(argv: list[str]) -> int:
             def metadata_received(receipt: dict) -> None:
                 # Never persist original model text or user prompt.
                 report['metadataAdjustments'] = receipt
-            design = ask_llm(ns.provider, ns.model, ns.prompt,
+            design = ask_llm(ns.provider, inference_model, ns.prompt,
                              on_progress=progress if ns.console_progress else None,
                              on_metadata=metadata_received)
         finally:

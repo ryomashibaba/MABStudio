@@ -925,8 +925,8 @@ def verify_loaded_model(provider: str, model: str) -> dict:
         if len(matched) != 1:
             raise StudioError('選択したOllamaモデルが一意にロード済みではありません。'
                               'Studioは自動ロードせず、推論を開始しません')
-        return {'provider': provider, 'selectedModel': model, 'loaded': True,
-                'verifiedBy': 'READ_ONLY_API_PS', 'worldWrites': 0}
+        return {'provider': provider, 'selectedModel': model, 'inferenceModel': model,
+                'loaded': True, 'verifiedBy': 'READ_ONLY_API_PS', 'worldWrites': 0}
     listing = _local_model_json('/api/v1/models', provider=provider, timeout=6.0)
     entries = listing.get('models')
     if not isinstance(entries, list):
@@ -944,12 +944,14 @@ def verify_loaded_model(provider: str, model: str) -> dict:
             instance_id = instance.get('id')
             if isinstance(instance_id, str) and instance_id and (
                     instance_id == model or entry.get('key') == model):
+                if not re.fullmatch(r'[A-Za-z0-9_.:/-]{1,180}', instance_id):
+                    raise StudioError('LM Studioのロード済みインスタンスIDが不正です。推論を開始しません')
                 loaded.append(instance_id)
     if len(set(loaded)) != 1 or len(loaded) != 1:
         raise StudioError('選択したLM Studioモデルが一意にロード済みではありません。'
                           'Studioはモデルを切り替えず、推論を開始しません')
     return {'provider': provider, 'selectedModel': model,
-            'loadedInstance': loaded[0], 'loaded': True,
+            'loadedInstance': loaded[0], 'inferenceModel': loaded[0], 'loaded': True,
             'verifiedBy': 'READ_ONLY_API_V1_MODELS', 'worldWrites': 0}
 
 
