@@ -318,6 +318,14 @@ class Studio(tk.Tk):
         right.grid(row=0, column=1, sticky='nsew')
         left.columnconfigure(0, weight=1)
 
+        # Packing the action bar FIRST reserves space at the bottom of the
+        # fixed-width left panel, even with larger Windows text scaling.
+        # The prompt is the only vertically flexible part of the panel.
+        # Without this the Text widget's requested height pushed the actual
+        # generate button beyond the frame (reported on Windows 11).
+        self._creation_actions = ttk.Frame(left, style='Panel.TFrame')
+        self._creation_actions.pack(side='bottom', fill='x')
+
         ttk.Label(left, text='AIモデル', style='Section.TLabel').pack(anchor='w')
         ttk.Label(left, text='モデルは事前ロードが必要（自動起動しません）',
                   style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
@@ -349,18 +357,20 @@ class Studio(tk.Tk):
                               highlightthickness=1, undo=True)
         self.prompt.pack(fill='both', expand=True, pady=(0, 13))
         self.prompt.insert('1.0', '未来的な4階建てのビルを作って。窓がたくさんあるように。')
-        self.generate_btn = ttk.Button(left, text='AIで建築を設計する',
+        self.generate_btn = ttk.Button(self._creation_actions, text='AIで建築を設計する',
                                        command=self.generate, style='Primary.TButton')
-        self.generate_btn.pack(fill='x', pady=(0, 8))
-        self.revise_btn = ttk.Button(left, text='この指示で今の建築を修正',
+        self.generate_btn.pack(fill='x', pady=(0, 6))
+        self.revise_btn = ttk.Button(self._creation_actions, text='この指示で今の建築を修正',
                                      command=self.revise_design, state='disabled')
-        self.revise_btn.pack(fill='x', pady=(0, 8))
-        self.sample_btn = ttk.Button(left, text='AIなしでサンプルを見る',
+        self.revise_btn.pack(fill='x', pady=(0, 6))
+        self.sample_btn = ttk.Button(self._creation_actions, text='AIなしでサンプルを見る',
                                      command=self.show_sample, style='Quiet.TButton')
         self.sample_btn.pack(anchor='w')
-        tk.Label(left, text='設計の確認・修正までアプリ内で完結します。\nMinecraftへの施工はまだ有効化していません。',
-                 font=('Yu Gothic UI', 9), fg=c['muted'], bg=c['panel'],
-                 justify='left', anchor='w', wraplength=300).pack(anchor='w', pady=(13, 0))
+        # Keyboard alternative when Windows display scaling limits visible space.
+        # ttk.Button.invoke() respects its disabled state, including during AI work.
+        self.prompt.bind('<Control-Return>', self._submit_prompt_shortcut)
+        # Construction is already labelled disabled in the status bar;
+        # repeating a multi-line warning here used valuable vertical space.
 
         top = ttk.Frame(right, style='Panel.TFrame')
         top.pack(fill='x', pady=(0, 10))
@@ -547,6 +557,10 @@ class Studio(tk.Tk):
                  'Educationへの直接接続は既存の1点読取診断に限定します。',
                  style='Muted.TLabel').pack(anchor='w')
         ttk.Button(advanced, text='閉じる', command=self._advanced.place_forget).pack(side='right', pady=(10, 0))
+
+    def _submit_prompt_shortcut(self, _event):
+        self.generate_btn.invoke()
+        return 'break'
 
     def _on_preview_width(self, event):
         # This is a view-only layout switch. Never recompute or mutate SOURCE.
