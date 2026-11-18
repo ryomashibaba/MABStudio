@@ -63,6 +63,7 @@ class Studio(tk.Tk):
         self.section_axis = tk.StringVar(value='Y')
         self.section_side = tk.StringVar(value='低い側')
         self.place_xyz = tk.StringVar(value='0 64 0')
+        self.fast_revision_mode = tk.BooleanVar(value=True)
         provider_saved, model_saved = read_local_choice(self.manager.root)
         self.llm_provider = tk.StringVar(value=provider_saved)
         self.model = tk.StringVar(value=model_saved)
@@ -534,6 +535,8 @@ class Studio(tk.Tk):
         self.load_btn.pack(side='left', padx=(0, 6))
         self.browse_btn = ttk.Button(quick, text='保存済み一覧', command=self.browse_saved_designs)
         self.browse_btn.pack(side='left')
+        ttk.Checkbutton(advanced, text='AI修正を軽量化（変更要素だけ生成）',
+                        variable=self.fast_revision_mode).pack(anchor='w', pady=(0, 8))
         ttk.Separator(advanced).pack(fill='x', pady=(1, 14))
         ttk.Label(advanced, text='地形・Education（読み取り専用）', style='Section.TLabel').pack(anchor='w')
         terrainbar = ttk.Frame(advanced)
@@ -1259,6 +1262,9 @@ class Studio(tk.Tk):
             messagebox.showwarning('入力不足','修正内容を入力し、ローカルAIを選択してください。')
             return
         self._remember_model_choice()
+        # Snapshot Tk state on the UI thread, never read Tk variables from
+        # the inference worker (which can otherwise fail before the POST).
+        revision_mode = 'delta' if self.fast_revision_mode.get() else 'full'
         cancel_event = threading.Event()
         original = self.design
         pinned_hash = self.scene['geometrySha256']
@@ -1271,6 +1277,7 @@ class Studio(tk.Tk):
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
             ai_started = time.monotonic()
             draft = ask_llm(provider, inference_model, instruction, revision_base=original,
+                            revision_mode=revision_mode,
                             on_progress=lambda message: self.pending_events.put(
                                 ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
                             cancel_event=cancel_event)

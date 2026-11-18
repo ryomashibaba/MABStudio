@@ -3,6 +3,7 @@
 No API here connects to Minecraft or writes world coordinates.
 """
 from __future__ import annotations
+import copy
 
 import hashlib
 import http.client
@@ -772,6 +773,84 @@ def _shape_specific_output_schema(*, max_elements: int, compact: bool) -> dict:
 MODEL_GENERATION_SCHEMA = _shape_specific_output_schema(
     max_elements=MAX_MODEL_ELEMENTS, compact=True)
 
+# A revision can optionally return only the edited B143 elements. This is a
+# transport format (never a second construction or geometry engine). B143 is
+# still the ONLY authority that validates/compiles the merged complete source.
+REVISION_DELTA_SCHEMA_ID = 'mab-studio-b143-revision-delta-v1'
+MAX_DELTA_CHANGES = 32
+_B143_ELEMENT_OUTPUT = _shape_specific_output_schema(
+    max_elements=MAX_DELTA_CHANGES, compact=False)['properties']['elements']['items']
+REVISION_DELTA_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'required': ['schema', 'replace', 'add', 'removeIds'],
+    'properties': {
+        'schema': {'const': REVISION_DELTA_SCHEMA_ID},
+        'replace': {'type': 'array', 'maxItems': MAX_DELTA_CHANGES,
+                    'items': _B143_ELEMENT_OUTPUT},
+        'add': {'type': 'array', 'maxItems': MAX_DELTA_CHANGES,
+                'items': _B143_ELEMENT_OUTPUT},
+        'removeIds': {'type': 'array', 'maxItems': MAX_DELTA_CHANGES,
+                      'items': {'type': 'string', 'pattern': '^[a-zA-Z][a-zA-Z0-9_-]{0,39}$'}},
+        'bounds': B143_JSON_SCHEMA['properties']['bounds'],
+        'title': B143_JSON_SCHEMA['properties']['title'],
+        'brief': B143_JSON_SCHEMA['properties']['brief'],
+    },
+}
+
+
+def apply_revision_delta(base: dict, delta: dict) -> dict:
+    """Merge an explicitly model-authored edit without inventing any geometry.
+
+    The original approved object is never mutated; missing fields are retained
+    byte-for-byte at JSON value level. Do not auto-clamp coordinates or enlarge
+    bounds: the pinned B143 engine validates the resulting complete source.
+    """
+    if not isinstance(base, dict) or base.get('schema') != SCHEMA or not isinstance(base.get('elements'), list):
+        raise StudioError('軽量修正の元SOURCEが不正です')
+    if not isinstance(delta, dict) or delta.get('schema') != REVISION_DELTA_SCHEMA_ID:
+        raise StudioError('AIが軽量差分形式で回答しませんでした。自動再推論しません。'
+                          '必要なら詳細設定で「AI修正を軽量化」をOFFにして全文修正を選べます')
+    allowed = set(REVISION_DELTA_SCHEMA['properties'])
+    if set(delta) - allowed or not all(name in delta for name in ('replace', 'add', 'removeIds')):
+        raise StudioError('軽量修正JSONに未対応の項目・不足項目があります')
+    edits = [delta[name] for name in ('replace', 'add', 'removeIds')]
+    if any(not isinstance(items, list) or len(items) > MAX_DELTA_CHANGES for items in edits):
+        raise StudioError('軽量修正の変更件数が許容範囲外です')
+    before = base['elements']
+    if any(not isinstance(e, dict) or not isinstance(e.get('id'), str) for e in before):
+        raise StudioError('修正元のB143要素IDが不正です')
+    old_ids = [e['id'] for e in before]
+    if len(set(old_ids)) != len(old_ids):
+        raise StudioError('修正元に重複した要素IDがあります')
+    replace, add, remove = edits
+    if any(not isinstance(e, dict) or not isinstance(e.get('id'), str) for e in (*replace, *add)):
+        raise StudioError('軽量修正に不正な要素があります')
+    if any(not isinstance(identifier, str) for identifier in remove):
+        raise StudioError('軽量修正の削除対象IDが不正です')
+    replace_ids = [e['id'] for e in replace]
+    add_ids = [e['id'] for e in add]
+    identifiers = replace_ids + add_ids + remove
+    if len(set(identifiers)) != len(identifiers):
+        raise StudioError('軽量修正で同じ要素IDを複数回変更しようとしました')
+    existing = set(old_ids)
+    if not set(replace_ids + remove) <= existing or set(add_ids) & existing:
+        raise StudioError('軽量修正の対象IDが元の設計と一致しません')
+    if len(before) - len(remove) + len(add) > 160:
+        raise StudioError('軽量修正でB143の要素数上限を超えます')
+    updated = copy.deepcopy(base)
+    replacements = {e['id']: copy.deepcopy(e) for e in replace}
+    removed = set(remove)
+    updated['elements'] = [replacements.get(e['id'], e) for e in updated['elements']
+                           if e['id'] not in removed]
+    updated['elements'].extend(copy.deepcopy(add))
+    for key in ('title', 'brief', 'bounds'):
+        if key in delta:
+            updated[key] = copy.deepcopy(delta[key])
+    if updated == base:
+        raise StudioError('AIの軽量修正案には変更がありません。無駄なSOURCE履歴は作りません')
+    return updated
+
+
 # Long local GGUF inferences can need several minutes; while streaming, these
 # limits apply to idle reads and the complete request, not the total first-byte
 # to last-byte HTTP buffering delay of a non-streaming reply.
@@ -1173,12 +1252,14 @@ def llm_models(provider: str, timeout: int = 5) -> list[str]:
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
             revision_base: dict | None = None, on_progress=None,
-            on_metadata=None, cancel_event=None) -> dict:
+            on_metadata=None, cancel_event=None, revision_mode: str = 'full') -> dict:
     _raise_if_cancelled(cancel_event)
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの接続先が不正です")
     if not model or len(model) > 180 or not user_prompt.strip() or len(user_prompt) > 2000:
         raise StudioError("モデル名または指示文を確認してください")
+    if revision_mode not in ('full', 'delta') or (revision_mode == 'delta' and revision_base is None):
+        raise StudioError('修正モードが不正です')
     task = user_prompt
     if revision_base is not None:
         if not isinstance(revision_base, dict) or revision_base.get('schema') != SCHEMA:
@@ -1191,16 +1272,30 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             dims = {}
         original_size = (f"X={dims.get('width')}, Y={dims.get('height')}, "
                          f"Z={dims.get('depth')}")
-        task = ('【既存の確定設計を修正】以下のB143 JSONを保ち、変更の必要な部分だけ修正し、'
-                '省略のないB143 JSON全体を返してください。Minecraftに実行しないこと。\n'
-                '【座標の重要条件】boundsのwidth/height/depthはXYZのセル数で、'
-                '有効座標はそれぞれ0～(寸法-1)。boxはorigin+size-1、'
-                'ellipsoidはcenter±radii、cylinderは長手方向origin+length-1と'
-                '垂直方向origin±radiusの全域がbounds内に必要。'
-                '既存boundsは' + original_size + '。追加・変更後の全要素が入るように'
-                'boundsを整合させること（width/depth≤128、height≤96、体積≤500000）。'
-                '不要な既存要素の削除・縮小で隠さず、指定変更と既存建築を保持する。\n'
-                '既存設計: ' + prior + '\n修正指示: ' + user_prompt)
+        envelope = ('【座標の重要条件】boundsのwidth/height/depthはXYZのセル数で、'
+                    '有効座標はそれぞれ0～(寸法-1)。boxはorigin+size-1、'
+                    'ellipsoidはcenter±radii、cylinderは長手方向origin+length-1と'
+                    '垂直方向origin±radiusの全域がbounds内に必要。'
+                    '既存boundsは' + original_size + '。追加・変更後の全要素が入るように'
+                    'boundsを整合させること（width/depth≤128、height≤96、体積≤500000）。'
+                    '不要な既存要素の削除・縮小で隠さず、指定変更と既存建築を保持する。\n')
+        if revision_mode == 'delta':
+            task = ('【既存の確定設計を軽量修正】元のB143 JSON全体を書き直さず、'
+                    '変更した要素だけを返す。ワールドには実行しない。\n'
+                    'JSON形式: {"schema":"mab-studio-b143-revision-delta-v1",'
+                    '"replace":[],"add":[],"removeIds":[]}。'
+                    'replaceには既存IDの変更後の完全な要素だけ、addには新規要素だけ、'
+                    'removeIdsには削除する既存IDだけを書く。'
+                    '変更のない既存要素は一切書かない。'
+                    '建物の大きさが必要に応じて変わる場合だけboundsを完全な寸法オブジェクトで指定。'
+                    'title/briefを変える場合だけ指定。'
+                    '修正後の全要素がboundsに収まるようにする。'
+                    'Studioは幾何形状を自動修理しない。\n'
+                    + envelope + '既存設計: ' + prior + '\n修正指示: ' + user_prompt)
+        else:
+            task = ('【既存の確定設計を修正】以下のB143 JSONを保ち、変更の必要な部分だけ修正し、'
+                    '省略のないB143 JSON全体を返してください。Minecraftに実行しないこと。\n'
+                    + envelope + '既存設計: ' + prior + '\n修正指示: ' + user_prompt)
     if error:
         task += "\n\n前回のSOURCE検証エラー: " + error[-500:]
         if previous_design is not None:
@@ -1208,7 +1303,10 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             # The model can correct it without regenerating unrelated details.
             prior = json.dumps(previous_design, ensure_ascii=False, separators=(",", ":"))
             task += "\n修正する前回の設計JSON: " + prior[:12000]
-        task += "\n元の建築意図を保ち、エラーだけ直した完全なJSONを返してください。"
+        if revision_mode == 'delta':
+            task += "\n元の建築意図を保ち、指定された差分JSONだけを返してください。"
+        else:
+            task += "\n元の建築意図を保ち、エラーだけ直した完全なJSONを返してください。"
     # A compact FIRST proposal must never shrink a previously approved design.
     # Revision candidates can preserve all source elements plus bounded additions;
     # B143 remains the only source/voxel validation authority.
@@ -1228,6 +1326,12 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
     generation_schema = (MODEL_GENERATION_SCHEMA if revision_base is None
                          else _shape_specific_output_schema(max_elements=max_elements,
                                                             compact=False))
+    if revision_mode == 'delta':
+        generation_schema = REVISION_DELTA_SCHEMA
+        system_prompt = ('あなたはB143の変更箇所だけを返すJSON編集器です。'
+                         '指定された要素の変更・追加・削除だけを行い、元SOURCE全文を繰り返さない。'
+                         '変更のない要素は保持されます。B143に適合する座標を返し、'
+                         '解説・Markdown・施工命令は出力しない。')
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]
     output_budget, context_length = _output_budget(provider, model, messages)
     if provider == 'Ollama':
@@ -1241,7 +1345,9 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                    'max_tokens': output_budget, 'stream': True,
                    'response_format': {
                        'type': 'json_schema',
-                       'json_schema': {'name': 'mab_b143_design', 'schema': generation_schema},
+                       'json_schema': {'name': ('mab_b143_delta' if revision_mode == 'delta'
+                                             else 'mab_b143_design'),
+                                       'schema': generation_schema},
                    }}
         if re.search(r'qwen[.\/_-]?3[.]?8', model, re.I):
             payload['chat_template_kwargs'] = {'enable_thinking': False}
@@ -1292,6 +1398,8 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
     draft = parse_llm_json(content)
     _raise_if_cancelled(cancel_event)
+    if revision_mode == 'delta':
+        draft = apply_revision_delta(revision_base, draft)
     # Model servers may accept JSON Schema but still produce invalid display
     # metadata. Do not spend another costly inference fixing a missing title.
     # Only text labels are repaired; the real B143 compiler checks everything.
