@@ -120,7 +120,7 @@ try {
             $zipFile = [string]$qa.previewZip
             $qaFolder = Split-Path -Parent $f
             if ([System.IO.Path]::GetFullPath($zipFile) -cne
-                [System.IO.Path]::GetFullPath((Join-Path $qaFolder 'MABStudio-Windows-Safe-Preview.zip'))) {
+                [System.IO.Path]::GetFullPath((Join-Path $qaFolder 'MABStudio-Windows-Native-Preview.zip'))) {
                 continue
             }
             if (!(Test-Path -LiteralPath $zipFile -PathType Leaf)) { continue }

@@ -17,6 +17,34 @@ try {
         [string]$prefs.model -cnotmatch '^[A-Za-z0-9_.:/-]{1,180}$') {
         throw 'MODEL_CHOICE_INVALID: choose a valid local model in Studio first.'
     }
+    # Before expensive Windows build/QA: reject a model that is not already loaded.
+    # The user's normal GUI never requires a model to be loaded just to open.
+    if ([string]$prefs.provider -ceq 'LM Studio') {
+        $catalog = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:1234/api/v1/models' -TimeoutSec 8
+        $loaded = @(
+            foreach ($entry in @($catalog.models)) {
+                if ($null -eq $entry -or [string]$entry.type -cne 'llm') { continue }
+                foreach ($instance in @($entry.loaded_instances)) {
+                    if ($null -eq $instance) { continue }
+                    [pscustomobject]@{ key = [string]$entry.key; id = [string]$instance.id }
+                }
+            }
+        )
+        $matched = @($loaded | Where-Object {
+            $_.key -ceq [string]$prefs.model -or $_.id -ceq [string]$prefs.model
+        })
+        if ($matched.Count -ne 1) {
+            throw 'MODEL_NOT_LOADED: load exactly the saved LM Studio model before Windows acceptance. No build or inference started.'
+        }
+    } else {
+        $running = Invoke-RestMethod -Method Get -Uri 'http://127.0.0.1:11434/api/ps' -TimeoutSec 8
+        $matched = @($running.models | Where-Object {
+            $_.name -ceq [string]$prefs.model -or $_.model -ceq [string]$prefs.model
+        })
+        if ($matched.Count -ne 1) {
+            throw 'MODEL_NOT_LOADED: load the selected Ollama model before Windows acceptance. No build or inference started.'
+        }
+    }
     $sourceHash = Get-StudioSourceFingerprint -Root $PSScriptRoot
     $pass = $false
     if (Test-Path -LiteralPath $diagnostics -PathType Container) {
