@@ -71,12 +71,11 @@ try {
         } elseif ($exact.Count -gt 1) {
             throw 'LM_STUDIO_MULTIPLE_INSTANCES_FOR_SELECTED_MODEL: unload extras or select a unique instance ID.'
         } elseif ($loadedCandidates.Count -eq 1) {
-            # The saved GUI ID may differ from the actual loaded instance ID.
-            # One loaded LLM is unambiguous; never select from installed-only models.
-            $inferenceModel = [string]$loadedCandidates[0].id
-            $summary.modelSelectionMethod = 'ONLY_ONE_ACTUALLY_LOADED_LLM'
-            $summary.modelSelectionNote = 'WARNING: saved GUI model differs from the sole loaded LLM. The existing loaded LLM was used without loading or reconfiguring any model.'
-            Write-Warning ('Saved GUI model ' + $model + ' differs from loaded LLM ' + $inferenceModel + '. This diagnostic will test ONLY that already-loaded model.')
+            # A different loaded model is NOT consent to switch inference target.
+            # Match the selected model by its native key or loaded instance ID.
+            $summary.modelSelectionMethod = 'SELECTED_MODEL_MISMATCH_HOLD'
+            $summary.modelSelectionNote = 'Saved GUI selection does not match the loaded LLM; no inference was started. Select its exact key or instance ID and retry with approval.'
+            throw ('LM_STUDIO_SELECTED_MODEL_NOT_LOADED: saved=' + $model + '; loaded=' + [string]$loadedCandidates[0].id)
         } elseif ($loadedCandidates.Count -eq 0) {
             throw 'LM_STUDIO_NO_LOADED_LLM: LM Studio server is running but no LLM instance is loaded. Load the desired model in LM Studio first; picking it in Studio is not enough.'
         } else {

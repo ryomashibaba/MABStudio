@@ -54,7 +54,7 @@ def test_model_request_uses_one_inference_and_reports_metadata_only(monkeypatch)
     wrong = {**DESIGN, 'title': 'A\nB', 'brief': '<invalid>'}
     calls = []
     receipts = []
-    def fake_response(url, payload, timeout, on_progress=None):
+    def fake_response(url, payload, timeout, on_progress=None, cancel_event=None):
         calls.append(payload)
         return {'choices': [{'message': {'content': json.dumps(wrong, ensure_ascii=False)},
                              'finish_reason': 'stop'}]}

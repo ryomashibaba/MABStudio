@@ -68,3 +68,5 @@ def test_source_windows_scripts_crlf_ascii_and_no_installs():
     assert 'RUN_ONE_SOURCE_ACCEPTANCE' in ps
     assert 'http://127.0.0.1:1234/api/v1/models' in ps
     assert '--console-progress' in ps
+    assert 'LM_STUDIO_SELECTED_MODEL_NOT_LOADED' in ps
+    assert 'Using the actually loaded instance' not in ps

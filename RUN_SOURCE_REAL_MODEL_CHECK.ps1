@@ -52,8 +52,8 @@ try {
         $exact = @($loaded | Where-Object { $_.id -ceq $model -or $_.key -ceq $model })
         if ($exact.Count -eq 1) { $model = [string]$exact[0].id }
         elseif ($exact.Count -eq 0 -and $loaded.Count -eq 1) {
-            $model = [string]$loaded[0].id
-            Write-Warning 'GUI model differs from sole loaded LM Studio model. Using the actually loaded instance.'
+            # Never silently run a different model than the saved GUI selection.
+            throw ('LM_STUDIO_SELECTED_MODEL_NOT_LOADED: saved=' + $model + '; loaded=' + [string]$loaded[0].id)
         } else {
             throw ('NO_UNAMBIGUOUS_LOADED_LM: loaded=' + $loaded.Count + '; exact=' + $exact.Count)
         }

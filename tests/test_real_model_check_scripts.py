@@ -44,11 +44,13 @@ def test_real_check_resolves_loaded_instance_ids_instead_of_saved_picker_ids():
     s=(ROOT/'RUN_REAL_MODEL_CHECK.ps1').read_text(encoding='ascii')
     # Native API keys and already-loaded instance IDs are separate identifiers.
     assert 'EXACT_LOADED_KEY_OR_INSTANCE_ID' in s
-    assert 'ONLY_ONE_ACTUALLY_LOADED_LLM' in s
+    assert 'SELECTED_MODEL_MISMATCH_HOLD' in s
+    assert 'LM_STUDIO_SELECTED_MODEL_NOT_LOADED' in s
     assert "[string]$entry.type -cne 'llm'" in s
     assert "[string]$instance.id" in s
     assert '$_.id -ceq $model -or $_.key -ceq $model' in s
     assert '$loadedCandidates.Count -eq 1' in s
+    assert 'saved GUI model differs from the sole loaded LLM' not in s
     assert '+ $inferenceModel +' in s and '--model' in s
     assert 'savedModel' in s and 'resolvedModel' in s
     assert 'modelSelectionMethod' in s

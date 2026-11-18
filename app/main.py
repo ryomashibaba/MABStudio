@@ -365,17 +365,19 @@ class Studio(tk.Tk):
 
         top = ttk.Frame(right, style='Panel.TFrame')
         top.pack(fill='x', pady=(0, 10))
-        ttk.Label(top, text='3Dプレビュー', style='Section.TLabel').pack(side='left')
+        self._preview_title = ttk.Label(top, text='3Dプレビュー', style='Section.TLabel')
         self.gpu_view_btn = ttk.Button(top, text='高精細3D（アプリ内）', command=self.open_gpu_preview,
                                        style='Primary.TButton', state='disabled')
-        self.gpu_view_btn.pack(side='right', padx=(7, 0))
-        ttk.Button(top, text='3Dを拡大', command=self.open_large_preview,
+        # Keep actions in one frame so they can flow onto a second line on
+        # narrower Windows displays, instead of overlapping each other.
+        self._preview_actions = ttk.Frame(top, style='Panel.TFrame')
+        ttk.Button(self._preview_actions, text='3Dを拡大', command=self.open_large_preview,
                    style='Quiet.TButton').pack(side='right', padx=(7, 0))
-        self.export_btn = ttk.Button(top, text='SOURCE JSONを書き出す', command=self.export_design,
-                                     style='Quiet.TButton', state='disabled')
+        self.export_btn = ttk.Button(self._preview_actions, text='SOURCE JSONを書き出す',
+                                     command=self.export_design, style='Quiet.TButton', state='disabled')
         self.export_btn.pack(side='right', padx=(6, 0))
-        self.restore_btn = ttk.Button(top, text='前に戻す', command=self.restore_previous,
-                                      style='Quiet.TButton', state='disabled')
+        self.restore_btn = ttk.Button(self._preview_actions, text='前に戻す',
+                                      command=self.restore_previous, style='Quiet.TButton', state='disabled')
         self.restore_btn.pack(side='right')
 
         tools = ttk.Frame(right, style='Panel.TFrame')
@@ -397,14 +399,15 @@ class Studio(tk.Tk):
         camera_bar = ttk.Frame(right, style='Panel.TFrame')
         camera_bar.pack(fill='x', pady=(0, 7))
         ttk.Label(camera_bar, text='視点', style='Muted.TLabel').pack(side='left', padx=(0, 7))
+        self._camera_controls = ttk.Frame(camera_bar, style='Panel.TFrame')
+        self._camera_controls.pack(side='left')
         self.camera_buttons = {}
         for name in VoxelPreview.VIEWS:
-            button = ttk.Button(camera_bar, text=name,
+            button = ttk.Button(self._camera_controls, text=name,
                                 command=lambda selected=name: self.preview.set_view(selected),
                                 style='Quiet.TButton')
-            button.pack(side='left', padx=(0, 3))
             self.camera_buttons[name] = button
-        ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel').pack(side='right')
+        self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
         ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel').pack(side='left', padx=(0, 12))
@@ -459,8 +462,8 @@ class Studio(tk.Tk):
                                       resolution=1, bg=c['panel'], highlightthickness=0,
                                       command=lambda _: self._queue_section_change())
         self.section_scale.pack(side='left', padx=(4, 7))
-        ttk.Label(sectionbar, text='表示のみ・SOURCE不変',
-                  style='Muted.TLabel').pack(side='left')
+        self._section_hint = ttk.Label(sectionbar, text='表示のみ・SOURCE不変',
+                                       style='Muted.TLabel')
         self.section_scale.configure(state='disabled')
         self.caption = tk.StringVar(value='建築のプレビューがここに表示されます')
         ttk.Label(right, textvariable=self.caption, style='Muted.TLabel',
@@ -480,6 +483,9 @@ class Studio(tk.Tk):
         # Keeping the same widget identities preserves tests and all workflows.
         # An on-demand overlay avoids adding a hidden top-level window to normal
         # operation, which otherwise also intercepts history dialogs on Windows.
+        self._compact_layout = None
+        right.bind('<Configure>', self._on_preview_width)
+        self._set_compact_layout(False)
         self._advanced = ttk.Frame(self, style='Panel.TFrame', padding=6)
         advanced = ttk.Frame(self._advanced, style='Panel.TFrame', padding=20)
         advanced.pack(fill='both', expand=True)
@@ -542,6 +548,34 @@ class Studio(tk.Tk):
                  'Educationへの直接接続は既存の1点読取診断に限定します。',
                  style='Muted.TLabel').pack(anchor='w')
         ttk.Button(advanced, text='閉じる', command=self._advanced.place_forget).pack(side='right', pady=(10, 0))
+
+    def _on_preview_width(self, event):
+        # This is a view-only layout switch. Never recompute or mutate SOURCE.
+        if event.widget is not None:
+            self._set_compact_layout(event.width < 735)
+
+    def _set_compact_layout(self, compact: bool):
+        if self._compact_layout is compact:
+            return
+        self._compact_layout = compact
+        self._preview_title.pack_forget()
+        self.gpu_view_btn.pack_forget()
+        self._preview_actions.pack_forget()
+        if compact:
+            self._preview_actions.pack(side='bottom', fill='x')
+        self._preview_title.pack(side='left')
+        self.gpu_view_btn.pack(side='right', padx=(7, 0))
+        if not compact:
+            self._preview_actions.pack(side='right')
+        for i, button in enumerate(self.camera_buttons.values()):
+            button.grid(row=i // 3 if compact else 0, column=i % 3 if compact else i,
+                        sticky='w', padx=(0, 3), pady=(0, 2))
+        if compact:
+            self._camera_hint.pack_forget()
+            self._section_hint.pack_forget()
+        else:
+            self._camera_hint.pack(side='right')
+            self._section_hint.pack(side='left')
 
     def _open_advanced(self):
         self._advanced.place(relx=0.5, rely=0.5, anchor='center',
