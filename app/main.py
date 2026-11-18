@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
-    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError,
+    BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelTransportError, ModelCancelled,
     ModelOutputLimitError,
     ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, run_bridge, atomic_json
 )
@@ -50,6 +50,7 @@ class Studio(tk.Tk):
         self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
         self._education_running = False
         self._education_cancel = threading.Event()
+        self._active_cancel_event = None
         self._closed = False
         self._section_after = None
         self.terrain = None
@@ -59,6 +60,7 @@ class Studio(tk.Tk):
         self.detail_mode = tk.StringVar(value='なめらか（全体）')
         self.section_enabled = tk.BooleanVar(value=False)
         self.section_level = tk.IntVar(value=0)
+        self.section_axis = tk.StringVar(value='Y')
         self.place_xyz = tk.StringVar(value='0 64 0')
         provider_saved, model_saved = read_local_choice(self.manager.root)
         self.llm_provider = tk.StringVar(value=provider_saved)
@@ -99,7 +101,11 @@ class Studio(tk.Tk):
         viewer.angle, viewer.elevation = self.preview.angle, self.preview.elevation
         viewer.zoom = self.preview.zoom
         viewer.pan_x, viewer.pan_y = self.preview.pan_x, self.preview.pan_y
-        viewer.set_cut_level(self.preview.cut_level)
+        if hasattr(viewer, 'set_section'):
+            viewer.set_section(getattr(self.preview, 'section_axis', 'y'),
+                               getattr(self.preview, 'section_level', self.preview.cut_level))
+        else:
+            viewer.set_cut_level(self.preview.cut_level)
         viewer.draw()
 
     def open_large_preview(self):
@@ -171,7 +177,10 @@ class Studio(tk.Tk):
                 self._large_preview = self._large_preview_window = None
                 self.open_large_preview()
                 return
-            if viewer.scene is self.preview.scene and viewer.cut_level == self.preview.cut_level:
+            if (viewer.scene is self.preview.scene
+                    and getattr(viewer, 'section_axis', 'y') == getattr(self.preview, 'section_axis', 'y')
+                    and getattr(viewer, 'section_level', viewer.cut_level) ==
+                        getattr(self.preview, 'section_level', self.preview.cut_level)):
                 return  # Preserve independent popup orbit/zoom during UI updates.
             self._inherit_preview_state(viewer)
         except tk.TclError:
@@ -204,7 +213,11 @@ class Studio(tk.Tk):
             new_view.angle, new_view.elevation = old.angle, old.elevation
             new_view.zoom = old.zoom
             new_view.pan_x, new_view.pan_y = old.pan_x, old.pan_y
-            new_view.set_cut_level(old.cut_level)
+            if hasattr(new_view, 'set_section'):
+                new_view.set_section(getattr(old, 'section_axis', 'y'),
+                                     getattr(old, 'section_level', old.cut_level))
+            else:
+                new_view.set_cut_level(old.cut_level)
             # Rendering depends on the *visible* widget size. The old renderer
             # must remain alive until the replacement has drawn successfully;
             # a GPU/VTK error here must never leave the Studio preview blank.
@@ -422,12 +435,18 @@ class Studio(tk.Tk):
                                               variable=self.section_enabled,
                                               command=self._section_changed)
         self.section_toggle.pack(side='left')
+        ttk.Label(sectionbar, text='軸').pack(side='left', padx=(9, 3))
+        self.section_axis_box = ttk.Combobox(sectionbar, textvariable=self.section_axis,
+                                             state='readonly', width=4, values=('X', 'Y', 'Z'))
+        self.section_axis_box.pack(side='left')
+        self.section_axis_box.bind('<<ComboboxSelected>>', lambda _: self._sync_section_controls())
         self.section_scale = tk.Scale(sectionbar, from_=0, to=96, orient='horizontal',
                                       variable=self.section_level, showvalue=True, length=175,
                                       resolution=1, bg=c['panel'], highlightthickness=0,
                                       command=lambda _: self._queue_section_change())
         self.section_scale.pack(side='left', padx=(4, 7))
-        ttk.Label(sectionbar, text='上の階を一時的に隠します', style='Muted.TLabel').pack(side='left')
+        ttk.Label(sectionbar, text='指定位置より先を一時的に隠す（SOURCE不変）',
+                  style='Muted.TLabel').pack(side='left')
         self.section_scale.configure(state='disabled')
         self.caption = tk.StringVar(value='建築のプレビューがここに表示されます')
         ttk.Label(right, textvariable=self.caption, style='Muted.TLabel',
@@ -435,6 +454,9 @@ class Studio(tk.Tk):
         self.status = tk.StringVar(value='準備中')
         statusbar = ttk.Frame(root, style='App.TFrame')
         statusbar.pack(fill='x', pady=(12, 0))
+        self.cancel_btn = ttk.Button(statusbar, text='生成をキャンセル',
+                                     command=self._cancel_active_ai, state='disabled')
+        self.cancel_btn.pack(side='right', padx=(8, 0))
         tk.Label(statusbar, textvariable=self.status, bg=c['bg'], fg='#3d5876',
                  anchor='w', font=('Yu Gothic UI', 9)).pack(side='left', fill='x', expand=True)
         tk.Label(statusbar, text='● 施工機能は無効', bg=c['bg'], fg=c['caution'],
@@ -577,34 +599,57 @@ class Studio(tk.Tk):
         self.check_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
         self.rollback_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
         self.apply_btn.configure(state='normal' if self.pending_sha and not self.busy and self.pending_revision is None else 'disabled')
+        if hasattr(self, 'cancel_btn'):
+            self.cancel_btn.configure(state='normal' if self.busy and self._active_cancel_event is not None
+                                      and not self._active_cancel_event.is_set() else 'disabled')
         self._refresh_buttons()
 
-    def _start(self, title, fn, callback=None, quiet=False):
+    def _start(self, title, fn, callback=None, quiet=False, cancel_event=None):
         if self.busy:
             return
         # Prevent finalizers of previously closed Tk variables from executing
         # in this worker; Tcl is main-thread-affine.
         gc.collect()
         self.busy=True
+        self._active_cancel_event=cancel_event
         self.status.set(title)
         self._update_engine_label()
         def work():
             try:
                 result=fn()
-                self.pending_events.put(('ok',title,result,callback,quiet))
+                self.pending_events.put(('ok',title,result,callback,quiet,cancel_event))
             except Exception as e:
-                self.pending_events.put(('error',title,str(e),callback,quiet))
+                kind='cancelled' if cancel_event is not None and cancel_event.is_set() else 'error'
+                self.pending_events.put((kind,title,str(e),callback,quiet,cancel_event))
         threading.Thread(target=work,daemon=True).start()
+
+    def _cancel_active_ai(self):
+        token=self._active_cancel_event
+        if token is None or token.is_set():
+            return
+        token.set()
+        self.cancel_btn.configure(state='disabled')
+        self.status.set('キャンセル要求済み：回答は破棄します。サーバー側の推論停止は未確認です。')
 
     def _poll(self):
         try:
             while True:
-                kind,title,result,callback,quiet=self.pending_events.get_nowait()
+                item=self.pending_events.get_nowait()
+                kind,title,result,callback,quiet=item[:5]
+                cancel_event=item[5] if len(item)>5 else None
                 if kind=='progress':
-                    if self.busy:
+                    if self.busy and not (self._active_cancel_event and self._active_cancel_event.is_set()):
                         self.status.set(str(result))
                     continue
                 self.busy=False
+                if cancel_event is not None:
+                    was_cancelled=cancel_event.is_set() or kind=='cancelled'
+                    if self._active_cancel_event is cancel_event:
+                        self._active_cancel_event=None
+                    if was_cancelled:
+                        self.status.set('キャンセル済み：回答は破棄しました。サーバー側の推論停止は確認できません。')
+                        self._update_engine_label()
+                        continue
                 if title.startswith('Education直接読取'):
                     self._education_running=False
                 if kind=='error':
@@ -700,29 +745,41 @@ class Studio(tk.Tk):
         if self._closed or not hasattr(self,'preview'):
             return
         level = self.section_level.get() if self.section_enabled.get() else None
+        axis = self.section_axis.get().lower()
         if hasattr(self,'section_scale'):
             self.section_scale.configure(state='normal' if self.section_enabled.get() and self.preview.scene else 'disabled')
-        self.preview.set_cut_level(level)
+        if hasattr(self.preview, 'set_section'):
+            self.preview.set_section(axis, level)
+        else:
+            self.preview.set_cut_level(level if axis == 'y' else None)
 
     def _sync_section_controls(self):
-        # Use the currently displayed scene Y bounds for floor inspection.
+        # Use the currently displayed scene bounds on the selected axis.
         scene = self.preview.scene
         bounds = scene.get('bounds') if isinstance(scene,dict) else None
         if not isinstance(bounds,dict):
             self.section_scale.configure(state='disabled')
-            self.preview.set_cut_level(None)
+            if hasattr(self.preview, 'set_section'):
+                self.preview.set_section(self.section_axis.get().lower(), None)
+            else:
+                self.preview.set_cut_level(None)
             return
-        low, high = bounds.get('minY'), bounds.get('maxY')
+        axis = self.section_axis.get().upper()
+        low, high = bounds.get('min'+axis), bounds.get('max'+axis)
         if type(low) is not int or type(high) is not int or low>high:
             self.section_scale.configure(state='disabled')
-            self.preview.set_cut_level(None)
+            if hasattr(self.preview, 'set_section'):
+                self.preview.set_section(axis.lower(), None)
+            else:
+                self.preview.set_cut_level(None)
             return
+        previous_level = self.section_level.get()
         self.section_scale.configure(from_=low,to=high,
                                      state='normal' if self.section_enabled.get() else 'disabled')
         # A newly opened building may have different floor bounds. Avoid
         # dragging a stale section level outside its actual extent.
-        if self.section_level.get()<low or self.section_level.get()>high:
-            self.section_level.set(high)
+        if previous_level<low or previous_level>high:
+            self.section_level.set((low+high)//2)
         self._section_changed()
 
     def _refresh_view(self):
@@ -1006,6 +1063,7 @@ class Studio(tk.Tk):
             messagebox.showwarning('入力不足','日本語指示とローカルLLMモデルを選んでください。')
             return
         self._remember_model_choice()
+        cancel_event = threading.Event()
         def work():
             error = ''
             design = None
@@ -1015,10 +1073,13 @@ class Studio(tk.Tk):
                 try:
                     design = ask_llm(provider, model, prompt, error, previous_design=previous,
                                      on_progress=lambda message: self.pending_events.put(
-                                         ('progress', 'LOCAL_LLM', message, None, True)))
+                                         ('progress', 'LOCAL_LLM', message, None, True)),
+                                     cancel_event=cancel_event)
+                    if cancel_event.is_set():
+                        raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
                     scene = run_bridge(engine, design)
                     return design, scene, attempt
-                except (ModelTransportError, ModelOutputLimitError):
+                except (ModelCancelled, ModelTransportError, ModelOutputLimitError):
                     raise  # no duplicate expensive inference on HTTP or output-limit failure
                 except StudioError as e:
                     error = str(e)
@@ -1027,7 +1088,8 @@ class Studio(tk.Tk):
             design, scene, retry = res
             self._display_design(design, scene, provider, model,
                                  '自動修正1回' if retry else '初回成功')
-        self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done)
+        self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
+                    cancel_event=cancel_event)
 
     def show_sample(self):
         if self.pending_revision is not None:
@@ -1098,6 +1160,7 @@ class Studio(tk.Tk):
             messagebox.showwarning('入力不足','修正内容を入力し、ローカルAIを選択してください。')
             return
         self._remember_model_choice()
+        cancel_event = threading.Event()
         original = self.design
         pinned_hash = self.scene['geometrySha256']
         def work():
@@ -1112,10 +1175,13 @@ class Studio(tk.Tk):
                     draft = ask_llm(provider, model, instruction, error,
                                     previous_design=prev, revision_base=original,
                                     on_progress=lambda message: self.pending_events.put(
-                                        ('progress', 'LOCAL_LLM', message, None, True)))
+                                        ('progress', 'LOCAL_LLM', message, None, True)),
+                                    cancel_event=cancel_event)
+                    if cancel_event.is_set():
+                        raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
                     scene = run_bridge(engine, draft)
                     return draft, scene, attempt
-                except (ModelTransportError, ModelOutputLimitError):
+                except (ModelCancelled, ModelTransportError, ModelOutputLimitError):
                     raise  # an output-limit failure is NOT a SOURCE geometry rejection
                 except StudioError as exc:
                     error = str(exc)
@@ -1140,7 +1206,8 @@ class Studio(tk.Tk):
             self.caption.set(f'未承認のAI修正案：追加{counts["added"]} / 削除{counts["removed"]} / '
                              f'交換{counts["replaced"]}  |  3Dを確認して承認または却下（未施工）')
             self.status.set('修正案の検証に成功しました。承認前の設計履歴は未変更です。')
-        self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done)
+        self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done,
+                    cancel_event=cancel_event)
 
     def approve_revision(self):
         candidate = self.pending_revision

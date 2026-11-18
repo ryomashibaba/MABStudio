@@ -42,6 +42,16 @@ def test_material_boundary_preserved_and_cut_is_display_only():
     assert data['palette'][3]=='#60ddeb'
 
 
+def test_vertical_sections_select_axis_without_changing_source():
+    src=example()
+    before=copy.deepcopy(src)
+    _,visible_x,_=native_mesh_scene(src,section_axis='x',section_level=0)
+    _,visible_z,_=native_mesh_scene(src,section_axis='z',section_level=0)
+    assert [p[:3] for p in visible_x]==[[0,0,0],[0,1,0]]
+    assert [p[:3] for p in visible_z]==[[0,0,0],[1,0,0],[0,1,0]]
+    assert src==before
+
+
 def test_cavity_hidden_shared_faces_and_one_cell():
     assert len(exposed_surfaces([[0,0,0,1]]))==6
     faces=exposed_surfaces([[0,0,0,1], [1,0,0,2]])
@@ -174,6 +184,38 @@ def test_native_popup_uses_same_renderer_and_inherits_camera(studio):
     assert app.history.head()['revisionId']==initial
     app._large_preview_window.destroy()
     app._large_preview = app._large_preview_window = None
+
+
+@pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
+def test_vertical_section_syncs_between_main_and_large_native_view(studio):
+    if not native_dependencies_available():
+        pytest.skip('VTK and Pillow missing')
+    app,_=studio
+    app.open_gpu_preview()
+    source=copy.deepcopy(app.scene)
+    app.section_enabled.set(True)
+    app.section_axis.set('Y')
+    app.section_level.set(0)
+    app.section_axis.set('Z')
+    app._sync_section_controls()
+    mid=(app.scene['bounds']['minZ']+app.scene['bounds']['maxZ'])//2
+    assert app.section_level.get()==mid
+    app._section_changed()
+    expected=sum(p[2]<=mid for p in app.scene['primitives'])
+    assert app.preview._visible_count==expected
+    app.open_large_preview();app.update_idletasks()
+    popup=app._large_preview
+    assert popup.section_axis=='z'
+    assert popup.section_level==mid
+    app.section_axis.set('X')
+    app.section_level.set((app.scene['bounds']['minX']+app.scene['bounds']['maxX'])//2)
+    app._section_changed()
+    assert popup.section_axis=='x'
+    assert popup.section_level==app.section_level.get()
+    assert app.scene==source
+    assert app.history.head()['revisionId']==app.current_snapshot['revisionId']
+    app._large_preview_window.destroy()
+    app._large_preview=app._large_preview_window=None
 
 
 def test_material_boundaries_include_partial_edges_inside_merged_faces():

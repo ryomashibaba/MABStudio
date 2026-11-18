@@ -72,7 +72,8 @@ def _timing_summary(wall: list[float], frames: list[float], restores: list[float
     return result
 
 
-def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
+def inspect_saved_revision(project_root: Path, revision_id: str,
+                           screenshot_dir: Path | None = None) -> dict:
     if not isinstance(revision_id, str) or not HEX32.fullmatch(revision_id):
         raise ValueError('INVALID_SAVED_REVISION_ID')
     project_root = Path(project_root).resolve()
@@ -107,12 +108,42 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
         if min(preview._rendered_size) < 100:
             raise RuntimeError('SAVED_NATIVE_FRAMEBUFFER_TOO_SMALL')
         views = {}
+        screenshots = {}
+        def capture(name):
+            if screenshot_dir is None:
+                return
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            preview.draw()
+            if preview._photo is None:
+                raise RuntimeError('SAVED_NATIVE_SCREENSHOT_FRAME_MISSING')
+            path = screenshot_dir / (name + '.png')
+            from PIL import Image
+            w, h = preview._rendered_size
+            pixels = preview._vtk['vtk_to_numpy'](
+                preview._capture.GetOutput().GetPointData().GetScalars())
+            if pixels.size != w*h*3:
+                raise RuntimeError('SAVED_NATIVE_SCREENSHOT_PIXELS_MISSING')
+            bitmap = Image.fromarray(pixels.reshape(h, w, 3), 'RGB')
+            bitmap = bitmap.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            bitmap.save(path, format='PNG')
+            screenshots[name] = str(path)
+
+        capture('before-full-isometric')
         for name in ('斜め', '正面', '右側', '上面'):
             preview.set_view(name)
             preview.draw()
             views[name] = _image_signature(preview)
+            if name == '右側':
+                capture('side')
+            elif name == '上面':
+                capture('top')
         if len(set(views.values())) < 2:
             raise RuntimeError('SAVED_NATIVE_CAMERA_PIXELS_UNCHANGED')
+        preview.set_view('斜め')
+        preview.zoom = 2.2
+        preview.draw()
+        capture('closeup')
+        preview.zoom = 1.0
         heights = [v[1] for v in displayed['voxels']]
         cut_checked = min(heights) < max(heights)
         cut_cells = None
@@ -124,10 +155,27 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
             if preview._visible_count != expected:
                 raise RuntimeError('SAVED_NATIVE_CUT_CELL_COUNT_MISMATCH')
             cut_cells = expected
+            capture('horizontal-y-section')
             preview.set_cut_level(None)
             preview.draw()
             if preview._visible_count != len(source_cells):
                 raise RuntimeError('SAVED_NATIVE_CUT_RESTORE_FAILED')
+        z_bounds = displayed['bounds']
+        z_level = z_bounds['minZ'] + (z_bounds['maxZ']-z_bounds['minZ'])//2
+        preview.set_view('斜め')
+        preview.set_section('z', z_level)
+        preview.draw()
+        z_section_cells = sum(v[2] <= z_level for v in displayed['voxels'])
+        if preview._visible_count != z_section_cells or z_section_cells <= 0:
+            raise RuntimeError('SAVED_NATIVE_Z_SECTION_CELL_COUNT_MISMATCH')
+        capture('after-z-interior-section')
+        x_bounds = displayed['bounds']
+        x_level = x_bounds['minX'] + (x_bounds['maxX']-x_bounds['minX'])//2
+        preview.set_section('x', x_level)
+        preview.draw()
+        x_section_cells = sum(v[0] <= x_level for v in displayed['voxels'])
+        if preview._visible_count != x_section_cells or x_section_cells <= 0:
+            raise RuntimeError('SAVED_NATIVE_X_SECTION_CELL_COUNT_MISMATCH')
         backend = preview.renderer_diagnostics()
         views_order = ('正面', '背面', '左側', '右側', '上面', '斜め')
         measurements = {'cameraRotation': ([], [], []), 'zoom': ([], [], None),
@@ -198,6 +246,9 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
         'cameraPixelChangeVerified': True,
         'sectionChecked': cut_checked,
         'sectionCells': cut_cells,
+        'verticalSections': {'xCells': x_section_cells, 'zCells': z_section_cells,
+                             'sourceUnchanged': True},
+        'screenshots': screenshots,
         'framebuffer': viewport,
         'renderTimings': timings,
         'interactionTimingsMs': per_action,
@@ -222,6 +273,7 @@ def main(argv=None) -> int:
     parser.add_argument('--revision-id', required=True)
     parser.add_argument('--project-root', type=Path, default=user_root() / 'projects')
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--screenshots-dir', type=Path)
     args = parser.parse_args(argv)
     report_outside_project = (args.report is None or
                               not args.report.resolve().is_relative_to(args.project_root.resolve()))
@@ -229,7 +281,8 @@ def main(argv=None) -> int:
         # The diagnostics output must never be written into the project store.
         if not report_outside_project:
             raise ValueError('REPORT_MUST_BE_OUTSIDE_SAVED_PROJECT_STORE')
-        result = inspect_saved_revision(args.project_root, args.revision_id)
+        result = inspect_saved_revision(args.project_root, args.revision_id,
+                                        args.screenshots_dir)
         code = 0
     except Exception as exc:
         result = {'schema': 'mab-studio-saved-native-readonly-proof-v1',

@@ -545,6 +545,15 @@ class ModelTransportError(StudioError):
     """A server/transport failure; do not repeat expensive model inference."""
 
 
+class ModelCancelled(StudioError):
+    """The user cancelled locally; server-side inference state is unknown."""
+
+
+def _raise_if_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ModelCancelled('生成をキャンセルしました。回答は破棄しました。サーバー側の推論停止は確認できません。')
+
+
 class ModelOutputLimitError(StudioError):
     """The model ended before its full JSON. Never retry with the same limits."""
 
@@ -700,7 +709,7 @@ def _truncated_error(provider: str, reply: dict, budget: int,
         'コンテキスト長を増やすとRAM/VRAM使用量も増える可能性があります。')
 
 
-def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
+def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=None) -> dict:
     """Read a single OpenAI-compatible SSE response, without repeating inference.
 
     Only the final assistant content is used. Reasoning tokens are never
@@ -714,9 +723,16 @@ def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
     saw_done = False
     last_notice = started
     while True:
+        _raise_if_cancelled(cancel_event)
         if time.monotonic() - started > MODEL_STREAM_TOTAL_TIMEOUT:
             raise ModelTransportError('ローカルAI生成が安全な総時間上限を超えました（15分）。追加推論せず停止しました')
-        line = res.readline(MAX_RESPONSE + 1)
+        try:
+            line = res.readline(MAX_RESPONSE + 1)
+        except OSError as exc:
+            import socket
+            if isinstance(exc, socket.timeout) and cancel_event is not None:
+                continue
+            raise
         if not line:
             break
         if len(line) > MAX_RESPONSE:
@@ -771,7 +787,8 @@ def _read_lm_studio_stream(res, started: float, on_progress=None) -> dict:
                                        'reasoningChars': reasoning_chars}}
 
 
-def _model_response(url: str, payload: dict, timeout: int, on_progress=None) -> dict:
+def _model_response(url: str, payload: dict, timeout: int, on_progress=None,
+                    cancel_event=None) -> dict:
     req = urllib.request.Request(url,
         json.dumps(payload, ensure_ascii=False).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'User-Agent': 'MABStudio/0.3'})
@@ -779,9 +796,36 @@ def _model_response(url: str, payload: dict, timeout: int, on_progress=None) -> 
         # The streaming transport is only used for LM Studio. Fake/test servers
         # may still return one JSON body; that is handled without another POST.
         with LOCAL_HTTP.open(req, timeout=(MODEL_STREAM_IDLE_TIMEOUT if payload.get('stream') else timeout)) as res:
+            sock = getattr(getattr(getattr(res, 'fp', None), 'raw', None), '_sock', None)
+            if cancel_event is not None and sock is not None:
+                sock.settimeout(.25)
             if payload.get('stream') and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
-                return _read_lm_studio_stream(res, time.monotonic(), on_progress)
-            raw = res.read(MAX_RESPONSE + 1)
+                return _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
+            # Read available chunks while polling cancellation. Closing this
+            # client response cannot prove that a local server stopped inference.
+            raw_parts = []
+            total = 0
+            if sock is not None:
+                if cancel_event is not None:
+                    sock.settimeout(.25)
+            while True:
+                _raise_if_cancelled(cancel_event)
+                try:
+                    chunk = (res.read1(min(65536, MAX_RESPONSE + 1 - total))
+                             if hasattr(res, 'read1') else
+                             res.read(min(65536, MAX_RESPONSE + 1 - total)))
+                except OSError as exc:
+                    import socket
+                    if isinstance(exc, socket.timeout) and cancel_event is not None:
+                        continue
+                    raise
+                if not chunk:
+                    break
+                raw_parts.append(chunk)
+                total += len(chunk)
+                if total > MAX_RESPONSE:
+                    raise StudioError('LLMの応答が大きすぎます')
+            raw = b''.join(raw_parts)
     except urllib.error.HTTPError:
         raise
     except (OSError, TimeoutError) as exc:
@@ -915,7 +959,8 @@ def llm_models(provider: str, timeout: int = 5) -> list[str]:
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
             revision_base: dict | None = None, on_progress=None,
-            on_metadata=None) -> dict:
+            on_metadata=None, cancel_event=None) -> dict:
+    _raise_if_cancelled(cancel_event)
     if provider not in ("Ollama", "LM Studio"):
         raise StudioError("ローカルLLMの接続先が不正です")
     if not model or len(model) > 180 or not user_prompt.strip() or len(user_prompt) > 2000:
@@ -977,8 +1022,9 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             payload['chat_template_kwargs'] = {'enable_thinking': False}
         fallback = {**payload, 'response_format': {'type': 'json_object'}}
     try:
-        reply = _model_response(url, payload, timeout, on_progress)
+        reply = _model_response(url, payload, timeout, on_progress, cancel_event)
     except urllib.error.HTTPError as exc:
+        _raise_if_cancelled(cancel_event)
         # HTTP 400 can also mean an unknown model, insufficient resources, or
         # invalid prompt. Never double-infer just because the status is 400.
         try:
@@ -994,9 +1040,10 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         # Fall back only if the server actually identifies schema/grammar
         # incompatibility; never repeat a failed inference for unrelated 400s.
         try:
-            reply = _model_response(url, fallback, timeout, on_progress)
+            reply = _model_response(url, fallback, timeout, on_progress, cancel_event)
         except urllib.error.HTTPError as fallback_error:
             raise ModelTransportError(f'{provider}がJSON出力を受け付けません (HTTP {fallback_error.code})') from fallback_error
+    _raise_if_cancelled(cancel_event)
     if provider == 'Ollama':
         if reply.get('done_reason') == 'length':
             raise _truncated_error(provider, reply, output_budget, context_length)
@@ -1011,6 +1058,7 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
     if not isinstance(content, str) or not content.strip():
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
     draft = parse_llm_json(content)
+    _raise_if_cancelled(cancel_event)
     # Model servers may accept JSON Schema but still produce invalid display
     # metadata. Do not spend another costly inference fixing a missing title.
     # Only text labels are repaired; the real B143 compiler checks everything.

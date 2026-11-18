@@ -31,6 +31,8 @@ def fake_lm_stream(mode='normal'):
             send({'choices':[{'delta':{'role':'assistant','reasoning_content':'private'},'finish_reason':None}]})
             if mode == 'broken':
                 return
+            if mode == 'stall':
+                time.sleep(.7)
             mid = len(content)//2
             send({'choices':[{'delta':{'content':content[:mid]},'finish_reason':None}]})
             if mode == 'slow':
@@ -58,6 +60,28 @@ def test_sse_assembles_chunks_without_reasoning_content(monkeypatch):
         assert len(seen)==1
         assert seen[0]['stream'] is True
         assert seen[0]['response_format']['json_schema']['schema']['properties']['elements']['maxItems']==18
+
+
+def test_cancel_closes_local_stream_and_never_retries(monkeypatch):
+    token=threading.Event()
+    result=[]
+    with fake_lm_stream('stall') as (url, seen):
+        monkeypatch.setattr(core,'LM_STUDIO_BASE',url)
+        worker=threading.Thread(target=lambda: _capture_cancel(result,token),daemon=True)
+        worker.start()
+        time.sleep(.12)
+        token.set()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert len(seen)==1
+        assert len(result)==1 and isinstance(result[0],core.ModelCancelled)
+
+
+def _capture_cancel(result, token):
+    try:
+        core.ask_llm('LM Studio','gemma-test','建築を作る',cancel_event=token)
+    except Exception as exc:
+        result.append(exc)
 
 
 def test_sse_length_never_uses_partial_json(monkeypatch):

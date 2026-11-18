@@ -4,6 +4,7 @@ import copy
 import hashlib
 import os
 from pathlib import Path
+import threading
 import time
 import pytest
 from app import core
@@ -99,3 +100,70 @@ def test_reject_discards_candidate_without_touching_history(studio):
     assert app.history.head()['revisionId']==start
     assert app.view_mode.get()=='建築のみ'
     assert 'disabled' not in app.revise_btn.state()
+
+
+def test_cancel_requested_revision_is_discarded_without_history_write(studio,monkeypatch):
+    app,calls=studio
+    before=app.history.head()
+    output=(app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    entered=threading.Event();release=threading.Event()
+    def slow_double(*args,**kwargs):
+        entered.set()
+        release.wait(2)
+        return copy.deepcopy(example_library())
+    monkeypatch.setattr(studio_main,'ask_llm',slow_double)
+    app.prompt.insert('1.0','窓を修正')
+    app.revise_design()
+    assert entered.wait(1)
+    app.update()
+    assert 'disabled' not in app.cancel_btn.state()
+    app.cancel_btn.invoke()
+    assert 'サーバー側の推論停止は未確認' in app.status.get()
+    release.set()
+    _complete(app)
+    assert 'キャンセル済み' in app.status.get()
+    assert app.pending_revision is None
+    assert app.history.head()['revisionId']==before['revisionId']
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==output
+    assert calls.count('approved draft candidate')==0
+    assert 'disabled' in app.cancel_btn.state()
+
+
+def test_restart_restore_and_reopen_keeps_append_only_history(studio):
+    app,_=studio
+    original=app.history.head()
+    app.revise_design();_complete(app)
+    app.approve_revision();_complete(app)
+    approved=app.history.head()
+    assert approved['parentId']==original['revisionId']
+    assert approved['sourceSha256']!=original['sourceSha256']
+    assert approved['geometrySha256']!=original['geometrySha256']
+    app.destroy()
+
+    restarted=studio_main.Studio()
+    restarted.model.set('fixture-model')
+    try:
+        items=restarted.history.list_saved()
+        assert {item['revisionId'] for item in items}>={original['revisionId'],approved['revisionId']}
+        restarted.load_saved_design();_complete(restarted)
+        assert restarted.current_snapshot['revisionId']==approved['revisionId']
+        assert restarted.scene['sourceSha256']==approved['sourceSha256']
+        assert restarted.scene['geometrySha256']==approved['geometrySha256']
+        restarted.restore_previous();_complete(restarted)
+        restored=restarted.history.head()
+        assert restored['operation']=='restore'
+        assert restored['parentId']==approved['revisionId']
+        assert restored['sourceSha256']==original['sourceSha256']
+        assert restored['geometrySha256']==original['geometrySha256']
+        restarted._open_saved_revision(approved['revisionId']);_complete(restarted)
+        reopened=restarted.history.head()
+        assert reopened['revisionId']==approved['revisionId']
+        assert reopened['sourceSha256']==approved['sourceSha256']
+        assert reopened['geometrySha256']==approved['geometrySha256']
+        snapshots=restarted.history.list_saved()
+        assert len(snapshots)==3
+    finally:
+        for pending in restarted.tk.call('after','info'):
+            try:restarted.after_cancel(pending)
+            except Exception:pass
+        restarted.destroy()

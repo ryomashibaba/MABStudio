@@ -11,17 +11,19 @@ def shade(color: str, factor: float) -> str:
     return '#%02x%02x%02x' % tuple(max(0, min(255, round(c*factor))) for c in rgb)
 
 
-def visible_section(points: list, max_y: int | None) -> list:
+def visible_section(points: list, max_y: int | None, axis: str = 'y') -> list:
     """Display-only cross section, preserving original SOURCE primitives verbatim.
 
     A newly exposed face at the slice boundary is an *illustrative section face*,
     never evidence of a real roof, floor, Minecraft block, or construction plan.
     """
+    if axis not in ('x', 'y', 'z'):
+        raise ValueError('Section axis must be x, y or z')
     if max_y is None:
         return points
     if type(max_y) is not int:
         raise ValueError('Section limit must be an integer or None')
-    return [p for p in points if p[1] <= max_y]
+    return [p for p in points if p[{'x': 0, 'y': 1, 'z': 2}[axis]] <= max_y]
 
 
 def greedy_visible_mesh(points, x_face: int, z_face: int) -> list[tuple]:
@@ -249,6 +251,8 @@ class VoxelPreview(tk.Canvas):
         self.detail_limit = self.LIMIT
         self.mesh_mode = True
         self.cut_level = None  # Visual-only Y upper bound; never modifies the design
+        self.section_axis = 'y'
+        self.section_level = None
         self._mesh_cache = {}
         self.on_scene_changed = None
         self.bind('<Configure>', lambda e: self.draw())
@@ -341,11 +345,18 @@ class VoxelPreview(tk.Canvas):
 
     def set_cut_level(self, max_y: int | None) -> None:
         """Show only cells at/below a Y level without mutating the SOURCE scene."""
-        if max_y is not None and type(max_y) is not int:
+        self.set_section('y', max_y)
+
+    def set_section(self, axis: str, level: int | None) -> None:
+        axis = str(axis).lower()
+        if axis not in ('x', 'y', 'z'):
+            raise ValueError('Section axis must be x, y or z')
+        if level is not None and type(level) is not int:
             raise ValueError('Section level must be integer')
-        if self.cut_level == max_y:
+        if self.section_axis == axis and self.section_level == level:
             return
-        self.cut_level = max_y
+        self.section_axis, self.section_level = axis, level
+        self.cut_level = level if axis == 'y' else None
         self._mesh_cache.clear()
         self.draw()
         if callable(self.on_scene_changed):
@@ -383,8 +394,8 @@ class VoxelPreview(tk.Canvas):
                                 width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
         label+=f' | 境界面メッシュ {total_faces:,}面'
-        if self.cut_level is not None:
-            label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
+        if self.section_level is not None:
+            label+=f' | {self.section_axis.upper()}≤{self.section_level} 断面（仮想切断面）'
         if render_mode == 'partial':
             label+='（描画上限・一部省略。GPUで全体を確認）'
         elif render_mode == 'coarse':
@@ -399,11 +410,12 @@ class VoxelPreview(tk.Canvas):
         self.create_text(w//2,h//2,fill='#91a4c4',text='生成した建築のプレビューがここに表示されます' if not self.scene else '描画中...')
         if not self.scene:
             return
-        pts = visible_section(self.scene.get('primitives') or [], self.cut_level)
+        pts = visible_section(self.scene.get('primitives') or [], self.section_level,
+                              self.section_axis)
         palette = self.scene.get('previewPalette', PALETTE)
         if not pts:
             self.delete('all')
-            self.create_text(w//2, h//2, text='このY断面に表示するセルはありません。上限を上げてください。',
+            self.create_text(w//2, h//2, text='この断面に表示するセルはありません。位置を調整してください。',
                              fill='#afc2df', font=('Segoe UI', 11))
             return
         self.delete('all')
@@ -460,8 +472,8 @@ class VoxelPreview(tk.Canvas):
                                     outline='#243c55' if self.show_edges else '',
                                     width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}表示セル'
-        if self.cut_level is not None:
-            label+=f' | Y≤{self.cut_level} 断面（仮想切断面）'
+        if self.section_level is not None:
+            label+=f' | {self.section_axis.upper()}≤{self.section_level} 断面（仮想切断面）'
         if skipped:
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
