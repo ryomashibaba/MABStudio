@@ -46,23 +46,26 @@ def _run(tmp_path, monkeypatch, preview, *, frozen):
     monkeypatch.setattr(smoke, 'example_library', lambda: {})
     monkeypatch.setattr(native_viewer, 'NativeVoxelPreview', NativeStub)
     monkeypatch.setattr(native_selfcheck, '_image_signature', lambda viewer: 'f'*64)
+    update_calls = []
     class FakeStudio:
         def __init__(self):
             self.preview = preview
             self.closed = False
         def update_idletasks(self):
             pass
+        def update(self):
+            update_calls.append('window-event-pump')
         def destroy(self):
             self.closed = True
     report = tmp_path / 'result.json'
     result = smoke.run_smoke(FakeStudio, ['--smoke', '--smoke-engine', str(tmp_path),
                                           '--smoke-report', str(report)])
-    return result, json.loads(report.read_text(encoding='utf-8'))
+    return result, json.loads(report.read_text(encoding='utf-8')), update_calls
 
 
 def test_frozen_native_embedded_917_cells_pass(tmp_path, monkeypatch):
     native = NativeStub()
-    code, receipt = _run(tmp_path, monkeypatch, native, frozen=True)
+    code, receipt, updates = _run(tmp_path, monkeypatch, native, frozen=True)
     assert code == 0
     assert receipt['result'] == 'PASS'
     assert receipt['guiRenderer'] == 'VTK_NATIVE_EMBEDDED'
@@ -70,25 +73,26 @@ def test_frozen_native_embedded_917_cells_pass(tmp_path, monkeypatch):
     assert receipt['nativeScenePixelsVerified']
     assert len(receipt['nativePixelSignatureSha256']) == 64
     assert native.draw_calls == 1
+    assert updates == ['window-event-pump']
     assert receipt['worldWrites'] == receipt['worldContacts'] == 0
 
 
 def test_frozen_lightweight_fallback_fails_release_qa(tmp_path, monkeypatch):
-    code, receipt = _run(tmp_path, monkeypatch, CanvasStub(), frozen=True)
+    code, receipt, _ = _run(tmp_path, monkeypatch, CanvasStub(), frozen=True)
     assert code == 1
     assert receipt['result'] == 'FAIL'
     assert 'PACKAGED_NATIVE_VIEWER_NOT_ACTIVE' in receipt['error']
 
 
 def test_source_lightweight_is_explicitly_not_native(tmp_path, monkeypatch):
-    code, receipt = _run(tmp_path, monkeypatch, CanvasStub(), frozen=False)
+    code, receipt, _ = _run(tmp_path, monkeypatch, CanvasStub(), frozen=False)
     assert code == 0
     assert receipt['guiRenderer'] == 'TK_LIGHTWEIGHT_SOURCE_ONLY'
     assert receipt['nativeScenePixelsVerified'] is False
 
 
 def test_native_wrong_source_cell_count_fails(tmp_path, monkeypatch):
-    code, receipt = _run(tmp_path, monkeypatch, NativeStub(visible=916), frozen=True)
+    code, receipt, _ = _run(tmp_path, monkeypatch, NativeStub(visible=916), frozen=True)
     assert code == 1
     assert 'PACKAGED_NATIVE_SOURCE_SCENE_NOT_VISIBLE' in receipt['error']
 

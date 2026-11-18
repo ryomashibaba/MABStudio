@@ -35,6 +35,13 @@ def run_smoke(studio_class, args: list[str]) -> int:
             scene = run_bridge(engine, example_library())
             root = studio_class()
             root.update_idletasks()
+            # A packaged Tk process that exits before mainloop needs one real
+            # event pump so Windows can map the window and deliver Configure.
+            # update_idletasks alone leaves the native viewer at 1x1 on some
+            # Windows desktops, causing its first VTK frame to be skipped.
+            pump = getattr(root, 'update', None)
+            if callable(pump):
+                pump()
             root.preview.show(scene)
             root.update_idletasks()
             from app.native_viewer import NativeVoxelPreview
