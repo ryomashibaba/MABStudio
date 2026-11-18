@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -1268,13 +1269,22 @@ class Studio(tk.Tk):
             check = run_bridge(engine, original)
             if check['geometrySha256'] != pinned_hash:
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
+            ai_started = time.monotonic()
             draft = ask_llm(provider, inference_model, instruction, revision_base=original,
                             on_progress=lambda message: self.pending_events.put(
                                 ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
                             cancel_event=cancel_event)
+            ai_seconds = time.monotonic() - ai_started
             if cancel_event.is_set():
                 raise ModelCancelled('修正生成をキャンセルしました。回答を破棄しました。')
-            scene = run_bridge(engine, draft)
+            self.pending_events.put(('progress', 'LOCAL_LLM',
+                f'AIの応答完了（{ai_seconds:.1f}秒）。B143のSOURCEを検証中…',
+                None, True, cancel_event))
+            try:
+                scene = run_bridge(engine, draft)
+            except StudioError as exc:
+                raise StudioError(f'{exc}\n（AI応答{ai_seconds:.1f}秒後のSOURCE検証で不合格。'
+                                  '自動で再推論しません）') from exc
             return draft, scene
         def done(data):
             revised, scene = data

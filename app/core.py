@@ -236,6 +236,65 @@ def bridge_script() -> Path:
     return root / "app" / "engine_bridge.mjs"
 
 
+def explain_b143_local_bounds(design: dict) -> str | None:
+    """Explain an already-rejected B143 spatial error; never change SOURCE.
+
+    Uses the pinned B143 shape-envelope rules for display only. This is NOT
+    a geometry validator, automatic repair, or substitute for run_bridge().
+    """
+    if not isinstance(design, dict):
+        return None
+    bounds = design.get('bounds')
+    elems = design.get('elements')
+    if not isinstance(bounds, dict) or not isinstance(elems, list):
+        return None
+    dims = [bounds.get(k) for k in ('width', 'height', 'depth')]
+    if any(type(v) is not int or v <= 0 for v in dims):
+        return None
+    for i, element in enumerate(elems):
+        if not isinstance(element, dict):
+            continue
+        shape = element.get('shape')
+        low = high = None
+        if shape == 'box':
+            origin, size = element.get('origin'), element.get('size')
+            if _safe_vec3(origin) and _safe_vec3(size):
+                low = origin
+                high = [origin[j] + size[j] - 1 for j in range(3)]
+        elif shape == 'ellipsoid':
+            center, radii = element.get('center'), element.get('radii')
+            if _safe_vec3(center) and _safe_vec3(radii):
+                low = [center[j] - radii[j] for j in range(3)]
+                high = [center[j] + radii[j] for j in range(3)]
+        elif shape == 'cylinder':
+            origin, radius, length, axis = (element.get('origin'), element.get('radius'),
+                                            element.get('length'), element.get('axis'))
+            if (_safe_vec3(origin) and type(radius) is int and type(length) is int
+                    and axis in ('x', 'y', 'z')):
+                along = {'x': 0, 'y': 1, 'z': 2}[axis]
+                low = [origin[j] - (0 if j == along else radius) for j in range(3)]
+                high = [origin[j] + (length - 1 if j == along else radius) for j in range(3)]
+        if low is None:
+            continue
+        violations = [f'{axis}={low[j]}..{high[j]}（許可0..{dims[j]-1}）'
+                      for j, axis in enumerate('XYZ')
+                      if low[j] < 0 or high[j] >= dims[j]]
+        if violations:
+            element_id = element.get('id')
+            identifier = (element_id[:40] if isinstance(element_id, str)
+                          else f'index={i}')
+            return (f'要素「{identifier}」（{shape}）がboundsの外です: '
+                    + '、'.join(violations) + '。'
+                    '修正案は採用されず、承認済み建築と履歴は変更されません。'
+                    '修正指示で形状とboundsの整合を指定してください。')
+    return None
+
+
+def _safe_vec3(value: object) -> bool:
+    return (isinstance(value, list) and len(value) == 3
+            and all(type(v) is int for v in value))
+
+
 def run_bridge(engine: Path, design: dict, timeout: int = 60) -> dict:
     """The Node bridge imports the *actual installed MAB module*, never a copy."""
     _source_sha256(engine)
@@ -251,6 +310,10 @@ def run_bridge(engine: Path, design: dict, timeout: int = 60) -> dict:
             raise StudioError("MAB SOURCE検証が時間切れになりました") from e
         if r.returncode:
             msg = (r.stderr or r.stdout or "MABの検証失敗").strip()[-700:]
+            if 'B143_OUTSIDE_LOCAL_BOUNDS' in msg:
+                detail = explain_b143_local_bounds(design)
+                if detail:
+                    msg = 'B143_OUTSIDE_LOCAL_BOUNDS: ' + detail
             raise StudioError(msg)
         if not out.exists() or out.stat().st_size > 16 * 1024 * 1024:
             raise StudioError("MABの出力がありません、または大きすぎます")
@@ -1123,8 +1186,20 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
         prior = json.dumps(revision_base, ensure_ascii=False, separators=(',', ':'))
         if len(prior) > 64000:
             raise StudioError('修正元の設計が長すぎます。全文をAIへ渡せません')
-        task = ('【既存の確定設計を修正】以下のB143 JSONを保ち、変更の必要な部分だけ修正し、' 
-                '省略のないB143 JSON全体を返してください。Minecraftに実行しないこと。\n' 
+        dims = revision_base.get('bounds', {})
+        if not isinstance(dims, dict):
+            dims = {}
+        original_size = (f"X={dims.get('width')}, Y={dims.get('height')}, "
+                         f"Z={dims.get('depth')}")
+        task = ('【既存の確定設計を修正】以下のB143 JSONを保ち、変更の必要な部分だけ修正し、'
+                '省略のないB143 JSON全体を返してください。Minecraftに実行しないこと。\n'
+                '【座標の重要条件】boundsのwidth/height/depthはXYZのセル数で、'
+                '有効座標はそれぞれ0～(寸法-1)。boxはorigin+size-1、'
+                'ellipsoidはcenter±radii、cylinderは長手方向origin+length-1と'
+                '垂直方向origin±radiusの全域がbounds内に必要。'
+                '既存boundsは' + original_size + '。追加・変更後の全要素が入るように'
+                'boundsを整合させること（width/depth≤128、height≤96、体積≤500000）。'
+                '不要な既存要素の削除・縮小で隠さず、指定変更と既存建築を保持する。\n'
                 '既存設計: ' + prior + '\n修正指示: ' + user_prompt)
     if error:
         task += "\n\n前回のSOURCE検証エラー: " + error[-500:]
