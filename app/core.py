@@ -856,6 +856,11 @@ def apply_revision_delta(base: dict, delta: dict) -> dict:
 # to last-byte HTTP buffering delay of a non-streaming reply.
 MODEL_STREAM_IDLE_TIMEOUT = 300
 MODEL_STREAM_TOTAL_TIMEOUT = 900
+# Gemma 4 with an 8k loaded context can spend its whole output allowance in
+# hidden reasoning, returning zero SOURCE JSON. Stop that single wasted request
+# once a substantial thought-only output is observed; do NOT retry or change the
+# loaded model. The server may ignore per-request thinking controls.
+GEMMA4_THOUGHT_ONLY_CHAR_LIMIT = 8000
 
 
 def _loaded_lm_studio_context(model: str, timeout: float = 2.5) -> int | None:
@@ -931,6 +936,12 @@ def _truncated_error(provider: str, reply: dict, budget: int,
         thought_chars = metrics.get('reasoningChars')
         if type(body_chars) is int and type(thought_chars) is int:
             detail = f'、JSON本文{body_chars}文字・思考用出力{thought_chars}文字'
+            if body_chars == 0 and thought_chars > 0:
+                return ModelOutputLimitError(
+                    f'{provider}が設計JSONの本文を出さず、思考用出力だけで上限に達しました'
+                    f'（出力上限{budget}{count}{ctx}{detail}）。'
+                    'MAB SOURCEは未検証です。LM StudioのThinking設定を確認してください。'
+                    '自動再推論やモデル設定変更は行いません。')
     return ModelOutputLimitError(
         f'{provider}の設計JSON生成がトークン上限で途中終了しました'
         f'（出力上限{budget}{count}{ctx}{detail}）。MAB SOURCEはまだ検証していません。'
@@ -939,7 +950,8 @@ def _truncated_error(provider: str, reply: dict, budget: int,
         'コンテキスト長を増やすとRAM/VRAM使用量も増える可能性があります。')
 
 
-def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=None) -> dict:
+def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=None,
+                           *, thought_only_limit: int | None = None) -> dict:
     """Read a single OpenAI-compatible SSE response, without repeating inference.
 
     Only the final assistant content is used. Reasoning tokens are never
@@ -1002,6 +1014,17 @@ def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=N
                 chars += len(part)
                 if chars > MAX_RESPONSE:
                     raise ModelTransportError('ローカルAIの出力が大きすぎます')
+            # Avoid consuming minutes on a reasoning-only Gemma 4 response.
+            # This is an explicit failure, never a prompt/model retry or a
+            # conversion of private reasoning into SOURCE content.
+            if (thought_only_limit is not None and chars == 0
+                    and reasoning_chars >= thought_only_limit):
+                raise ModelOutputLimitError(
+                    'Gemma 4が設計JSONを1文字も出さないまま、思考用出力が'
+                    f'{reasoning_chars}文字に達しました。無駄な推論を早期中止しました。'
+                    'LM StudioでこのモデルのThinkingをOFFにできるか確認してください。'
+                    'リクエスト側の思考OFF指定はLM Studioに無視される場合があります。'
+                    'モデル再ロード・設定変更・自動再推論はしていません。')
             if choice.get('finish_reason') is not None:
                 finish = choice['finish_reason']
         now = time.monotonic()
@@ -1041,7 +1064,16 @@ def _model_response(url: str, payload: dict, timeout: int, on_progress=None,
                 watcher.track(sock)
             watcher.assert_not_interrupted()
             if streaming and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
-                result = _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
+                # Only apply the thought-only watchdog to Gemma 4 structured
+                # SOURCE requests. Other models' reasoning is not constrained.
+                model_id = str(payload.get('model', ''))
+                gemma4 = bool(re.search(r'gemma[._/ -]*4(?:[._/ -]|$)', model_id, re.I))
+                thought_limit = (GEMMA4_THOUGHT_ONLY_CHAR_LIMIT
+                                 if gemma4 and payload.get('response_format', {}).get('type') == 'json_schema'
+                                 else None)
+                result = _read_lm_studio_stream(
+                    res, time.monotonic(), on_progress, cancel_event,
+                    thought_only_limit=thought_limit)
             else:
                 # read1() may silently accept a clean-looking JSON prefix even
                 # if the server closes before its declared Content-Length.
@@ -1349,7 +1381,10 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                                              else 'mab_b143_design'),
                                        'schema': generation_schema},
                    }}
-        if re.search(r'qwen[.\/_-]?3[.]?8', model, re.I):
+        if (re.search(r'qwen[.\/_-]?3[.]?8', model, re.I) or
+                re.search(r'gemma[._/ -]*4(?:[._/ -]|$)', model, re.I)):
+            # Best-effort, per-request only. LM Studio builds are known to
+            # ignore this for Gemma 4; the thought-only watchdog is separate.
             payload['chat_template_kwargs'] = {'enable_thinking': False}
     try:
         reply = _model_response(url, payload, timeout, on_progress, cancel_event)
