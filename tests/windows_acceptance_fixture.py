@@ -25,7 +25,7 @@ class Handler(BaseHTTPRequestHandler):
         if request.get('model')!='CI_TEST_DOUBLE' or request.get('stream') is not False:
             self.send_error(400)
             return
-        self.write({'message':{'content':json.dumps(example_library(),ensure_ascii=False)},'done_reason':'stop'})
+        self.write({'message':{'content':json.dumps(example_library(),ensure_ascii=False)},'done':True,'done_reason':'stop'})
     def write(self,data):
         raw=json.dumps(data,ensure_ascii=False).encode('utf-8')
         self.send_response(200)

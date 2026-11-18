@@ -43,7 +43,7 @@ def model_server(mode):
                 self.wfile.write(raw);return
             is_ollama=self.path=='/api/chat'
             if is_ollama:
-                reply={'message':{'content':json.dumps(DESIGN)},'done_reason':'length' if mode=='truncated' else 'stop'}
+                reply={'message':{'content':json.dumps(DESIGN)},'done':True,'done_reason':'length' if mode=='truncated' else 'stop'}
             else:
                 reply={'choices':[{'message':{'content':json.dumps(DESIGN)},
                                   'finish_reason':'length' if mode=='truncated' else 'stop'}]}

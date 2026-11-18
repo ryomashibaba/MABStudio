@@ -5,6 +5,9 @@ No API here connects to Minecraft or writes world coordinates.
 from __future__ import annotations
 
 import hashlib
+import http.client
+import socket
+import threading
 import io
 import json
 import os
@@ -41,8 +44,93 @@ class _RefuseModelRedirect(urllib.request.HTTPRedirectHandler):
         raise StudioError("ローカルAIが外部へのリダイレクトを要求したため通信を拒否しました")
 
 
+# The model request can block *before* urlopen returns (waiting for HTTP
+# response headers), so watching only the returned HTTPResponse is insufficient.
+# Capture the socket as soon as urllib connects; never affect other apps or
+# the read-only model-management calls on separate threads.
+_MODEL_REQUEST_STATE = threading.local()
+
+
+class _TrackedModelConnection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        watcher = getattr(_MODEL_REQUEST_STATE, 'watcher', None)
+        if watcher is not None:
+            watcher.track(self.sock)
+
+
+class _TrackedModelHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_TrackedModelConnection, req)
+
+
+class _ModelRequestWatch:
+    """Cancel a single HTTP request, including the wait for first headers.
+
+    No inference retry, server kill, model unload, or mutation outside this
+    request's socket. A model server may continue computing after disconnect.
+    """
+    def __init__(self, cancel_event, *, total_seconds=None):
+        self.cancel_event = cancel_event
+        self.deadline = (time.monotonic() + total_seconds
+                         if total_seconds is not None else None)
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._sock = None
+        self.reason = None
+        self._thread = None
+
+    @staticmethod
+    def _interrupt(sock):
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def track(self, sock):
+        with self._lock:
+            self._sock = sock
+            interrupted = self.reason is not None
+        if interrupted:
+            self._interrupt(sock)
+
+    def start(self):
+        if self.cancel_event is None and self.deadline is None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name='MABStudio-model-request-watch')
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.wait(0.05):
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                why = 'cancelled'
+            elif self.deadline is not None and time.monotonic() >= self.deadline:
+                why = 'deadline'
+            else:
+                continue
+            with self._lock:
+                self.reason = why
+                sock = self._sock
+            self._interrupt(sock)
+            return
+
+    def assert_not_interrupted(self):
+        _raise_if_cancelled(self.cancel_event)
+        if self.reason == 'deadline':
+            raise ModelTransportError(
+                'ローカルAI生成が総時間上限を超えました（15分）。追加推論せず停止しました')
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.3)
+
+
 LOCAL_HTTP = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}), _RefuseModelRedirect()
+    urllib.request.ProxyHandler({}), _RefuseModelRedirect(),
+    _TrackedModelHTTPHandler()
 )
 # Exact SHA256 of GitHub B143 source at commit b0295c2... (Git blob 3e257f9f...).
 # Source changes require a separately reviewed app release; a GitHub branch move
@@ -790,85 +878,67 @@ def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=N
 
 def _model_response(url: str, payload: dict, timeout: int, on_progress=None,
                     cancel_event=None) -> dict:
+    # No model request is sent after a cancellation (even through direct calls).
+    _raise_if_cancelled(cancel_event)
     req = urllib.request.Request(url,
         json.dumps(payload, ensure_ascii=False).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'User-Agent': 'MABStudio/0.3'})
+    streaming = bool(payload.get('stream'))
+    idle_timeout = MODEL_STREAM_IDLE_TIMEOUT if streaming else timeout
+    watcher = _ModelRequestWatch(
+        cancel_event, total_seconds=MODEL_STREAM_TOTAL_TIMEOUT if streaming else None)
+    prior = getattr(_MODEL_REQUEST_STATE, 'watcher', None)
+    _MODEL_REQUEST_STATE.watcher = watcher
+    watcher.start()
     try:
-        # Keep socket.makefile() reads on a normal blocking/long-idle timeout.
-        # A 0.25s socket timeout followed by another readline/read1 is BROKEN:
-        # Python's buffered HTTP reader permanently marks itself timed out.
-        # A tiny watcher only interrupts the socket if the user cancels.
-        idle_timeout = MODEL_STREAM_IDLE_TIMEOUT if payload.get('stream') else timeout
+        # Never retry a read on the same HTTPResponse after a socket timeout:
+        # Python's buffered socket file object may then be permanently poisoned.
         with LOCAL_HTTP.open(req, timeout=idle_timeout) as res:
             sock = getattr(getattr(getattr(res, 'fp', None), 'raw', None), '_sock', None)
-            stop_watch = None
-            watcher = None
-            if cancel_event is not None and sock is not None:
-                import socket
-                import threading
-                stop_watch = threading.Event()
-                def interrupt_on_cancel():
-                    while not stop_watch.wait(0.1):
-                        if cancel_event.is_set():
-                            # Close the *connection*, not the buffered response:
-                            # res.close() from another thread may block on its
-                            # read lock while readline() is waiting for bytes.
-                            try:
-                                sock.shutdown(socket.SHUT_RDWR)
-                            except OSError:
-                                pass
-                            return
-                watcher = threading.Thread(target=interrupt_on_cancel, daemon=True,
-                                           name='MABStudio-LLM-cancel')
-                watcher.start()
-            try:
-                _raise_if_cancelled(cancel_event)
-                if payload.get('stream') and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
-                    return _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
-                # A non-streaming reply (Ollama or compatible test server) is
-                # also read once; never retry on socket.timeout.
-                raw_parts = []
-                total = 0
-                while True:
-                    _raise_if_cancelled(cancel_event)
-                    chunk = (res.read1(min(65536, MAX_RESPONSE + 1 - total))
-                             if hasattr(res, 'read1') else
-                             res.read(min(65536, MAX_RESPONSE + 1 - total)))
-                    if not chunk:
-                        break
-                    raw_parts.append(chunk)
-                    total += len(chunk)
-                    if total > MAX_RESPONSE:
-                        raise StudioError('LLMの応答が大きすぎます')
-                _raise_if_cancelled(cancel_event)
-                raw = b''.join(raw_parts)
-            except (OSError, TimeoutError):
-                # A cancellation-triggered socket.shutdown() looks like an I/O
-                # error, but is not a model failure or reason to retry.
-                _raise_if_cancelled(cancel_event)
-                raise
-            finally:
-                if stop_watch is not None:
-                    stop_watch.set()
-                if watcher is not None:
-                    watcher.join(timeout=0.25)
+            if sock is not None:
+                watcher.track(sock)
+            watcher.assert_not_interrupted()
+            if streaming and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
+                result = _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
+            else:
+                # read1() may silently accept a clean-looking JSON prefix even
+                # if the server closes before its declared Content-Length.
+                # read(amt) can ALSO return a short body without raising, so
+                # explicitly check that HTTPResponse consumed its framing.
+                raw = res.read(MAX_RESPONSE + 1)
+                watcher.assert_not_interrupted()
+                if getattr(res, 'length', None) not in (None, 0):
+                    raise ModelTransportError('ローカルAIのHTTP本文が途中で切断されました。SOURCEは採用しません')
+                if len(raw) > MAX_RESPONSE:
+                    raise StudioError('LLMの応答が大きすぎます')
+                try:
+                    result = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise StudioError('ローカルLLMサーバーが不正なJSON応答を返しました') from exc
+                if not isinstance(result, dict):
+                    raise StudioError('ローカルLLMサーバーの応答形式が不正です')
+            watcher.assert_not_interrupted()
+            return result
     except urllib.error.HTTPError:
+        watcher.assert_not_interrupted()
         raise
+    except http.client.IncompleteRead as exc:
+        watcher.assert_not_interrupted()
+        raise ModelTransportError('ローカルAIのHTTP本文が途中で切断されました。SOURCEは採用しません') from exc
     except (OSError, TimeoutError) as exc:
-        _raise_if_cancelled(cancel_event)
+        watcher.assert_not_interrupted()
         raise ModelTransportError(
             'ローカルAI通信が中断されました。LM Studioの推論状態を確認してください。'
             '同じ要求の自動再送は行いません: ' + str(exc)[:150]) from exc
-    if len(raw) > MAX_RESPONSE:
-        raise StudioError('LLMの応答が大きすぎます')
-    try:
-        reply = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise StudioError('ローカルLLMサーバーが不正なJSON応答を返しました') from exc
-    if not isinstance(reply, dict):
-        raise StudioError('ローカルLLMサーバーの応答形式が不正です')
-    return reply
-
+    except StudioError:
+        watcher.assert_not_interrupted()
+        raise
+    finally:
+        watcher.stop()
+        if prior is None:
+            del _MODEL_REQUEST_STATE.watcher
+        else:
+            _MODEL_REQUEST_STATE.watcher = prior
 
 def _local_model_json(path: str, *, method: str = 'GET', payload: dict | None = None,
                       timeout: float = 10.0, provider: str = 'ローカルAI') -> dict:
@@ -1126,14 +1196,23 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
     if provider == 'Ollama':
         if reply.get('done_reason') == 'length':
             raise _truncated_error(provider, reply, output_budget, context_length)
-        content = reply.get('message', {}).get('content', '')
+        # A syntactically valid JSON body is not proof that inference finished.
+        # Ollama's non-streaming /api/chat replies explicitly report done=true.
+        if reply.get('done') is not True or reply.get('done_reason') not in (None, 'stop'):
+            raise ModelTransportError('Ollamaが生成完了を確認できない応答を返しました。SOURCEは保存しません')
+        message = reply.get('message')
+        content = message.get('content', '') if isinstance(message, dict) else ''
     else:
         choices = reply.get('choices')
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise StudioError('LM Studioの回答候補がありません')
-        if choices[0].get('finish_reason') == 'length':
+        finish_reason = choices[0].get('finish_reason')
+        if finish_reason == 'length':
             raise _truncated_error(provider, reply, output_budget, context_length)
-        content = choices[0].get('message', {}).get('content', '')
+        if finish_reason != 'stop':
+            raise ModelTransportError('LM Studioの回答は正常終了していません（終了理由: '+str(finish_reason)[:40]+'）。SOURCEは保存しません')
+        message = choices[0].get('message')
+        content = message.get('content', '') if isinstance(message, dict) else ''
     if not isinstance(content, str) or not content.strip():
         raise StudioError('AIから設計JSONの本文を受け取れませんでした。モデルのJSON出力対応を確認してください')
     draft = parse_llm_json(content)

@@ -41,7 +41,7 @@ def fake_lm_stream(mode='normal'):
             if mode == 'slow':
                 time.sleep(.3)
             send({'choices':[{'delta':{'content':content[mid:]},'finish_reason':None}]})
-            send({'choices':[{'delta':{},'finish_reason':'length' if mode=='length' else 'stop'}]})
+            send({'choices':[{'delta':{},'finish_reason':('length' if mode=='length' else 'content_filter' if mode=='filtered' else 'stop')}]})
             self.wfile.write(b'data: [DONE]\n\n')
             self.wfile.flush()
     srv = ThreadingHTTPServer(('127.0.0.1',0),Handler)
@@ -212,3 +212,11 @@ def test_revision_does_not_shrink_existing_40_element_design(monkeypatch):
         assert constraint['properties']['brief']['maxLength']==500
         assert all(v['properties']['id'].get('maxLength') is None for v in constraint['properties']['elements']['items']['anyOf'])
         assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems']==160
+
+
+def test_streamed_valid_json_is_not_accepted_after_abnormal_finish(monkeypatch):
+    with fake_lm_stream('filtered') as (url, seen):
+        monkeypatch.setattr(core, 'LM_STUDIO_BASE', url)
+        with pytest.raises(core.ModelTransportError, match='正常終了していません'):
+            core.ask_llm('LM Studio', 'gemma-test', '図書館を作って')
+        assert len(seen) == 1

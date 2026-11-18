@@ -230,3 +230,27 @@ def test_restart_restore_and_reopen_keeps_append_only_history(studio):
             try:restarted.after_cancel(pending)
             except Exception:pass
         restarted.destroy()
+
+
+def test_old_cancelled_model_progress_cannot_replace_new_request_status(studio):
+    app, _ = studio
+    old = threading.Event()
+    old.set()
+    current = threading.Event()
+    app.busy = True
+    app._active_cancel_event = current
+    app.status.set('新しい操作が開始されました')
+    app.pending_events.put(('progress','LOCAL_LLM','前の推論の古い進捗', None, True, old))
+    app.pending_events.put(('progress','LOCAL_LLM','現在の推論', None, True, current))
+    app._poll()
+    assert app.status.get() == '現在の推論'
+    app.busy = False
+    app._active_cancel_event = None
+
+
+def test_closing_gui_requests_cancellation_of_active_model(studio):
+    app, _ = studio
+    event = threading.Event()
+    app._active_cancel_event = event
+    app.destroy()
+    assert event.is_set()

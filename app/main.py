@@ -81,6 +81,10 @@ class Studio(tk.Tk):
             return
         self._closed = True
         self._education_cancel.set()
+        # Closing the window discards any in-flight AI candidate and interrupts
+        # this Studio request's socket; never leave a hidden long-running POST.
+        if self._active_cancel_event is not None:
+            self._active_cancel_event.set()
         for attr in ('_poll_after','_startup_after','_check_after','_section_after'):
             handle=getattr(self,attr,None)
             if handle is not None:
@@ -699,7 +703,12 @@ class Studio(tk.Tk):
                 kind,title,result,callback,quiet=item[:5]
                 cancel_event=item[5] if len(item)>5 else None
                 if kind=='progress':
-                    if self.busy and not (self._active_cancel_event and self._active_cancel_event.is_set()):
+                    # A cancelled request can enqueue progress just before a new
+                    # request begins. Ignore that stale message, not just the
+                    # cancelled request's final response.
+                    if (self.busy and cancel_event is not None
+                            and self._active_cancel_event is cancel_event
+                            and not cancel_event.is_set()):
                         self.status.set(str(result))
                     continue
                 self.busy=False
@@ -1157,7 +1166,7 @@ class Studio(tk.Tk):
             # One user action permits one model inference, not a hidden retry.
             design = ask_llm(provider, inference_model, prompt,
                              on_progress=lambda message: self.pending_events.put(
-                                 ('progress', 'LOCAL_LLM', message, None, True)),
+                                 ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
                              cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
@@ -1261,7 +1270,7 @@ class Studio(tk.Tk):
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
             draft = ask_llm(provider, inference_model, instruction, revision_base=original,
                             on_progress=lambda message: self.pending_events.put(
-                                ('progress', 'LOCAL_LLM', message, None, True)),
+                                ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
                             cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise ModelCancelled('修正生成をキャンセルしました。回答を破棄しました。')

@@ -31,9 +31,9 @@ class Handler(BaseHTTPRequestHandler):
         data=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.requests.append(data)
         if self.path == '/api/chat':
-            body={'message':{'content':json.dumps(DESIGN)}}
+            body={'message':{'content':json.dumps(DESIGN)}, 'done':True, 'done_reason':'stop'}
         elif self.path == '/v1/chat/completions':
-            body={'choices':[{'message':{'content':json.dumps(DESIGN)}}]}
+            body={'choices':[{'message':{'content':json.dumps(DESIGN)}, 'finish_reason':'stop'}]}
         else:
             self.send_error(404);return
         raw=json.dumps(body).encode()
