@@ -76,7 +76,15 @@ def test_ai_draft_never_commits_until_explicit_approval(studio):
     assert app.pending_revision is not None
     assert app.history.head()['revisionId']==initial['revisionId']
     assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==original_src
-    assert app.view_mode.get()=='変更差分'
+    # A user decides from the full revised building; delta is optional.
+    assert app.view_mode.get()=='修正案（未承認）'
+    assert app.preview.scene['geometrySha256']==app.pending_revision['scene']['geometrySha256']
+    app.view_mode.set('変更差分')
+    app._refresh_view()
+    assert app.preview.scene['previewOnly'] is True
+    app.view_mode.set('修正案（未承認）')
+    app._refresh_view()
+    assert app.preview.scene['geometrySha256']==app.pending_revision['scene']['geometrySha256']
     assert 'disabled' not in app.approve_draft_btn.state()
     assert 'disabled' not in app.reject_draft_btn.state()
     # Approved source remains unchanged during candidate review.
@@ -88,6 +96,8 @@ def test_ai_draft_never_commits_until_explicit_approval(studio):
     assert app.history.head()['parentId']==initial['revisionId']
     assert app.history.head()['design']['title']=='approved draft candidate'
     assert app.history.head()['worldWrites']==0
+    assert app.view_mode.get()=='建築のみ'
+    assert app.preview.scene['geometrySha256']==app.scene['geometrySha256']
     assert 'disabled' in app.approve_draft_btn.state()
 
 

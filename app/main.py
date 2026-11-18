@@ -319,7 +319,7 @@ class Studio(tk.Tk):
         left.columnconfigure(0, weight=1)
 
         ttk.Label(left, text='AIモデル', style='Section.TLabel').pack(anchor='w')
-        ttk.Label(left, text='手元のモデルを選んで建築します',
+        ttk.Label(left, text='モデルは事前ロードが必要（自動起動しません）',
                   style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
         self.provider_box = ttk.Combobox(left, textvariable=self.llm_provider,
                               values=('Ollama', 'LM Studio'), state='readonly')
@@ -409,7 +409,7 @@ class Studio(tk.Tk):
         self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
-        ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel').pack(side='left', padx=(0, 12))
+        ttk.Label(self.reviewbar, text='未承認の修正案（3Dで確認）', style='Section.TLabel').pack(side='left', padx=(0, 12))
         self.approve_draft_btn = ttk.Button(self.reviewbar, text='修正案を承認',
                                             command=self.approve_revision, state='disabled',
                                             style='Primary.TButton')
@@ -1077,7 +1077,7 @@ class Studio(tk.Tk):
             elif names and chosen not in names:
                 self.status.set('以前のモデル '+chosen[:45]+' が現在の一覧にありません。使うモデルを選び直してください。')
                 return
-            self.status.set(f'{provider}: {len(names)}件のモデルを取得しました。')
+            self.status.set(f'{provider}: {len(names)}件のモデルを取得。一覧には未ロードも含まれます。使用するモデルは先にロードしてください。')
         self._start(provider+'のモデル一覧を取得中',lambda:llm_models(provider),done,quiet=True)
 
     def unload_selected_model(self):
@@ -1266,7 +1266,10 @@ class Studio(tk.Tk):
                 'engineSha': self.manager.active_sha,
                 'provider': provider, 'model': model,
             }
-            self.view_mode.set('変更差分')
+            # Review the *finished candidate building* first. A colored delta
+            # alone does not show usable rooms, shape or architectural quality.
+            # Users can still choose '変更差分' from the existing view selector.
+            self.view_mode.set('修正案（未承認）')
             self._refresh_view()
             counts = delta['counts']
             self.caption.set(f'未承認のAI修正案：追加{counts["added"]} / 削除{counts["removed"]} / '
@@ -1303,7 +1306,9 @@ class Studio(tk.Tk):
                                  operation='revision')
             self.pending_revision = None
             self._refresh_buttons()
-            self.view_mode.set('変更差分')
+            # After approval show the actual saved building, not abstract
+            # comparison colors. '変更差分' remains an optional view.
+            self.view_mode.set('建築のみ')
             self._refresh_view()
             self.status.set('承認済み：設計履歴だけ更新しました。Minecraftワールドは未変更です。')
         self._start('承認前のSOURCE真正再検証（ワールド書き込みなし）',work,done)
