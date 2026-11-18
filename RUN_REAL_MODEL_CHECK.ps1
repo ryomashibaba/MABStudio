@@ -1,6 +1,7 @@
 # MAB Studio local provider acceptance using the LAST PASS Windows EXE.
 # No Python installation, EXE rebuild, server starts, model loads or Minecraft commands.
 # Fails closed if the saved model is not already running or the QA ZIP hash differs.
+. (Join-Path $PSScriptRoot 'GET_STUDIO_SOURCE_FINGERPRINT.ps1')
 $ErrorActionPreference = 'Stop'
 $studioRoot = Join-Path $env:LOCALAPPDATA 'MABStudio'
 $diagnostics = Join-Path $studioRoot 'diagnostics'
@@ -99,7 +100,9 @@ try {
             throw 'OLLAMA_MODEL_NOT_RUNNING: load the selected model first; this check will not auto-load it.'
         }
     }
-    $summary.stage = 'FIND_PREVIOUS_PASS_EXE'
+    $summary.stage = 'FIND_MATCHING_SOURCE_PASS_EXE'
+    $sourceFingerprint = Get-StudioSourceFingerprint -Root $PSScriptRoot
+    $summary.sourceFingerprintSha256 = $sourceFingerprint
     $qaReports = @(Get-ChildItem -Path $diagnostics -Directory -Filter 'windows-native-*' |
                    Sort-Object LastWriteTime -Descending |
                    ForEach-Object {
@@ -112,7 +115,8 @@ try {
             $qa = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($qa.schema -cne 'mab-studio-windows-native-acceptance-v1' -or
                 $qa.outcome -cne 'PASS_WINDOWS_NATIVE_SOURCE_AND_TEST_DOUBLE_ONLY' -or
-                $qa.stage -cne 'COMPLETE') { continue }
+                $qa.stage -cne 'COMPLETE' -or
+                [string]$qa.sourceFingerprintSha256 -cne $sourceFingerprint) { continue }
             $zipFile = [string]$qa.previewZip
             $qaFolder = Split-Path -Parent $f
             if ([System.IO.Path]::GetFullPath($zipFile) -cne
@@ -129,7 +133,7 @@ try {
         } catch { continue }
     }
     if (!$selected) {
-        throw 'NO_VERIFIED_EXE_ZIP: run RUN_WINDOWS_NATIVE_QA.bat once, then retry without rebuilding.'
+        throw 'NO_VERIFIED_EXE_ZIP: no Windows PASS package matches these source files. Run RUN_WINDOWS_NATIVE_QA.bat once; older EXEs are not evidence for current Studio.'
     }
     $summary.stage = 'EXTRACT_VERIFIED_EXE'
     New-Item -ItemType Directory -Force -Path $extracted | Out-Null
@@ -143,7 +147,7 @@ try {
     $requestClock = [System.Diagnostics.Stopwatch]::StartNew()
     # Use acceptance.py's existing Japanese diagnostic brief (no shell Unicode quoting).
     # Model strings were strictly checked above before passing as process arguments.
-    $arguments = '--acceptance --provider "' + $provider + '" --model "' + $inferenceModel + '" --report "' + $reportPath + '"'
+    $arguments = '--acceptance --save-to-studio --provider "' + $provider + '" --model "' + $inferenceModel + '" --report "' + $reportPath + '"'
     # Bound the wait: even a stuck GUI, transport or runtime must not hang forever.
     # Kill ONLY the temporary acceptance EXE that this script started.
     $proc = Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $extracted -PassThru
@@ -187,12 +191,18 @@ try {
     } elseif ($proc.ExitCode -ne 0 -or $summary.outcome -cne 'PASS_SOURCE_AND_GUI_ONLY') {
         $summary.realInference = 'REQUEST_ATTEMPTED'
         if (!$summary.error) { $summary.error = 'Real model request, source validation or Tk preview failed.' }
-    } elseif (!$receipt.sourceValid -or !$receipt.guiRendered -or $receipt.stage -cne 'COMPLETE') {
+    } elseif (!$receipt.sourceValid -or !$receipt.guiRendered -or
+        $receipt.guiRenderer -cne 'VTK_NATIVE_EMBEDDED' -or !$receipt.nativeScenePixelsVerified -or
+        !$receipt.studioProject.saved -or $receipt.studioProject.worldWrites -ne 0 -or
+        $receipt.stage -cne 'COMPLETE') {
         $summary.realInference = 'REQUEST_ATTEMPTED'
         throw 'GENUINE_MODEL_SUCCESS_PROOF_INCOMPLETE'
     } else {
         $summary.realInference = 'REQUEST_ATTEMPTED'
         $summary.stage = 'COMPLETE'
+        $summary.savedRevisionId = [string]$receipt.studioProject.revisionId
+        $summary.nativeRenderer = [string]$receipt.guiRenderer
+        $summary.nativeScenePixelsVerified = [bool]$receipt.nativeScenePixelsVerified
     }
 } catch {
     $summary.outcome = 'FAIL'

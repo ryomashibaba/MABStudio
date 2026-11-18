@@ -4,6 +4,7 @@
 param(
     [ValidatePattern('^[0-9a-f]{32}$')][string]$SavedRevisionId = ''
 )
+. (Join-Path $PSScriptRoot 'GET_STUDIO_SOURCE_FINGERPRINT.ps1')
 $ErrorActionPreference = 'Stop'
 $source = $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -37,10 +38,12 @@ $summary = [ordered]@{
     hardwareGpuIndependentlyVerified = $false
     thirdPartyLicenseFilesIncluded = $false
     previewZipBytes = 0
+    sourceFingerprintSha256 = ''
 }
 $fixture = $null
 try {
     $summary.stage = 'VALIDATE_WINDOWS_BATCH_FORMAT'
+    $summary.sourceFingerprintSha256 = Get-StudioSourceFingerprint -Root $source
     # The original release accidentally shipped LF-only BAT files. Fail before installing
     # dependencies rather than producing misleading cmd.exe parser errors.
     foreach ($batch in @('RUN_WINDOWS_NATIVE_QA.bat','build_windows_native.bat','START_MAB_STUDIO.bat','prepare_education_readonly.bat')) {
@@ -56,6 +59,9 @@ try {
     # Never build over the original checked-out directory or an earlier dist.
     foreach ($item in @('app','tests','build_windows_native.bat','prepare_education_readonly.bat')) {
         Copy-Item -LiteralPath (Join-Path $source $item) -Destination $work -Recurse -Force
+    }
+    if ((Get-StudioSourceFingerprint -Root $work) -cne $summary.sourceFingerprintSha256) {
+        throw 'ISOLATED_STUDIO_SOURCE_FINGERPRINT_MISMATCH'
     }
     Set-Location -LiteralPath $work
     $summary.stage = 'PINNED_B143_DOWNLOAD'
