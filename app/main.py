@@ -353,7 +353,7 @@ class Studio(tk.Tk):
         self.gpu_view_btn.pack(side='right', padx=(7, 0))
         ttk.Button(top, text='3Dを拡大', command=self.open_large_preview,
                    style='Quiet.TButton').pack(side='right', padx=(7, 0))
-        self.export_btn = ttk.Button(top, text='設計を保存', command=self.export_design,
+        self.export_btn = ttk.Button(top, text='SOURCE JSONを書き出す', command=self.export_design,
                                      style='Quiet.TButton', state='disabled')
         self.export_btn.pack(side='right', padx=(6, 0))
         self.restore_btn = ttk.Button(top, text='前に戻す', command=self.restore_previous,
@@ -1320,7 +1320,7 @@ class Studio(tk.Tk):
         name = ''.join(c for c in self.design.get('id','building') if c.isascii() and
                        (c.isalnum() or c in '-_'))[:45] or 'building'
         filename = filedialog.asksaveasfilename(
-            title='表示中の承認済みSOURCE設計をJSON保存（Minecraft施工ファイルではありません）',
+            title='承認済みSOURCE JSONを書き出す（アプリ内履歴とは別）',
             defaultextension='.json', initialfile=name+'-source.json',
             filetypes=[('SOURCE JSON', '*.json')])
         if not filename:
@@ -1335,7 +1335,8 @@ class Studio(tk.Tk):
         def done(path):
             self.status.set('画面の承認済みSOURCEを検証して保存しました（Minecraft未変更）: '+str(path))
             messagebox.showinfo('SOURCE JSON保存完了',
-                '保存先: '+str(path)+'\n\nMAB設計JSONのみです。Minecraft施工許可やワールドの復元にはなりません。')
+                '保存先: '+str(path)+'\n\nこれはSOURCE JSONの書き出しです。アプリ内の建築履歴とは別のファイルです。'
+                '\n承認した修正案は建築履歴に自動保存されます。Minecraft施工許可やワールドの復元にはなりません。')
         self._start('表示中の承認済み設計をSOURCE再検証してJSON保存',work,done)
 
 

@@ -36,13 +36,18 @@ def test_export_button_saves_active_approved_design_not_old_latest_file(studio,m
     app,_=studio
     output=tmp_path/'selected-source.json'
     notices=[]
-    monkeypatch.setattr(studio_main.filedialog,'asksaveasfilename',lambda **kw:str(output))
+    dialogs=[]
+    monkeypatch.setattr(studio_main.filedialog,'asksaveasfilename',lambda **kw:(dialogs.append(kw) or str(output)))
     monkeypatch.setattr(studio_main.messagebox,'showinfo',lambda *a: notices.append(a))
+    assert app.export_btn.cget('text')=='SOURCE JSONを書き出す'
     app.export_design()
     _complete(app)
     assert output.is_file()
     assert json.loads(output.read_text(encoding='utf-8'))==app.design
     assert notices
+    assert 'アプリ内履歴とは別' in dialogs[0]['title']
+    assert '建築履歴とは別のファイル' in notices[0][1]
+    assert '建築履歴に自動保存' in notices[0][1]
     assert app.history.head()['worldWrites']==0
 
 
