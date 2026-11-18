@@ -34,6 +34,8 @@ def fake_lm_stream(mode='normal'):
                 return
             if mode == 'stall':
                 time.sleep(.7)
+            if mode == 'stall_cancel':
+                time.sleep(1.4)
             mid = len(content)//2
             send({'choices':[{'delta':{'content':content[:mid]},'finish_reason':None}]})
             if mode == 'slow':
@@ -68,7 +70,9 @@ def test_cancel_closes_local_stream_and_never_retries(monkeypatch):
     result=[]
     entered=threading.Event();opened=[]
     class FakeSocket:
-        def settimeout(self,_): pass
+        def settimeout(self,_):
+            raise AssertionError('Never apply short timeout to buffered HTTPResponse')
+        def shutdown(self,_): pass
     class Response:
         headers={'Content-Type':'text/event-stream'}
         fp=type('FP',(),{'raw':type('Raw',(),{'_sock':FakeSocket()})()})()
@@ -94,6 +98,44 @@ def test_cancel_closes_local_stream_and_never_retries(monkeypatch):
     assert len(opened)==1
     assert response.closed
     assert len(result)==1 and isinstance(result[0],core.ModelCancelled)
+
+
+
+def test_sse_idle_gap_older_than_quarter_second_does_not_poison_http_stream(monkeypatch):
+    """Reproduces the Windows popup: 0.25s socket timeout poisons readline().
+
+    No genuine LM Studio inference, and exactly one HTTP POST.
+    """
+    with fake_lm_stream('stall') as (url, seen):
+        monkeypatch.setattr(core, 'LM_STUDIO_BASE', url)
+        token = threading.Event()
+        assert core.ask_llm('LM Studio', 'gemma-test', '塔を建てる',
+                            cancel_event=token) == DESIGN
+        assert len(seen) == 1
+
+
+def test_real_socket_cancel_interrupts_sse_without_retry(monkeypatch):
+    """Cancellation interrupts a blocking read instead of triggering timeout reuse."""
+    with fake_lm_stream('stall_cancel') as (url, seen):
+        monkeypatch.setattr(core, 'LM_STUDIO_BASE', url)
+        token = threading.Event()
+        outcome = []
+        worker = threading.Thread(target=lambda: _capture_cancel(outcome, token), daemon=True)
+        worker.start()
+        # Wait until the streaming request was received; its next SSE chunk is
+        # intentionally delayed for 1.4 seconds by the local fake server.
+        deadline = time.monotonic() + 2
+        while not seen and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(seen) == 1
+        time.sleep(.08)
+        started = time.monotonic()
+        token.set()
+        worker.join(timeout=.9)
+        assert not worker.is_alive(), 'A cancelled socket read must be interrupted promptly'
+        assert time.monotonic() - started < .9
+        assert len(outcome) == 1 and isinstance(outcome[0], core.ModelCancelled)
+        assert len(seen) == 1  # never automatically resend
 
 
 def test_pre_cancelled_request_never_posts(monkeypatch):

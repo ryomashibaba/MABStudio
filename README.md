@@ -380,3 +380,18 @@ archive before uploading it. These steps make no real model request and never
 contact or write to Minecraft. Local Linux/Xvfb tests do NOT certify that the
 portable ZIP or physical GPU succeeds on Windows; inspect the new portable
 receipts in `WINDOWS_NATIVE_QA.json` after an actual Windows run.
+
+### Windows v0.3 — LM Studio streaming timeout correction (2026-11-18)
+
+When the GUI reports `cannot read from timed out object`, the root cause is the
+Studio HTTP client's 0.25-second socket timeout followed by a retry on the
+same buffered `HTTPResponse`. A delayed SSE chunk can trigger this even when
+LM Studio is healthy. The client now leaves the read timeout at its established
+300-second idle limit and interrupts an active read only when the user cancels.
+This fix sends no duplicate inference requests and does not change model loading.
+
+After extracting this updated **source** ZIP on Windows, run
+`UPDATE_STUDIO_ONCE.bat` once to build/test the corrected EXE in isolation;
+then use `OPEN_MAB_STUDIO.bat` for ordinary launches without rebuilding.
+The update does not automatically run real-model inference.
+The preserved previous EXE is not patched in place.

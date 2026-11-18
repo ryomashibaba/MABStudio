@@ -726,14 +726,14 @@ def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=N
         _raise_if_cancelled(cancel_event)
         if time.monotonic() - started > MODEL_STREAM_TOTAL_TIMEOUT:
             raise ModelTransportError('ローカルAI生成が安全な総時間上限を超えました（15分）。追加推論せず停止しました')
-        try:
-            line = res.readline(MAX_RESPONSE + 1)
-        except OSError as exc:
-            import socket
-            if isinstance(exc, socket.timeout) and cancel_event is not None:
-                continue
-            raise
+        # A socket.makefile()/HTTPResponse stream is not reusable after a read
+        # timeout. Never swallow the timeout and call readline() again: Python's
+        # buffered reader then raises "cannot read from timed out object".
+        # Cancellation instead interrupts the underlying socket from a watcher.
+        line = res.readline(MAX_RESPONSE + 1)
         if not line:
+            # socket.shutdown() on user cancel can look like a clean EOF.
+            _raise_if_cancelled(cancel_event)
             break
         if len(line) > MAX_RESPONSE:
             raise ModelTransportError('ローカルAIのストリーム1行が大きすぎます')
@@ -779,6 +779,7 @@ def _read_lm_studio_stream(res, started: float, on_progress=None, cancel_event=N
             on_progress('ローカルAIが生成中：JSON本文 '+str(chars)+
                         '文字／思考用出力 '+str(reasoning_chars)+'文字（SOURCE未検証）')
             last_notice = now
+    _raise_if_cancelled(cancel_event)
     if not saw_done or finish is None:
         raise ModelTransportError('ローカルAIのストリームが完了前に切断されました。追加推論はしません')
     return {'choices': [{'message': {'content': ''.join(content)},
@@ -793,43 +794,71 @@ def _model_response(url: str, payload: dict, timeout: int, on_progress=None,
         json.dumps(payload, ensure_ascii=False).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'User-Agent': 'MABStudio/0.3'})
     try:
-        # The streaming transport is only used for LM Studio. Fake/test servers
-        # may still return one JSON body; that is handled without another POST.
-        with LOCAL_HTTP.open(req, timeout=(MODEL_STREAM_IDLE_TIMEOUT if payload.get('stream') else timeout)) as res:
+        # Keep socket.makefile() reads on a normal blocking/long-idle timeout.
+        # A 0.25s socket timeout followed by another readline/read1 is BROKEN:
+        # Python's buffered HTTP reader permanently marks itself timed out.
+        # A tiny watcher only interrupts the socket if the user cancels.
+        idle_timeout = MODEL_STREAM_IDLE_TIMEOUT if payload.get('stream') else timeout
+        with LOCAL_HTTP.open(req, timeout=idle_timeout) as res:
             sock = getattr(getattr(getattr(res, 'fp', None), 'raw', None), '_sock', None)
+            stop_watch = None
+            watcher = None
             if cancel_event is not None and sock is not None:
-                sock.settimeout(.25)
-            if payload.get('stream') and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
-                return _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
-            # Read available chunks while polling cancellation. Closing this
-            # client response cannot prove that a local server stopped inference.
-            raw_parts = []
-            total = 0
-            if sock is not None:
-                if cancel_event is not None:
-                    sock.settimeout(.25)
-            while True:
+                import socket
+                import threading
+                stop_watch = threading.Event()
+                def interrupt_on_cancel():
+                    while not stop_watch.wait(0.1):
+                        if cancel_event.is_set():
+                            # Close the *connection*, not the buffered response:
+                            # res.close() from another thread may block on its
+                            # read lock while readline() is waiting for bytes.
+                            try:
+                                sock.shutdown(socket.SHUT_RDWR)
+                            except OSError:
+                                pass
+                            return
+                watcher = threading.Thread(target=interrupt_on_cancel, daemon=True,
+                                           name='MABStudio-LLM-cancel')
+                watcher.start()
+            try:
                 _raise_if_cancelled(cancel_event)
-                try:
+                if payload.get('stream') and 'text/event-stream' in res.headers.get('Content-Type', '').lower():
+                    return _read_lm_studio_stream(res, time.monotonic(), on_progress, cancel_event)
+                # A non-streaming reply (Ollama or compatible test server) is
+                # also read once; never retry on socket.timeout.
+                raw_parts = []
+                total = 0
+                while True:
+                    _raise_if_cancelled(cancel_event)
                     chunk = (res.read1(min(65536, MAX_RESPONSE + 1 - total))
                              if hasattr(res, 'read1') else
                              res.read(min(65536, MAX_RESPONSE + 1 - total)))
-                except OSError as exc:
-                    import socket
-                    if isinstance(exc, socket.timeout) and cancel_event is not None:
-                        continue
-                    raise
-                if not chunk:
-                    break
-                raw_parts.append(chunk)
-                total += len(chunk)
-                if total > MAX_RESPONSE:
-                    raise StudioError('LLMの応答が大きすぎます')
-            raw = b''.join(raw_parts)
+                    if not chunk:
+                        break
+                    raw_parts.append(chunk)
+                    total += len(chunk)
+                    if total > MAX_RESPONSE:
+                        raise StudioError('LLMの応答が大きすぎます')
+                _raise_if_cancelled(cancel_event)
+                raw = b''.join(raw_parts)
+            except (OSError, TimeoutError):
+                # A cancellation-triggered socket.shutdown() looks like an I/O
+                # error, but is not a model failure or reason to retry.
+                _raise_if_cancelled(cancel_event)
+                raise
+            finally:
+                if stop_watch is not None:
+                    stop_watch.set()
+                if watcher is not None:
+                    watcher.join(timeout=0.25)
     except urllib.error.HTTPError:
         raise
     except (OSError, TimeoutError) as exc:
-        raise ModelTransportError('ローカルAIとの通信がタイムアウト/切断されました。LM Studioの推論速度・VRAMとサーバー状態を確認してください（追加推論なし）: ' + str(exc)[:150]) from exc
+        _raise_if_cancelled(cancel_event)
+        raise ModelTransportError(
+            'ローカルAI通信が中断されました。LM Studioの推論状態を確認してください。'
+            '同じ要求の自動再送は行いません: ' + str(exc)[:150]) from exc
     if len(raw) > MAX_RESPONSE:
         raise StudioError('LLMの応答が大きすぎます')
     try:
