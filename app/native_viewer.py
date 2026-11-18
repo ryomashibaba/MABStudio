@@ -720,6 +720,41 @@ class NativeVoxelPreview(tk.Frame):
                 'displaySize': list(self._photo_size),
                 'interactivePreview': self._interactive_preview}
 
+    def renderer_diagnostics(self) -> dict:
+        """Report the active OpenGL renderer without inferring from installed GPUs."""
+        try:
+            capabilities = str(self._window.ReportCapabilities() or '')
+        except (AttributeError, RuntimeError):
+            capabilities = ''
+        wanted = ('vendor', 'renderer', 'version')
+        lines = {}
+        for line in capabilities.splitlines():
+            low = line.lower()
+            if any(key in low for key in wanted) and ':' in line:
+                label, value = line.split(':', 1)
+                lines[label.strip()] = value.strip()[:240]
+        try:
+            direct = bool(self._window.IsDirect())
+        except (AttributeError, RuntimeError):
+            direct = None
+        renderer = next((v for k, v in lines.items() if 'renderer' in k.lower()), '')
+        low_renderer = renderer.lower()
+        software = any(token in low_renderer for token in
+                       ('llvmpipe', 'softpipe', 'software rasterizer', 'swiftshader',
+                        'microsoft basic render', 'gdi generic', 'mesa offscreen'))
+        physical_name = any(token in low_renderer for token in
+                            ('nvidia', 'geforce', 'quadro', 'amd', 'radeon',
+                             'intel arc', 'intel(r) graphics', 'intel(r) uhd', 'intel(r) iris'))
+        if software:
+            classification = 'SOFTWARE_RENDERER'
+        elif direct is True and physical_name:
+            classification = 'PHYSICAL_GPU_RENDERER'
+        else:
+            classification = 'UNKNOWN_RENDERER'
+        return {'windowClass': str(self._window.GetClassName()),
+                'directContext': direct, 'classification': classification,
+                'capabilityStrings': lines}
+
     def destroy(self):
         if self._closed:
             return

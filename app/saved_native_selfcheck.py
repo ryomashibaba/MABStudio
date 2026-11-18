@@ -9,9 +9,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import sys
 import tkinter as tk
+import time
 
 from app.core import user_root
 from app.revisions import RevisionStore, HEX32, _cells
@@ -24,6 +27,51 @@ def _sha_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _working_set_mb() -> float | None:
+    """Read this QA process' resident memory on Windows without extra packages."""
+    if os.name != 'nt':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [('cb', wintypes.DWORD), ('PageFaultCount', wintypes.DWORD),
+                        ('PeakWorkingSetSize', ctypes.c_size_t), ('WorkingSetSize', ctypes.c_size_t),
+                        ('QuotaPeakPagedPoolUsage', ctypes.c_size_t), ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                        ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t), ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                        ('PagefileUsage', ctypes.c_size_t), ('PeakPagefileUsage', ctypes.c_size_t)]
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        psapi = ctypes.WinDLL('psapi', use_last_error=True)
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        handle = kernel32.GetCurrentProcess()
+        if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return round(counters.WorkingSetSize / (1024 * 1024), 1)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _timing_summary(wall: list[float], frames: list[float], restores: list[float] | None = None) -> dict:
+    def percentile(values: list[float], p: float):
+        ordered = sorted(values)
+        if not ordered:
+            return None
+        return round(ordered[min(len(ordered)-1, math.ceil(len(ordered)*p)-1)], 2)
+    result = {'samples': len(wall), 'wallMedianMs': percentile(wall, .5),
+              'wallP95Ms': percentile(wall, .95), 'renderMedianMs': percentile(frames, .5),
+              'renderP95Ms': percentile(frames, .95)}
+    if restores is not None:
+        result['restoreMedianMs'] = percentile(restores, .5)
+        result['restoreP95Ms'] = percentile(restores, .95)
+    return result
+
+
 def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
     if not isinstance(revision_id, str) or not HEX32.fullmatch(revision_id):
         raise ValueError('INVALID_SAVED_REVISION_ID')
@@ -32,6 +80,7 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
     index_path = project_root / 'project.json'
     before = _sha_file(snapshot_path)
     index_before = _sha_file(index_path) if index_path.is_file() else None
+    memory_before = _working_set_mb()
 
     snapshot = RevisionStore(project_root).read_revision(revision_id)
     scene = snapshot['scene']
@@ -67,8 +116,8 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
         heights = [v[1] for v in displayed['voxels']]
         cut_checked = min(heights) < max(heights)
         cut_cells = None
+        level = min(heights) + (max(heights) - min(heights)) // 2 if cut_checked else None
         if cut_checked:
-            level = min(heights) + (max(heights) - min(heights)) // 2
             expected = sum(y <= level for y in heights)
             preview.set_cut_level(level)
             preview.draw()
@@ -79,6 +128,54 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
             preview.draw()
             if preview._visible_count != len(source_cells):
                 raise RuntimeError('SAVED_NATIVE_CUT_RESTORE_FAILED')
+        backend = preview.renderer_diagnostics()
+        views_order = ('正面', '背面', '左側', '右側', '上面', '斜め')
+        measurements = {'cameraRotation': ([], [], []), 'zoom': ([], [], None),
+                        'pan': ([], [], []), 'sectionToggle': ([], [], [])}
+        pan_pixel_change_verified = False
+        from types import SimpleNamespace
+        for index in range(12):
+            wall, frames, restores = measurements['cameraRotation']
+            tick = time.perf_counter()
+            preview._start_rotate(SimpleNamespace(x=100, y=80, state=0))
+            preview._drag_to(SimpleNamespace(x=120 + index, y=90 + index))
+            preview.draw(); frames.append(preview._last_frame_ms.get('total', 0.0))
+            preview._end_drag(); preview.draw(); restores.append(preview._last_frame_ms.get('total', 0.0))
+            wall.append((time.perf_counter()-tick)*1000)
+            preview.set_view(views_order[index % len(views_order)])
+
+            wall, frames, _ = measurements['zoom']
+            tick = time.perf_counter()
+            preview._zoom_at(1.04, (preview._photo_size[0]//2, preview._photo_size[1]//2))
+            preview.draw(); frames.append(preview._last_frame_ms.get('total', 0.0))
+            wall.append((time.perf_counter()-tick)*1000)
+
+            wall, frames, restores = measurements['pan']
+            tick = time.perf_counter()
+            pan_before = _image_signature(preview) if index == 0 else None
+            preview._start_pan(SimpleNamespace(x=100, y=80, state=0))
+            preview._drag_to(SimpleNamespace(x=111 + index, y=91 + index))
+            preview.draw(); frames.append(preview._last_frame_ms.get('total', 0.0))
+            if index == 0:
+                pan_pixel_change_verified = _image_signature(preview) != pan_before
+                if not pan_pixel_change_verified:
+                    raise RuntimeError('SAVED_NATIVE_PAN_PIXELS_UNCHANGED')
+            preview._end_drag(); preview.draw(); restores.append(preview._last_frame_ms.get('total', 0.0))
+            wall.append((time.perf_counter()-tick)*1000)
+
+            if cut_checked:
+                wall, frames, restores = measurements['sectionToggle']
+                tick = time.perf_counter()
+                preview.set_cut_level(level); preview.draw()
+                frames.append(preview._last_frame_ms.get('total', 0.0))
+                preview.set_cut_level(None); preview.draw()
+                restores.append(preview._last_frame_ms.get('total', 0.0))
+                wall.append((time.perf_counter()-tick)*1000)
+        per_action = {name: _timing_summary(*values) for name, values in measurements.items()}
+        idle_samples = len(preview._frame_ms)
+        root.after(120, root.quit)
+        root.mainloop()
+        idle_render_frames = len(preview._frame_ms) - idle_samples
         timings = preview.render_statistics()
         viewport = list(preview._rendered_size)
     finally:
@@ -103,11 +200,16 @@ def inspect_saved_revision(project_root: Path, revision_id: str) -> dict:
         'sectionCells': cut_cells,
         'framebuffer': viewport,
         'renderTimings': timings,
+        'interactionTimingsMs': per_action,
+        'panPixelChangeVerified': pan_pixel_change_verified,
+        'idle': {'observationMs': 120, 'renderFrames': idle_render_frames},
+        'workingSetMb': {'beforeScene': memory_before, 'afterInteractions': _working_set_mb()},
+        'rendererDiagnostics': backend,
+        'hardwareGpuIndependentlyVerified': backend['classification'] == 'PHYSICAL_GPU_RENDERER',
         'packagedRuntimeVerified': runtime['packagedRuntimeVerified'],
         'runtimeMode': runtime['mode'],
         'sourceRecompiledWithB143': False,
         'userVisualQualityApproved': False,
-        'hardwareGpuIndependentlyVerified': False,
         'modelRequests': 0,
         'minecraftWorldContacts': 0,
         'worldWrites': 0,

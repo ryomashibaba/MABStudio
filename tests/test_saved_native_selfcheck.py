@@ -40,10 +40,22 @@ def test_saved_revision_real_native_pixels_are_read_only(tmp_path):
     assert result['cells'] == 9
     assert result['sectionChecked'] and result['sectionCells'] < result['cells']
     assert result['cameraPixelChangeVerified']
+    assert result['panPixelChangeVerified']
     assert result['renderTimings']['samples'] >= 4
+    assert result['rendererDiagnostics']['classification'] in {
+        'SOFTWARE_RENDERER', 'PHYSICAL_GPU_RENDERER', 'UNKNOWN_RENDERER'}
+    assert result['hardwareGpuIndependentlyVerified'] == (
+        result['rendererDiagnostics']['classification'] == 'PHYSICAL_GPU_RENDERER')
+    assert result['interactionTimingsMs']['cameraRotation']['samples'] == 12
+    assert result['interactionTimingsMs']['zoom']['samples'] == 12
+    assert result['interactionTimingsMs']['pan']['samples'] == 12
+    assert result['idle']['renderFrames'] == 0
+    assert result['workingSetMb']['afterInteractions'] is None or result['workingSetMb']['afterInteractions'] > 0
+    if os.name == 'nt':
+        assert result['workingSetMb']['beforeScene'] > 0
+        assert result['workingSetMb']['afterInteractions'] > 0
     assert result['revisionAndIndexUnchanged']
     assert not result['sourceRecompiledWithB143']
-    assert not result['hardwareGpuIndependentlyVerified']
     assert result['modelRequests'] == result['worldWrites'] == result['minecraftWorldContacts'] == 0
     assert hashlib.sha256(immutable.read_bytes()).hexdigest() == before_sha
     assert (folder/'project.json').read_bytes() == index_before

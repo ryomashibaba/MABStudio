@@ -30,6 +30,13 @@ $summary = [ordered]@{
     portableZipSourceGui = 'NOT_RUN'
     savedRevisionNative3D = 'NOT_REQUESTED'
     testDoubleGuiAcceptance = 'NOT_RUN'
+    savedRevisionRendererDiagnostics = 'NOT_REQUESTED'
+    savedRevisionInteractionTimingsMs = 'NOT_REQUESTED'
+    savedRevisionIdleFrames = 'NOT_REQUESTED'
+    savedRevisionWorkingSetMb = 'NOT_REQUESTED'
+    hardwareGpuIndependentlyVerified = $false
+    thirdPartyLicenseFilesIncluded = $false
+    previewZipBytes = 0
 }
 $fixture = $null
 try {
@@ -159,7 +166,9 @@ try {
     $release = Join-Path $results 'MABStudio-Windows-Native-Preview.zip'
     [System.IO.Compression.ZipFile]::CreateFromDirectory((Join-Path $work 'dist-native'),$release)
     $summary.previewZip = $release
+    $summary.previewZipBytes = (Get-Item -LiteralPath $release).Length
     $summary.previewZipSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash.ToLowerInvariant()
+    $summary.thirdPartyLicenseFilesIncluded = (Get-ChildItem -LiteralPath (Join-Path $work 'dist-native\MABStudio\THIRD_PARTY_LICENSES') -Recurse -File | Measure-Object).Count -ge 1
 
     # Test the EXACT archive to be delivered, extracted outside the build tree.
     # Building and testing dist-native alone does not prove the portable ZIP.
@@ -229,7 +238,14 @@ try {
         if ($saved.result -ne 'PASS_SAVED_REVISION_NATIVE_RENDER_ONLY' -or
             $saved.revisionId -cne $SavedRevisionId -or !$saved.savedRevisionIntegrityVerified -or
             !$saved.revisionAndIndexUnchanged -or !$saved.cameraPixelChangeVerified -or
+            !$saved.panPixelChangeVerified -or
             !$saved.packagedRuntimeVerified -or $saved.cells -lt 1 -or
+            !$saved.rendererDiagnostics.classification -or
+            $saved.interactionTimingsMs.cameraRotation.samples -ne 12 -or
+            $saved.interactionTimingsMs.zoom.samples -ne 12 -or
+            $saved.interactionTimingsMs.pan.samples -ne 12 -or
+            $saved.idle.renderFrames -ne 0 -or
+            $null -eq $saved.workingSetMb.afterInteractions -or
             $saved.modelRequests -ne 0 -or $saved.worldWrites -ne 0 -or
             $saved.minecraftWorldContacts -ne 0 -or $saved.constructionApproved) {
             throw 'SAVED_NATIVE_REVISION_EVIDENCE_INVALID'
@@ -237,6 +253,11 @@ try {
         $summary.savedRevisionNative3D = 'PASS_EXTRACTED_EXE_READONLY_SAVED_REVISION'
         $summary.savedRevisionCells = $saved.cells
         $summary.savedRevisionId = $SavedRevisionId
+        $summary.savedRevisionRendererDiagnostics = $saved.rendererDiagnostics
+        $summary.savedRevisionInteractionTimingsMs = $saved.interactionTimingsMs
+        $summary.savedRevisionIdleFrames = $saved.idle.renderFrames
+        $summary.savedRevisionWorkingSetMb = $saved.workingSetMb
+        $summary.hardwareGpuIndependentlyVerified = $saved.hardwareGpuIndependentlyVerified
     }
     # Avoid keeping a second large runtime copy after the evidence is saved.
     Remove-Item -LiteralPath $portable -Recurse -Force
