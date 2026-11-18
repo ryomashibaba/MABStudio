@@ -127,6 +127,58 @@ def test_cancel_requested_revision_is_discarded_without_history_write(studio,mon
     assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==output
     assert calls.count('approved draft candidate')==0
     assert 'disabled' in app.cancel_btn.state()
+    assert 'disabled' not in app.generate_btn.state()
+    assert 'disabled' not in app.revise_btn.state()
+
+
+def test_generate_cancel_at_completed_answer_boundary_discards_before_source(studio,monkeypatch):
+    app,calls=studio
+    before=app.history.head()
+    output=(app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    def answer_then_cancel(*args,**kwargs):
+        kwargs['cancel_event'].set()  # response completed just before GUI accepts it
+        return copy.deepcopy(example_library())
+    monkeypatch.setattr(studio_main,'ask_llm',answer_then_cancel)
+    app.prompt.insert('1.0','未来的な建物を作る')
+    app.generate()
+    _complete(app)
+    assert calls==[]  # cancelled before SOURCE verification begins
+    assert app.history.head()['revisionId']==before['revisionId']
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==output
+    assert app.current_snapshot['revisionId']==before['revisionId']
+    assert app.pending_revision is None
+    assert 'キャンセル済み' in app.status.get()
+    assert 'disabled' in app.cancel_btn.state()
+    assert 'disabled' not in app.generate_btn.state()
+
+
+def test_generate_cancel_during_source_verification_discards_result(studio,monkeypatch):
+    app,calls=studio
+    before=app.history.head()
+    output=(app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    entered=threading.Event();release=threading.Event()
+    def slow_bridge(_engine,design):
+        entered.set()
+        release.wait(2)
+        return _scene(design)
+    monkeypatch.setattr(studio_main,'ask_llm',lambda *a,**kw:copy.deepcopy(example_library()))
+    monkeypatch.setattr(studio_main,'run_bridge',slow_bridge)
+    app.prompt.insert('1.0','未来的な建物を作る')
+    app.generate()
+    assert entered.wait(1)
+    app.update()
+    assert 'disabled' not in app.cancel_btn.state()
+    app.cancel_btn.invoke()
+    release.set()
+    _complete(app)
+    assert app.history.head()['revisionId']==before['revisionId']
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==output
+    assert app.current_snapshot['revisionId']==before['revisionId']
+    assert app.pending_revision is None
+    assert 'キャンセル済み' in app.status.get()
+    assert 'disabled' in app.cancel_btn.state()
+    assert 'disabled' not in app.generate_btn.state()
+    assert 'disabled' not in app.revise_btn.state()
 
 
 def test_restart_restore_and_reopen_keeps_append_only_history(studio):

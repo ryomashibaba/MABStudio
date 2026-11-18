@@ -61,6 +61,7 @@ class Studio(tk.Tk):
         self.section_enabled = tk.BooleanVar(value=False)
         self.section_level = tk.IntVar(value=0)
         self.section_axis = tk.StringVar(value='Y')
+        self.section_side = tk.StringVar(value='低い側')
         self.place_xyz = tk.StringVar(value='0 64 0')
         provider_saved, model_saved = read_local_choice(self.manager.root)
         self.llm_provider = tk.StringVar(value=provider_saved)
@@ -103,7 +104,8 @@ class Studio(tk.Tk):
         viewer.pan_x, viewer.pan_y = self.preview.pan_x, self.preview.pan_y
         if hasattr(viewer, 'set_section'):
             viewer.set_section(getattr(self.preview, 'section_axis', 'y'),
-                               getattr(self.preview, 'section_level', self.preview.cut_level))
+                               getattr(self.preview, 'section_level', self.preview.cut_level),
+                               getattr(self.preview, 'section_side', 'low'))
         else:
             viewer.set_cut_level(self.preview.cut_level)
         viewer.draw()
@@ -180,7 +182,9 @@ class Studio(tk.Tk):
             if (viewer.scene is self.preview.scene
                     and getattr(viewer, 'section_axis', 'y') == getattr(self.preview, 'section_axis', 'y')
                     and getattr(viewer, 'section_level', viewer.cut_level) ==
-                        getattr(self.preview, 'section_level', self.preview.cut_level)):
+                        getattr(self.preview, 'section_level', self.preview.cut_level)
+                    and getattr(viewer, 'section_side', 'low') ==
+                        getattr(self.preview, 'section_side', 'low')):
                 return  # Preserve independent popup orbit/zoom during UI updates.
             self._inherit_preview_state(viewer)
         except tk.TclError:
@@ -215,7 +219,8 @@ class Studio(tk.Tk):
             new_view.pan_x, new_view.pan_y = old.pan_x, old.pan_y
             if hasattr(new_view, 'set_section'):
                 new_view.set_section(getattr(old, 'section_axis', 'y'),
-                                     getattr(old, 'section_level', old.cut_level))
+                                     getattr(old, 'section_level', old.cut_level),
+                                     getattr(old, 'section_side', 'low'))
             else:
                 new_view.set_cut_level(old.cut_level)
             # Rendering depends on the *visible* widget size. The old renderer
@@ -440,12 +445,21 @@ class Studio(tk.Tk):
                                              state='readonly', width=4, values=('X', 'Y', 'Z'))
         self.section_axis_box.pack(side='left')
         self.section_axis_box.bind('<<ComboboxSelected>>', lambda _: self._sync_section_controls())
+        ttk.Label(sectionbar, text='残す側').pack(side='left', padx=(8, 3))
+        self.section_side_box = ttk.Combobox(sectionbar, textvariable=self.section_side,
+                                             state='readonly', width=8,
+                                             values=('低い側', '高い側'))
+        self.section_side_box.pack(side='left')
+        self.section_side_box.bind('<<ComboboxSelected>>', lambda _: self._section_changed())
+        self.section_view_btn = ttk.Button(sectionbar, text='断面側を見る',
+                                           command=self._view_section_face)
+        self.section_view_btn.pack(side='left', padx=(5, 0))
         self.section_scale = tk.Scale(sectionbar, from_=0, to=96, orient='horizontal',
                                       variable=self.section_level, showvalue=True, length=175,
                                       resolution=1, bg=c['panel'], highlightthickness=0,
                                       command=lambda _: self._queue_section_change())
         self.section_scale.pack(side='left', padx=(4, 7))
-        ttk.Label(sectionbar, text='指定位置より先を一時的に隠す（SOURCE不変）',
+        ttk.Label(sectionbar, text='表示のみ・SOURCE不変',
                   style='Muted.TLabel').pack(side='left')
         self.section_scale.configure(state='disabled')
         self.caption = tk.StringVar(value='建築のプレビューがここに表示されます')
@@ -746,12 +760,28 @@ class Studio(tk.Tk):
             return
         level = self.section_level.get() if self.section_enabled.get() else None
         axis = self.section_axis.get().lower()
+        side = 'low' if self.section_side.get() == '低い側' else 'high'
         if hasattr(self,'section_scale'):
             self.section_scale.configure(state='normal' if self.section_enabled.get() and self.preview.scene else 'disabled')
         if hasattr(self.preview, 'set_section'):
-            self.preview.set_section(axis, level)
+            self.preview.set_section(axis, level, side)
         else:
             self.preview.set_cut_level(level if axis == 'y' else None)
+
+    def _view_section_face(self):
+        if not self.section_enabled.get() or not self.preview.scene:
+            self.status.set('内部を見るには「断面表示」を有効にしてください。SOURCEと履歴は変更されません。')
+            return
+        axis = self.section_axis.get().lower()
+        side = 'low' if self.section_side.get() == '低い側' else 'high'
+        self.preview.view_section_face(axis, side)
+        if self._large_preview is not None:
+            try:
+                if self._large_preview.winfo_exists():
+                    self._large_preview.view_section_face(axis, side)
+            except tk.TclError:
+                self._large_preview = self._large_preview_window = None
+        self.status.set('表示を断面の正面に合わせました。セル・SOURCE・履歴は変更されません。')
 
     def _sync_section_controls(self):
         # Use the currently displayed scene bounds on the selected axis.

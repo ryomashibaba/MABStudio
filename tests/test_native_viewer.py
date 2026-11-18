@@ -4,6 +4,7 @@ import math
 import os
 import pytest
 from tests.test_gui_review_flow import studio
+from app.preview import visible_section
 
 from app.native_viewer import (Surface, exposed_surfaces, native_mesh_scene,
                                colored_surface, native_dependencies_available,
@@ -50,6 +51,20 @@ def test_vertical_sections_select_axis_without_changing_source():
     assert [p[:3] for p in visible_x]==[[0,0,0],[0,1,0]]
     assert [p[:3] for p in visible_z]==[[0,0,0],[1,0,0],[0,1,0]]
     assert src==before
+
+
+def test_section_can_keep_either_side_of_plane_without_changing_source():
+    src=example()
+    before=copy.deepcopy(src)
+    _,low,_=native_mesh_scene(src,section_axis='x',section_level=0,section_side='low')
+    _,high,_=native_mesh_scene(src,section_axis='x',section_level=0,section_side='high')
+    assert {tuple(p[:3]) for p in low}=={(0,0,0),(0,1,0)}
+    assert {tuple(p[:3]) for p in high}=={(0,0,0),(1,0,0),(0,1,0)}
+    assert src==before
+    assert {tuple(p[:3]) for p in visible_section(src['primitives'],0,'x','low')} == {
+        (0,0,0),(0,1,0)}
+    assert {tuple(p[:3]) for p in visible_section(src['primitives'],0,'x','high')} == {
+        (0,0,0),(1,0,0),(0,1,0)}
 
 
 def test_cavity_hidden_shared_faces_and_one_cell():
@@ -187,11 +202,10 @@ def test_native_popup_uses_same_renderer_and_inherits_camera(studio):
 
 
 @pytest.mark.skipif(os.name!='nt' and not os.getenv('DISPLAY'),reason='Tk display unavailable')
-def test_vertical_section_syncs_between_main_and_large_native_view(studio):
-    if not native_dependencies_available():
-        pytest.skip('VTK and Pillow missing')
+def test_vertical_section_and_cut_face_sync_between_main_and_large_view(studio):
     app,_=studio
-    app.open_gpu_preview()
+    if native_dependencies_available():
+        app.open_gpu_preview()
     source=copy.deepcopy(app.scene)
     app.section_enabled.set(True)
     app.section_axis.set('Y')
@@ -202,16 +216,26 @@ def test_vertical_section_syncs_between_main_and_large_native_view(studio):
     assert app.section_level.get()==mid
     app._section_changed()
     expected=sum(p[2]<=mid for p in app.scene['primitives'])
-    assert app.preview._visible_count==expected
+    if hasattr(app.preview,'_visible_count'):
+        assert app.preview._visible_count==expected
+    else:
+        assert len(visible_section(app.scene['primitives'],mid,'z','low'))==expected
     app.open_large_preview();app.update_idletasks()
     popup=app._large_preview
     assert popup.section_axis=='z'
     assert popup.section_level==mid
+    app.section_side.set('高い側')
+    app._section_changed()
+    assert popup.section_side=='high'
+    app._view_section_face()
+    assert (app.preview.angle,app.preview.elevation)==(math.pi,0.0)
+    assert (popup.angle,popup.elevation)==(math.pi,0.0)
     app.section_axis.set('X')
     app.section_level.set((app.scene['bounds']['minX']+app.scene['bounds']['maxX'])//2)
     app._section_changed()
     assert popup.section_axis=='x'
     assert popup.section_level==app.section_level.get()
+    assert popup.section_side=='high'
     assert app.scene==source
     assert app.history.head()['revisionId']==app.current_snapshot['revisionId']
     app._large_preview_window.destroy()

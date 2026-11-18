@@ -163,12 +163,22 @@ def inspect_saved_revision(project_root: Path, revision_id: str,
         z_bounds = displayed['bounds']
         z_level = z_bounds['minZ'] + (z_bounds['maxZ']-z_bounds['minZ'])//2
         preview.set_view('斜め')
-        preview.set_section('z', z_level)
+        preview.set_section('z', z_level, 'low')
         preview.draw()
         z_section_cells = sum(v[2] <= z_level for v in displayed['voxels'])
         if preview._visible_count != z_section_cells or z_section_cells <= 0:
             raise RuntimeError('SAVED_NATIVE_Z_SECTION_CELL_COUNT_MISMATCH')
         capture('after-z-interior-section')
+        preview.view_section_face('z', 'low')
+        preview.draw()
+        capture('after-z-interior-facing-section')
+        preview.set_section('z', z_level, 'high')
+        preview.view_section_face('z', 'high')
+        preview.draw()
+        z_reverse_cells = sum(v[2] >= z_level for v in displayed['voxels'])
+        if preview._visible_count != z_reverse_cells or z_reverse_cells <= 0:
+            raise RuntimeError('SAVED_NATIVE_Z_REVERSE_SECTION_CELL_COUNT_MISMATCH')
+        capture('after-z-reverse-interior-section')
         x_bounds = displayed['bounds']
         x_level = x_bounds['minX'] + (x_bounds['maxX']-x_bounds['minX'])//2
         preview.set_section('x', x_level)
@@ -247,7 +257,7 @@ def inspect_saved_revision(project_root: Path, revision_id: str,
         'sectionChecked': cut_checked,
         'sectionCells': cut_cells,
         'verticalSections': {'xCells': x_section_cells, 'zCells': z_section_cells,
-                             'sourceUnchanged': True},
+                             'zReverseCells': z_reverse_cells, 'sourceUnchanged': True},
         'screenshots': screenshots,
         'framebuffer': viewport,
         'renderTimings': timings,

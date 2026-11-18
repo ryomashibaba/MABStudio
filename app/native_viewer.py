@@ -143,13 +143,17 @@ def material_boundary_segments(voxels: list[list[int]]) -> list[tuple]:
 
 
 def native_mesh_scene(scene: dict, cut_level: int | None = None,
-                      section_axis: str = 'y', section_level: int | None = None):
+                      section_axis: str = 'y', section_level: int | None = None,
+                      section_side: str = 'low'):
     """Enforce inert, bounded display input before any rendering operation."""
     if section_level is None and cut_level is not None:
         section_axis, section_level = 'y', cut_level
     if section_axis not in ('x', 'y', 'z'):
         raise NativeViewerError('NATIVE_3D_SECTION_AXIS_INVALID')
-    validated = compact_display_data(scene, section_level if section_axis == 'y' else None)
+    if section_side not in ('low', 'high'):
+        raise NativeViewerError('NATIVE_3D_SECTION_SIDE_INVALID')
+    # Validate the uncut display source once; apply either half-space below.
+    validated = compact_display_data(scene)
     voxels = validated['voxels']
     coordinate = {'x': 0, 'y': 1, 'z': 2}[section_axis]
     if section_level is not None:
@@ -158,7 +162,12 @@ def native_mesh_scene(scene: dict, cut_level: int | None = None,
                 validated['bounds']['min'+bounds_key]-1 <= section_level <=
                 validated['bounds']['max'+bounds_key]):
             raise NativeViewerError('NATIVE_3D_SECTION_LEVEL_INVALID')
-    visible = [p for p in voxels if section_level is None or p[coordinate] <= section_level]
+    if section_level is None:
+        visible = voxels
+    elif section_side == 'low':
+        visible = [p for p in voxels if p[coordinate] <= section_level]
+    else:
+        visible = [p for p in voxels if p[coordinate] >= section_level]
     return validated, visible, exposed_surfaces(visible) if visible else []
 
 
@@ -220,6 +229,7 @@ class NativeVoxelPreview(tk.Frame):
         self.cut_level = None
         self.section_axis = 'y'
         self.section_level = None
+        self.section_side = 'low'
         self.angle, self.elevation = self.VIEWS['斜め']
         self.zoom = 1.0
         self.pan_x = self.pan_y = 0.0
@@ -369,19 +379,41 @@ class NativeVoxelPreview(tk.Frame):
     def set_cut_level(self, level):
         self.set_section('y', level)
 
-    def set_section(self, axis, level):
+    def set_section(self, axis, level, side='low'):
         axis = str(axis).lower()
         if axis not in ('x', 'y', 'z'):
             raise ValueError('Section axis must be x, y or z')
+        side = str(side).lower()
+        if side not in ('low', 'high'):
+            raise ValueError('Section side must be low or high')
         if level is not None and type(level) is not int:
             raise ValueError('Section level must be int or None')
-        if self.section_axis == axis and self.section_level == level:
+        if (self.section_axis == axis and self.section_level == level
+                and self.section_side == side):
             return
-        self.section_axis, self.section_level = axis, level
+        self.section_axis, self.section_level, self.section_side = axis, level, side
         self.cut_level = level if axis == 'y' else None
         self._rebuild()
         if callable(self.on_scene_changed):
             self.on_scene_changed()
+
+    def view_section_face(self, axis=None, side=None):
+        """Face the newly exposed cut surface without changing SOURCE or section."""
+        axis = str(axis or self.section_axis).lower()
+        side = str(side or self.section_side).lower()
+        if axis not in ('x', 'y', 'z') or side not in ('low', 'high'):
+            raise ValueError('Invalid section view direction')
+        positive = side == 'low'
+        if axis == 'z':
+            self.angle, self.elevation = (0.0 if positive else math.pi), 0.0
+        elif axis == 'x':
+            self.angle, self.elevation = (math.pi / 2 if positive else -math.pi / 2), 0.0
+        else:
+            self.angle, self.elevation = 0.0, math.radians(89.5 if positive else -89.5)
+        self.zoom = 1.0
+        self.pan_x = self.pan_y = 0.0
+        self._end_drag()
+        self.draw()
 
     def show(self, scene):
         self.scene = scene
@@ -421,7 +453,8 @@ class NativeVoxelPreview(tk.Frame):
             return
         try:
             data, visible, faces = native_mesh_scene(
-                self.scene, section_axis=self.section_axis, section_level=self.section_level)
+                self.scene, section_axis=self.section_axis, section_level=self.section_level,
+                section_side=self.section_side)
         except (GPUViewerError, NativeViewerError) as exc:
             self._photo = None
             self._image.configure(text=f'3D表示を安全に停止しました: {exc}', fg='#ecbec6',

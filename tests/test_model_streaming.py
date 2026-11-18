@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 import threading
 import time
 import pytest
@@ -65,21 +66,57 @@ def test_sse_assembles_chunks_without_reasoning_content(monkeypatch):
 def test_cancel_closes_local_stream_and_never_retries(monkeypatch):
     token=threading.Event()
     result=[]
-    with fake_lm_stream('stall') as (url, seen):
-        monkeypatch.setattr(core,'LM_STUDIO_BASE',url)
-        worker=threading.Thread(target=lambda: _capture_cancel(result,token),daemon=True)
-        worker.start()
-        time.sleep(.12)
-        token.set()
-        worker.join(timeout=2)
-        assert not worker.is_alive()
-        assert len(seen)==1
-        assert len(result)==1 and isinstance(result[0],core.ModelCancelled)
+    entered=threading.Event();opened=[]
+    class FakeSocket:
+        def settimeout(self,_): pass
+    class Response:
+        headers={'Content-Type':'text/event-stream'}
+        fp=type('FP',(),{'raw':type('Raw',(),{'_sock':FakeSocket()})()})()
+        closed=False
+        def __enter__(self): return self
+        def __exit__(self,*_): self.closed=True
+        def readline(self,_limit):
+            entered.set()
+            token.wait(2)
+            raise socket.timeout('test double waits for cancellation')
+    response=Response()
+    def open_once(req,timeout):
+        opened.append(req.full_url)
+        return response
+    monkeypatch.setattr(core,'LOCAL_HTTP',type('FakeTransport',(),{
+        'open':staticmethod(open_once)})())
+    worker=threading.Thread(target=lambda:_capture_stream_cancel(result,token),daemon=True)
+    worker.start()
+    assert entered.wait(1),repr(result)
+    token.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert len(opened)==1
+    assert response.closed
+    assert len(result)==1 and isinstance(result[0],core.ModelCancelled)
+
+
+def test_pre_cancelled_request_never_posts(monkeypatch):
+    token=threading.Event();token.set()
+    posts=[]
+    monkeypatch.setattr(core,'LOCAL_HTTP',type('NoNetwork',(),{
+        'open':staticmethod(lambda *a,**k: posts.append((a,k)))})())
+    with pytest.raises(core.ModelCancelled):
+        core.ask_llm('LM Studio','gemma-test','建築を作る',cancel_event=token)
+    assert posts==[]
 
 
 def _capture_cancel(result, token):
     try:
         core.ask_llm('LM Studio','gemma-test','建築を作る',cancel_event=token)
+    except Exception as exc:
+        result.append(exc)
+
+
+def _capture_stream_cancel(result,token):
+    try:
+        core._model_response('http://127.0.0.1:1234/test',{'stream':True},180,
+                            cancel_event=token)
     except Exception as exc:
         result.append(exc)
 

@@ -11,7 +11,8 @@ def shade(color: str, factor: float) -> str:
     return '#%02x%02x%02x' % tuple(max(0, min(255, round(c*factor))) for c in rgb)
 
 
-def visible_section(points: list, max_y: int | None, axis: str = 'y') -> list:
+def visible_section(points: list, max_y: int | None, axis: str = 'y',
+                    side: str = 'low') -> list:
     """Display-only cross section, preserving original SOURCE primitives verbatim.
 
     A newly exposed face at the slice boundary is an *illustrative section face*,
@@ -19,11 +20,16 @@ def visible_section(points: list, max_y: int | None, axis: str = 'y') -> list:
     """
     if axis not in ('x', 'y', 'z'):
         raise ValueError('Section axis must be x, y or z')
+    if side not in ('low', 'high'):
+        raise ValueError('Section side must be low or high')
     if max_y is None:
         return points
     if type(max_y) is not int:
         raise ValueError('Section limit must be an integer or None')
-    return [p for p in points if p[{'x': 0, 'y': 1, 'z': 2}[axis]] <= max_y]
+    coordinate = {'x': 0, 'y': 1, 'z': 2}[axis]
+    if side == 'low':
+        return [p for p in points if p[coordinate] <= max_y]
+    return [p for p in points if p[coordinate] >= max_y]
 
 
 def greedy_visible_mesh(points, x_face: int, z_face: int) -> list[tuple]:
@@ -253,6 +259,7 @@ class VoxelPreview(tk.Canvas):
         self.cut_level = None  # Visual-only Y upper bound; never modifies the design
         self.section_axis = 'y'
         self.section_level = None
+        self.section_side = 'low'
         self._mesh_cache = {}
         self.on_scene_changed = None
         self.bind('<Configure>', lambda e: self.draw())
@@ -347,20 +354,41 @@ class VoxelPreview(tk.Canvas):
         """Show only cells at/below a Y level without mutating the SOURCE scene."""
         self.set_section('y', max_y)
 
-    def set_section(self, axis: str, level: int | None) -> None:
+    def set_section(self, axis: str, level: int | None, side: str = 'low') -> None:
         axis = str(axis).lower()
         if axis not in ('x', 'y', 'z'):
             raise ValueError('Section axis must be x, y or z')
+        side = str(side).lower()
+        if side not in ('low', 'high'):
+            raise ValueError('Section side must be low or high')
         if level is not None and type(level) is not int:
             raise ValueError('Section level must be integer')
-        if self.section_axis == axis and self.section_level == level:
+        if (self.section_axis == axis and self.section_level == level
+                and self.section_side == side):
             return
-        self.section_axis, self.section_level = axis, level
+        self.section_axis, self.section_level, self.section_side = axis, level, side
         self.cut_level = level if axis == 'y' else None
         self._mesh_cache.clear()
         self.draw()
         if callable(self.on_scene_changed):
             self.on_scene_changed()
+
+    def view_section_face(self, axis=None, side=None):
+        """Face the newly exposed cut surface without changing SOURCE or section."""
+        axis = str(axis or self.section_axis).lower()
+        side = str(side or self.section_side).lower()
+        if axis not in ('x', 'y', 'z') or side not in ('low', 'high'):
+            raise ValueError('Invalid section view direction')
+        positive = side == 'low'
+        if axis == 'z':
+            self.angle, self.elevation = (0.0 if positive else math.pi), 0.0
+        elif axis == 'x':
+            self.angle, self.elevation = (math.pi / 2 if positive else -math.pi / 2), 0.0
+        else:
+            self.angle, self.elevation = 0.0, math.radians(89.5 if positive else -89.5)
+        self.zoom = 1.0
+        self.pan_x = self.pan_y = 0.0
+        self.draw()
 
     def show(self, scene):
         self.scene = scene
@@ -395,7 +423,8 @@ class VoxelPreview(tk.Canvas):
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
         label+=f' | 境界面メッシュ {total_faces:,}面'
         if self.section_level is not None:
-            label+=f' | {self.section_axis.upper()}≤{self.section_level} 断面（仮想切断面）'
+            op = '≤' if self.section_side == 'low' else '≥'
+            label+=f' | {self.section_axis.upper()}{op}{self.section_level} 断面（仮想切断面）'
         if render_mode == 'partial':
             label+='（描画上限・一部省略。GPUで全体を確認）'
         elif render_mode == 'coarse':
@@ -411,7 +440,7 @@ class VoxelPreview(tk.Canvas):
         if not self.scene:
             return
         pts = visible_section(self.scene.get('primitives') or [], self.section_level,
-                              self.section_axis)
+                              self.section_axis, self.section_side)
         palette = self.scene.get('previewPalette', PALETTE)
         if not pts:
             self.delete('all')
@@ -473,7 +502,8 @@ class VoxelPreview(tk.Canvas):
                                     width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}表示セル'
         if self.section_level is not None:
-            label+=f' | {self.section_axis.upper()}≤{self.section_level} 断面（仮想切断面）'
+            op = '≤' if self.section_side == 'low' else '≥'
+            label+=f' | {self.section_axis.upper()}{op}{self.section_level} 断面（仮想切断面）'
         if skipped:
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
         self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
