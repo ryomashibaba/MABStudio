@@ -258,3 +258,64 @@ def test_closing_gui_requests_cancellation_of_active_model(studio):
     app._active_cancel_event = event
     app.destroy()
     assert event.is_set()
+
+
+def test_draft_before_after_preserves_camera_and_section(studio):
+    """A/B comparisons must not lose the user's interior inspection view."""
+    app, _ = studio
+    original = app.scene
+    saved_id = app.history.head()['revisionId']
+    app.prompt.delete('1.0', 'end')
+    app.prompt.insert('1.0', '屋根の材質だけ変更して')
+    app.revise_design()
+    _complete(app)
+    assert app.pending_revision is not None
+    revised = app.pending_revision['scene']
+    assert app.view_mode.get() == '修正案（未承認）'
+    assert app.compare_draft_btn.cget('text') == '元の建築を見る'
+    app.preview.zoom = 2.25
+    app.preview.pan_x = 31.5
+    app.preview.pan_y = -14.0
+    app.preview.angle = 1.1
+    app.section_enabled.set(True)
+    app.section_level.set(1)
+    app._section_changed()
+    baseline = (app.preview.zoom, app.preview.pan_x, app.preview.pan_y,
+                app.preview.angle, app.preview.section_level)
+
+    app.compare_draft_btn.invoke()
+    assert app.view_mode.get() == '建築のみ'
+    assert app.preview.scene['geometrySha256'] == original['geometrySha256']
+    assert app.compare_draft_btn.cget('text') == '修正案を見る'
+    assert (app.preview.zoom, app.preview.pan_x, app.preview.pan_y,
+            app.preview.angle, app.preview.section_level) == baseline
+
+    app.compare_draft_btn.invoke()
+    assert app.preview.scene['geometrySha256'] == revised['geometrySha256']
+    assert app.compare_draft_btn.cget('text') == '元の建築を見る'
+    assert (app.preview.zoom, app.preview.pan_x, app.preview.pan_y,
+            app.preview.angle, app.preview.section_level) == baseline
+
+    # The existing view selector also retains the inspection camera.
+    app.view_mode.set('変更差分')
+    app.view_box.event_generate('<<ComboboxSelected>>')
+    app.update()
+    assert app.preview.scene.get('previewOnly') is True
+    assert (app.preview.zoom, app.preview.pan_x, app.preview.pan_y,
+            app.preview.angle, app.preview.section_level) == baseline
+    assert app.history.head()['revisionId'] == saved_id
+    app.reject_revision()
+    assert 'disabled' in app.compare_draft_btn.state()
+    assert app.history.head()['revisionId'] == saved_id
+
+
+def test_draft_review_controls_fit_on_minimum_window(studio):
+    app, _ = studio
+    app.revise_design()
+    _complete(app)
+    app.geometry('990x690+0+0')
+    app.update()
+    right_edge = app.viewer_host.winfo_rootx() + app.viewer_host.winfo_width()
+    for btn in (app.approve_draft_btn, app.reject_draft_btn, app.compare_draft_btn):
+        assert btn.winfo_ismapped()
+        assert btn.winfo_rootx() + btn.winfo_width() <= right_edge, btn.cget('text')

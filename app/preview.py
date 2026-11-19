@@ -390,11 +390,14 @@ class VoxelPreview(tk.Canvas):
         self.pan_x = self.pan_y = 0.0
         self.draw()
 
-    def show(self, scene):
+    def show(self, scene, *, preserve_camera: bool = False):
         self.scene = scene
         self._mesh_cache.clear()
-        self.zoom = 1.0
-        self.pan_x = self.pan_y = 0.0
+        # Keep the same inspection angle/zoom when comparing an AI draft with
+        # its approved parent. Opening a different building still auto-fits.
+        if not preserve_camera:
+            self.zoom = 1.0
+            self.pan_x = self.pan_y = 0.0
         self.draw()
         if callable(self.on_scene_changed):
             self.on_scene_changed()

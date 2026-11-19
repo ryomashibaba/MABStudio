@@ -400,7 +400,7 @@ class Studio(tk.Tk):
         self.view_box = ttk.Combobox(tools, textvariable=self.view_mode, state='readonly',
                                      width=17, values=('建築のみ', '修正案（未承認）', '変更差分', '地形＋建築'))
         self.view_box.pack(side='left', padx=(0, 7))
-        self.view_box.bind('<<ComboboxSelected>>', lambda _: self._refresh_view())
+        self.view_box.bind('<<ComboboxSelected>>', lambda _: self._refresh_view(preserve_camera=True))
         detail_box = ttk.Combobox(tools, textvariable=self.detail_mode, state='readonly',
                                    width=16, values=tuple(VoxelPreview.DETAIL_LIMITS))
         detail_box.pack(side='left')
@@ -433,6 +433,10 @@ class Studio(tk.Tk):
         self.reject_draft_btn = ttk.Button(self.reviewbar, text='却下',
                                            command=self.reject_revision, state='disabled')
         self.reject_draft_btn.pack(side='left')
+        self.compare_draft_btn = ttk.Button(self.reviewbar, text='元の建築を見る',
+                                            command=self.toggle_draft_comparison,
+                                            style='Quiet.TButton', state='disabled')
+        self.compare_draft_btn.pack(side='left', padx=(9, 0))
         self._reviewbar_visible = False
         self.viewer_host = ttk.Frame(right, style='Panel.TFrame')
         self.viewer_host.pack(fill='both', expand=True)
@@ -765,6 +769,7 @@ class Studio(tk.Tk):
         self.browse_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        self.compare_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
         self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled',
@@ -872,7 +877,23 @@ class Studio(tk.Tk):
             self.section_level.set((low+high)//2)
         self._section_changed()
 
-    def _refresh_view(self):
+    def toggle_draft_comparison(self):
+        """A/B review using the SAME camera and section; no history writes."""
+        if self.pending_revision is None or self.busy:
+            return
+        if self.view_mode.get() == '修正案（未承認）':
+            self.view_mode.set('建築のみ')
+        else:
+            self.view_mode.set('修正案（未承認）')
+        self._refresh_view(preserve_camera=True)
+
+    def _show_view_scene(self, scene, *, preserve_camera: bool):
+        if preserve_camera:
+            self.preview.show(scene, preserve_camera=True)
+        else:
+            self.preview.show(scene)
+
+    def _refresh_view(self, *, preserve_camera: bool = False):
         if not self.scene:
             self.preview.show(None)
             self._sync_section_controls()
@@ -882,23 +903,23 @@ class Studio(tk.Tk):
         active_scene = candidate['scene'] if candidate else self.scene
         active_delta = candidate['delta'] if candidate else self.delta
         if mode == '修正案（未承認）':
-            self.preview.show(active_scene)
+            self._show_view_scene(active_scene, preserve_camera=preserve_camera)
             if candidate is None:
                 self.status.set('未承認の修正案はありません。承認済み設計を表示しています。')
         elif mode == '変更差分':
             if active_delta is None or not any(active_delta['counts'][p] for p in ('added','removed','replaced')):
-                self.preview.show(self.scene)
+                self._show_view_scene(self.scene, preserve_camera=preserve_camera)
                 self.status.set('変更差分がありません。通常モデルを表示します。')
             else:
-                self.preview.show(diff_preview_scene(active_delta, active_scene))
+                self._show_view_scene(diff_preview_scene(active_delta, active_scene), preserve_camera=preserve_camera)
         elif mode == '地形＋建築':
             if self.terrain is None:
-                self.preview.show(self.scene)
+                self._show_view_scene(self.scene, preserve_camera=preserve_camera)
                 self.status.set('地形ブロックは未読取です。.mcworldの読み込みを先に行ってください')
             else:
                 try:
                     merged, self.terrain_report = create_overlay_scene(self.terrain, active_scene, self._coords())
-                    self.preview.show(merged)
+                    self._show_view_scene(merged, preserve_camera=preserve_camera)
                     r=self.terrain_report
                     self.status.set('地形照合（未施工）：既存ブロック重複候補 '+str(r['potentialTerrainIntersections'])+
                                     ' / 確認済み空気 '+str(r['projectedKnownAir'])+
@@ -906,11 +927,14 @@ class Studio(tk.Tk):
                                     ' / 読取範囲外 '+str(r['projectedOutsideSample'])+
                                     ' / 位置を確認できないセル '+str(r['projectedLegacyUnverified']))
                 except StudioError as exc:
-                    self.preview.show(self.scene)
+                    self._show_view_scene(self.scene, preserve_camera=preserve_camera)
                     self.status.set(str(exc))
         else:
-            self.preview.show(self.scene)
+            self._show_view_scene(self.scene, preserve_camera=preserve_camera)
         self._sync_section_controls()
+        if self.pending_revision is not None:
+            self.compare_draft_btn.configure(
+                text='修正案を見る' if mode == '建築のみ' else '元の建築を見る')
 
     def start_education_readonly(self):
         """User-initiated test-world transport. Never performs Minecraft writes."""

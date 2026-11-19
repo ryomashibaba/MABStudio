@@ -421,3 +421,33 @@ def test_focus_loss_after_native_drag_restores_full_quality():
         assert len(scene['primitives']) == 256
     finally:
         root.destroy()
+
+
+@pytest.mark.skipif(os.name != 'nt' and not os.getenv('DISPLAY'), reason='Tk display unavailable')
+def test_native_before_after_preserves_inspection_camera():
+    if not native_dependencies_available():
+        pytest.skip('optional VTK and Pillow not installed')
+    import tkinter as tk
+    root = tk.Tk()
+    root.geometry('650x490')
+    try:
+        viewer = NativeVoxelPreview(root)
+        viewer.pack(fill='both', expand=True)
+        root.update()
+        before = {'primitives': [[x, y, z, 0] for x in range(3) for y in range(3) for z in range(3)],
+                  'previewPalette': ['#809eaf']}
+        after = {'primitives': [[x, y, z, 0] for x in range(4) for y in range(3) for z in range(3)],
+                 'previewPalette': ['#809eaf']}
+        viewer.show(before)
+        viewer.zoom, viewer.pan_x, viewer.pan_y = 1.8, 37.0, -22.0
+        viewer.angle, viewer.elevation = 0.8, 0.3
+        viewer.set_section('y', 1)
+        original = (viewer.zoom, viewer.pan_x, viewer.pan_y,
+                    viewer.angle, viewer.elevation, viewer.section_level)
+        viewer.show(after, preserve_camera=True)
+        assert (viewer.zoom, viewer.pan_x, viewer.pan_y,
+                viewer.angle, viewer.elevation, viewer.section_level) == original
+        viewer.show(before)
+        assert viewer.zoom == 1.0 and viewer.pan_x == viewer.pan_y == 0.0
+    finally:
+        root.destroy()

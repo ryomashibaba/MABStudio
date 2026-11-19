@@ -415,10 +415,14 @@ class NativeVoxelPreview(tk.Frame):
         self._end_drag()
         self.draw()
 
-    def show(self, scene):
+    def show(self, scene, *, preserve_camera: bool = False):
         self.scene = scene
-        self.zoom = 1.0
-        self.pan_x = self.pan_y = 0.0
+        # Rebuild the new SOURCE mesh without discarding the user's current
+        # zoom/pan during before/after review. No camera retention across
+        # unrelated building opens unless the caller explicitly opts in.
+        if not preserve_camera:
+            self.zoom = 1.0
+            self.pan_x = self.pan_y = 0.0
         self._rebuild()
         if callable(self.on_scene_changed):
             self.on_scene_changed()
