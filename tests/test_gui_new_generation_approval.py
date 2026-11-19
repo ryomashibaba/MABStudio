@@ -198,3 +198,51 @@ def test_first_ever_building_is_viewable_and_not_saved_until_approval(tmp_path,m
         assert (tmp_path/'outputs'/'latest-design.json').exists()
     finally:
         app.destroy()
+
+
+def test_new_draft_comparison_never_displays_unrelated_approved_building(studio, monkeypatch):
+    app, _ = studio
+    old = app.history.head()['design']['title']
+    new = _design('いま承認対象の新しい建築')
+    monkeypatch.setattr(studio_main, 'ask_llm', lambda *a, **k: copy.deepcopy(new))
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _, d: _scene(d))
+    app.generate(); _complete(app)
+    assert old != new['title']
+    for mode in ('変更差分', '地形＋建築'):
+        app.view_mode.set(mode)
+        app._refresh_view()
+        assert app.preview.scene['title'] == new['title']
+        assert app.history.head()['design']['title'] == old
+
+
+def test_approval_switches_back_to_actual_candidate_before_history_write(studio, monkeypatch):
+    app, _ = studio
+    old_head = app.history.head()['revisionId']
+    new = _design('誤承認を防止する新案')
+    monkeypatch.setattr(studio_main, 'ask_llm', lambda *a, **k: copy.deepcopy(new))
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _, d: _scene(d))
+    app.generate(); _complete(app)
+    app.compare_draft_btn.invoke()
+    assert app.view_mode.get() == '建築のみ'
+    app.approve_draft_btn.invoke()
+    assert app.history.head()['revisionId'] == old_head
+    assert app.pending_revision is not None
+    assert app.view_mode.get() == '修正案（未承認）'
+    assert app.preview.scene['title'] == new['title']
+    assert 'もう一度' in app.status.get()
+    app.approve_draft_btn.invoke(); _complete(app)
+    assert app.history.head()['design']['title'] == new['title']
+
+
+def test_revision_delta_cannot_be_approved_without_showing_actual_revised_scene(studio):
+    app, _ = studio
+    old_head = app.history.head()['revisionId']
+    app.revise_design(); _complete(app)
+    assert app.pending_revision is not None
+    app.view_mode.set('変更差分')
+    app._refresh_view()
+    app.approve_draft_btn.invoke()
+    assert app.history.head()['revisionId'] == old_head
+    assert app.view_mode.get() == '修正案（未承認）'
+    app.approve_draft_btn.invoke(); _complete(app)
+    assert app.history.head()['revisionId'] != old_head

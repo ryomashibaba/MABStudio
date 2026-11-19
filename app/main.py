@@ -939,14 +939,23 @@ class Studio(tk.Tk):
             if candidate is None:
                 self.status.set('未承認の修正案はありません。承認済み設計を表示しています。')
         elif mode == '変更差分':
-            if active_delta is None or not any(active_delta['counts'][p] for p in ('added','removed','replaced')):
+            if candidate is not None and candidate.get('kind') == 'new':
+                # A new project has no comparable parent. Showing the old
+                # approved building here looks like the NEW candidate and can
+                # lead to approving an unseen design.
+                self._show_view_scene(active_scene, preserve_camera=preserve_camera)
+                self.status.set('新規生成案には比較元がありません。未承認の新しい建築を表示しています。')
+            elif active_delta is None or not any(active_delta['counts'][p] for p in ('added','removed','replaced')):
                 self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
                 self.status.set('変更差分がありません。通常モデルを表示します。')
             else:
                 self._show_view_scene(diff_preview_scene(active_delta, active_scene), preserve_camera=preserve_camera)
         elif mode == '地形＋建築':
             if self.terrain is None:
-                self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
+                # For new drafts, do not fall back to an unrelated previously
+                # approved building when terrain has not yet been imported.
+                unmerged = active_scene if candidate and candidate.get('kind') == 'new' else (self.scene or active_scene)
+                self._show_view_scene(unmerged, preserve_camera=preserve_camera)
                 self.status.set('地形ブロックは未読取です。.mcworldの読み込みを先に行ってください')
             else:
                 try:
@@ -959,7 +968,8 @@ class Studio(tk.Tk):
                                     ' / 読取範囲外 '+str(r['projectedOutsideSample'])+
                                     ' / 位置を確認できないセル '+str(r['projectedLegacyUnverified']))
                 except StudioError as exc:
-                    self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
+                    unmerged = active_scene if candidate and candidate.get('kind') == 'new' else (self.scene or active_scene)
+                    self._show_view_scene(unmerged, preserve_camera=preserve_camera)
                     self.status.set(str(exc))
         else:
             self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
@@ -1551,7 +1561,16 @@ class Studio(tk.Tk):
 
     def approve_revision(self):
         candidate = self.pending_revision
-        if not candidate:
+        if not candidate or self.busy:
+            return
+        # The user may be looking at the original building, an abstract
+        # difference image, or a terrain overlay. One click switches to the
+        # actual candidate first; only a subsequent deliberate click commits.
+        # Normal review already starts on this view, so it needs no extra step.
+        if self.view_mode.get() != '修正案（未承認）':
+            self.view_mode.set('修正案（未承認）')
+            self._refresh_view(preserve_camera=True)
+            self.status.set('承認する建築案を3Dに表示しました。確認してからもう一度「承認」を押してください。')
             return
         engine = self.manager.active_path
         if candidate.get('kind') == 'new':
