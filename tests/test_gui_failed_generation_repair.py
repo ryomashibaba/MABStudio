@@ -147,3 +147,53 @@ def test_cancel_during_explicit_repair_keeps_failed_candidate(studio,monkeypatch
     assert app.history.head()['revisionId']==before
     assert 'キャンセル済み' in app.status.get()
     assert app.repair_generation_btn.winfo_manager()=='pack'
+
+
+def test_new_generation_does_not_erase_repairable_failed_draft_on_model_error(studio, monkeypatch):
+    app, _ = studio
+    prior = {'design': _draft('修正待ちの原案'), 'error': 'B143_BOUNDS'}
+    app.failed_generation = prior
+    app._refresh_buttons()
+    questions = []
+    errors = []
+    monkeypatch.setattr(studio_main.messagebox, 'askyesno',
+                        lambda *a, **kw: questions.append(a[1]) or True)
+    monkeypatch.setattr(studio_main.messagebox, 'showerror',
+                        lambda *a, **kw: errors.append(a))
+    monkeypatch.setattr(studio_main, 'ask_llm',
+                        lambda *a, **kw: (_ for _ in ()).throw(core.StudioError('Ollama offline')))
+    head = app.history.head()['revisionId']
+    app.generate(); _complete(app)
+    assert len(questions) == 1 and '修正待ち' in questions[0]
+    assert errors
+    assert app.failed_generation is prior
+    assert app.history.head()['revisionId'] == head
+    assert app.repair_generation_btn.winfo_manager() == 'pack'
+
+
+def test_replacing_rejected_generation_requires_user_consent(studio, monkeypatch):
+    app, _ = studio
+    old = {'design': _draft('古い不合格案'), 'error': 'B143_BOUNDS'}
+    app.failed_generation = old
+    called = []
+    monkeypatch.setattr(studio_main.messagebox, 'askyesno', lambda *a, **kw: False)
+    monkeypatch.setattr(studio_main, 'ask_llm',
+                        lambda *a, **kw: called.append(True) or _draft('new'))
+    app.generate()
+    assert not app.busy and not called and app.failed_generation is old
+    app.show_sample()
+    assert not app.busy and app.failed_generation is old
+    assert app.history.head() is not None
+
+
+def test_failed_source_is_kept_when_external_import_is_cancelled(studio, monkeypatch):
+    app, _ = studio
+    old = {'design': _draft('古い不合格案'), 'error': 'B143_BOUNDS'}
+    app.failed_generation = old
+    monkeypatch.setattr(studio_main.filedialog, 'askopenfilename',
+                        lambda **kw: 'some-external-source.json')
+    monkeypatch.setattr(studio_main.messagebox, 'askyesno', lambda *a, **kw: False)
+    monkeypatch.setattr(studio_main, 'read_external_b143_source',
+                        lambda *_: (_ for _ in ()).throw(AssertionError('should not load')))
+    app.import_external_v11_source()
+    assert not app.busy and app.failed_generation is old

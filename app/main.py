@@ -1246,6 +1246,20 @@ class Studio(tk.Tk):
         self._start('MAB SOURCEとローカルAIの読み取り診断中',
                     lambda: check_local_setup(self.manager,provider),done)
 
+    def _confirm_replace_failed_generation(self):
+        """Warn only when an explicit new proposal could replace a repairable one.
+
+        Keep the rejected candidate until a *new* candidate is actually shown;
+        provider failures, cancelled requests, and file errors cannot erase it.
+        """
+        if self.failed_generation is None:
+            return True
+        return messagebox.askyesno(
+            '修正待ちのAI案',
+            'B143で不合格になったAI案が修正待ちです。\n'
+            '別の案が生成・読み込みできた場合、この不合格案に戻れなくなります。\n'
+            '新しい案へ進みますか？', parent=self)
+
     def import_external_v11_source(self):
         """Open an external B143 design as a NEW unapproved project proposal.
 
@@ -1268,6 +1282,8 @@ class Studio(tk.Tk):
             expected_head_id = previous['revisionId'] if previous else None
         except (StudioError, OSError, ValueError) as exc:
             messagebox.showerror('履歴保護', '保存履歴を確認できません: ' + str(exc))
+            return
+        if not self._confirm_replace_failed_generation():
             return
         engine_sha = self.manager.active_sha
         def work():
@@ -1311,9 +1327,10 @@ class Studio(tk.Tk):
         except (StudioError, OSError, ValueError) as exc:
             messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないため生成を開始しません: '+str(exc))
             return
-        # Starting another generation explicitly discards the old failed
-        # candidate; it is never a persisted SOURCE revision.
-        self.failed_generation = None
+        # A failed model connection or cancelled replacement must not erase
+        # an already expensive B143-rejected candidate awaiting explicit repair.
+        if not self._confirm_replace_failed_generation():
+            return
         cancel_event = threading.Event()
         def work():
             # An installed-but-idle Ollama model would otherwise auto-load here.
@@ -1451,6 +1468,8 @@ class Studio(tk.Tk):
             expected_head_id = existing['revisionId'] if existing else None
         except (StudioError, OSError, ValueError) as exc:
             messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないためサンプルを開けません: '+str(exc))
+            return
+        if not self._confirm_replace_failed_generation():
             return
         def done(scene):
             # 'サンプルを見る' is preview, not consent to save a new project.
