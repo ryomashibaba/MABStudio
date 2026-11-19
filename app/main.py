@@ -75,12 +75,48 @@ class Studio(tk.Tk):
         self.model = tk.StringVar(value=model_saved)
         self.branch = tk.StringVar(value=self.manager.state.get('tracked_branch', DEFAULT_BRANCH))
         self._make_ui()
+        # The window manager must not silently discard an expensive, unsaved
+        # local-model draft. Plain approved-project exits stay one click.
+        self.protocol('WM_DELETE_WINDOW', self.request_close)
         self.place_xyz.trace_add('write', self._on_anchor_changed)
         self._poll_after = self.after(120, self._poll)
         self._startup_after = self.after(2000, self._startup)
         # Reviewed engine updates are not automatically installable. Do not
         # interrupt users with periodic remote checks; manual check stays available.
         self._check_after = None
+
+    def request_close(self):
+        """Close only after warning about work that exists solely in memory.
+
+        This is the window-manager X path, not a new persistence mechanism:
+        never turn an unapproved draft into a committed SOURCE snapshot.
+        """
+        if self._closed:
+            return
+        # Non-AI workers may be committing/restoring SOURCE history. Do not
+        # interrupt a write in progress or pretend it was cancelled.
+        if self.busy and self._active_cancel_event is None:
+            messagebox.showinfo('処理中',
+                                'SOURCEの確認・保存などを処理中です。完了後に終了してください。',
+                                parent=self)
+            return
+        has_draft = self.pending_revision is not None
+        has_failed = self.failed_generation is not None
+        has_ai_request = self.busy and self._active_cancel_event is not None
+        if has_draft or has_failed or has_ai_request:
+            notes = []
+            if has_draft:
+                notes.append('未承認の建築案は終了すると失われます。')
+            if has_failed:
+                notes.append('検証不合格のAI案も終了すると失われます。')
+            if has_ai_request:
+                notes.append('進行中のAI要求はキャンセルされ、回答は採用されません。')
+            notes.append('承認済みの建築と保存履歴は変更しません。')
+            notes.append('終了しますか？')
+            if not messagebox.askyesno('未保存の作業を破棄して終了',
+                                       '\n'.join(notes), parent=self):
+                return
+        self.destroy()
 
     def destroy(self):
         # Tk.after callbacks must not run after GUI disposal; shutdown an active
@@ -1417,9 +1453,13 @@ class Studio(tk.Tk):
             messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないためサンプルを開けません: '+str(exc))
             return
         def done(scene):
-            self._display_design(doc, scene, 'OFFLINE_SAMPLE', '', 'サンプル / AI未使用',
-                                 expected_head_id=expected_head_id)
-        self._start('本物のMABでサンプル設計をSOURCE検証中',
+            # 'サンプルを見る' is preview, not consent to save a new project.
+            # Reuse the exact B143-verified review/approve flow used by AI
+            # generation; never mutate approved history merely by looking.
+            self._hold_generated_candidate(doc, scene, 'OFFLINE_SAMPLE', '', expected_head_id)
+            self.caption.set('AIなしのサンプル | B143 SOURCE合格 | 未承認・未保存。'
+                             '3Dで確認後、必要な場合だけ承認・保存してください。')
+        self._start('本物のMABでサンプル設計をSOURCE検証中（未承認プレビュー）',
                     lambda: run_bridge(engine, doc), done)
 
     def _sync_preview_outputs(self, design, scene, provider='SAVED_SOURCE', model=''):

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo [MAB Studio] One-time model streaming timeout fix: build and verify a NEW isolated EXE.
+echo [MAB Studio] One-time Studio source update: build and verify an isolated Windows EXE.
 echo Temporary 3D test windows may open and close during Windows QA.
 echo No local AI request or Minecraft world write is performed.
 echo After this update, use OPEN_MAB_STUDIO.bat for normal starts.
@@ -11,7 +11,7 @@ call "%~dp0RUN_WINDOWS_NATIVE_QA.bat"
 set "QA_RESULT=%ERRORLEVEL%"
 if not "%QA_RESULT%"=="0" goto :qa_failed
 echo.
-echo [MAB Studio] Windows QA passed. Opening Studio with the fixed model transport.
+echo [MAB Studio] Windows QA passed. Opening the newly QA-verified Studio.
 set "MAB_STUDIO_NO_PAUSE="
 call "%~dp0OPEN_MAB_STUDIO.bat"
 if errorlevel 1 goto :launch_failed
