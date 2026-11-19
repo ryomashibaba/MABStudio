@@ -50,6 +50,9 @@ def test_existing_launcher_checks_release_without_model_or_world_operations():
     assert 'Get-StudioFileSha256 -Path $archive' in updater
     assert 'RUN_WINDOWS_NATIVE_QA.bat' in updater
     assert 'WINDOWS_QA_RECEIPT_MISSING_FOR_NEW_RELEASE' in updater
+    # The QA batch file's verbose output must not pollute the path returned
+    # by Try-StageUpdate (PowerShell functions return all success output).
+    assert "& (Join-Path $destination 'RUN_WINDOWS_NATIVE_QA.bat') | Out-Host" in updater
     assert "& (Join-Path $launchFrom 'OPEN_MAB_STUDIO.ps1')" in updater
     assert 'START_MAB_STUDIO.bat' not in updater
     assert 'Invoke-RestMethod' not in updater and 'WorldWrite' not in updater

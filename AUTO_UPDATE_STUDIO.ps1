@@ -145,7 +145,10 @@ function Try-StageUpdate {
     $fingerprint = Get-StudioSourceFingerprint -Root $destination
     Write-Host ('[MAB Studio] Verifying new source ' + $sha.Substring(0,12) + ' with Windows QA...')
     $env:MAB_STUDIO_NO_PAUSE = '1'
-    & (Join-Path $destination 'RUN_WINDOWS_NATIVE_QA.bat')
+    # A native .bat emits stdout to PowerShell's success pipeline. If this
+    # output escapes the function, $launchFrom becomes an array of log lines
+    # instead of the accepted source directory. Keep QA visible, not returned.
+    & (Join-Path $destination 'RUN_WINDOWS_NATIVE_QA.bat') | Out-Host
     if ($LASTEXITCODE -ne 0) {
         [ordered]@{releaseSha=$sha;failedAt=(Get-Date).ToUniversalTime().ToString('o')} |
             ConvertTo-Json | Set-Content -LiteralPath $failedPath -Encoding UTF8
