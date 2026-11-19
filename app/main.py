@@ -24,7 +24,7 @@ from app.project_io import export_verified_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
-from app.revisions import RevisionStore, compare_scenes, diff_preview_scene
+from app.revisions import RevisionStore, compare_scenes, diff_preview_scene, describe_design_changes
 from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_scene
 
 
@@ -1312,8 +1312,15 @@ class Studio(tk.Tk):
             self.view_mode.set('修正案（未承認）')
             self._refresh_view()
             counts = delta['counts']
-            self.caption.set(f'未承認のAI修正案：追加{counts["added"]} / 削除{counts["removed"]} / '
-                             f'交換{counts["replaced"]}  |  3Dを確認して承認または却下（未施工）')
+            changes = describe_design_changes(original, revised)
+            # Architectural fitness is still a human 3D review decision.
+            # Do not confuse changed design declarations with valid entrances,
+            # stairs, or attractive geometry (B143 only verifies SOURCE).
+            geometry_note = ('3Dセルの変化なし' if not any(counts[k] for k in
+                             ('added', 'removed', 'replaced')) else
+                             f'セル追加{counts["added"]} / 削除{counts["removed"]} / 交換{counts["replaced"]}')
+            self.caption.set(f'修正内容：{changes} | {geometry_note} | '
+                             '3Dと動線を確認して承認・却下（未施工）')
             self.status.set('修正案の検証に成功しました。承認前の設計履歴は未変更です。')
         self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done,
                     cancel_event=cancel_event)

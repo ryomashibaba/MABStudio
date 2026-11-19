@@ -78,6 +78,51 @@ def compare_scenes(old: dict, new: dict) -> dict:
     }
 
 
+def describe_design_changes(old: dict, new: dict, *, max_items: int = 3) -> str:
+    """A small, factual, human-readable review aid for SOURCE-verified drafts.
+
+    This compares the model's design declarations, NOT architectural fitness
+    or compiled geometry. `compare_scenes` remains the SOURCE delta authority.
+    """
+    if not 1 <= max_items <= 20:
+        raise ValueError('max_items must be between 1 and 20')
+    before = {e['id']: e for e in old['elements']}
+    after = {e['id']: e for e in new['elements']}
+    notes = []
+    names = {'material': '材質', 'origin': '位置', 'size': '大きさ',
+             'mode': '追加・切抜', 'shape': '形', 'shell': '厚み'}
+    for element_id in sorted(before.keys() | after.keys()):
+        # A generated id is untrusted text: cap it before showing in the GUI.
+        label = str(element_id).replace('\n', ' ')[:32]
+        if element_id not in before:
+            notes.append(f'{label}を追加')
+        elif element_id not in after:
+            notes.append(f'{label}を削除')
+        elif before[element_id] != after[element_id]:
+            old_part, new_part = before[element_id], after[element_id]
+            keys = sorted(k for k in old_part.keys() | new_part.keys()
+                          if k != 'id' and old_part.get(k) != new_part.get(k))
+            if keys == ['material']:
+                material_before = str(old_part.get('material', 'なし'))[:20]
+                material_after = str(new_part.get('material', 'なし'))[:20]
+                notes.append(f'{label}の材質 {material_before}→{material_after}')
+            else:
+                changed = '・'.join(names.get(k, str(k)[:16]) for k in keys[:3])
+                if len(keys) > 3:
+                    changed += 'など'
+                notes.append(f'{label}の{changed}を変更')
+    if not notes:
+        if old.get('bounds') != new.get('bounds'):
+            return '建築範囲を変更（設計要素は同じ）'
+        return '設計要素は変更なし（タイトル・説明などの変更を含む場合があります）'
+    result = '、'.join(notes[:max_items])
+    if len(notes) > max_items:
+        result += f'、ほか{len(notes)-max_items}件'
+    if old.get('bounds') != new.get('bounds'):
+        result += '、建築範囲も変更'
+    return result
+
+
 def diff_preview_scene(delta: dict, context_scene: dict | None = None) -> dict | None:
     """Visually overlay changes on an optional muted source model, never a BuildPlan."""
     changed = {(p[0],p[1],p[2]):0 for p in delta['added']}

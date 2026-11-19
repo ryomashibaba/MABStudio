@@ -74,6 +74,10 @@ def test_ai_draft_never_commits_until_explicit_approval(studio):
     app.revise_design()
     _complete(app)
     assert app.pending_revision is not None
+    # A real review must identify the changed design declaration, not just
+    # report a B143 voxel count and invite an uninformed approval.
+    assert '修正内容：' in app.caption.get()
+    assert '3Dと動線を確認' in app.caption.get()
     assert app.history.head()['revisionId']==initial['revisionId']
     assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==original_src
     # A user decides from the full revised building; delta is optional.
