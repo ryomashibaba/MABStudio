@@ -383,7 +383,7 @@ class Studio(tk.Tk):
                                      command=self.show_sample, style='Quiet.TButton')
         self.sample_btn.pack(anchor='w')
         self.import_v11_btn = ttk.Button(
-            self._creation_actions, text='V11のSOURCE JSONを読み込む',
+            self._creation_actions, text='V11のSOURCE/成果物JSONを読み込む',
             command=self.import_external_v11_source, style='Quiet.TButton')
         self.import_v11_btn.pack(anchor='w', pady=(3, 0))
         # Keyboard alternative when Windows display scaling limits visible space.
@@ -1223,7 +1223,7 @@ class Studio(tk.Tk):
             messagebox.showwarning('固定B143未導入', '確認済みB143を導入してから読み込んでください。')
             return
         filename = filedialog.askopenfilename(
-            title='V11のB143設計SOURCE JSONを選ぶ（未承認で3D確認）',
+            title='V11のB143設計またはTRUE_B143_PRODUCT JSONを選ぶ（未承認）',
             filetypes=[('B143 SOURCE JSON', '*.json')])
         if not filename:
             return

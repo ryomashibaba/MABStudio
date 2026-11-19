@@ -28,6 +28,24 @@ def read_external_b143_source(filename: str | Path) -> dict:
         design = json.loads(data.decode('utf-8-sig'))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise StudioError('外部SOURCEがUTF-8の正しいJSONではありません') from exc
+    if isinstance(design, dict) and 'design' in design:
+        # V11 also exports TRUE_B143_PRODUCT.json. Its compiled voxels, source
+        # proof and Minecraft program are untrusted and must NEVER be loaded as
+        # Studio geometry or execution instructions. Extract only the original
+        # design and run the *same* frozen B143 compiler as a standalone JSON.
+        safe_product = (isinstance(design.get('compiled'), dict)
+            and type(design.get('worldWrites')) is int and design['worldWrites'] == 0
+            and type(design.get('worldContacts')) is int and design['worldContacts'] == 0
+            and design.get('readiness') == 'NOT_PREPARED'
+            and design.get('executionAllowed') is False
+            and design.get('constructionApproved') is False
+            and design.get('gates') == ['BLOCKED'] * 9
+            and isinstance(design.get('BuildPlan'), dict)
+            and design['BuildPlan'].get('operations') == [])
+        if not safe_product:
+            raise StudioError('V11成果物に未施工・読取専用の保証情報がありません。'
+                              '設計の抽出を中止しました')
+        design = design['design']
     if not isinstance(design, dict) or design.get('schema') != SCHEMA or design.get('designOnly') is not True:
         raise StudioError('B143設計JSONではありません。V11の計画JSONや検証レシートは読み込めません')
     # A newer V11 compiler supports repeat/staircase. Studio's frozen B143

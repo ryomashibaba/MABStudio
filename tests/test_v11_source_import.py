@@ -17,6 +17,68 @@ def _file(tmp_path, value, name='B143_DESIGN.json'):
     return target
 
 
+
+def _product(design):
+    # V11 TRUE_B143_PRODUCT.json structure, but all compiled data is ignored.
+    return {'design': design, 'compiled': {'primitives': [[999, 999, 999, 9]]},
+            'worldWrites': 0, 'worldContacts': 0, 'readiness': 'NOT_PREPARED',
+            'executionAllowed': False, 'constructionApproved': False,
+            'gates': ['BLOCKED'] * 9, 'BuildPlan': {'operations': []}}
+
+
+def test_accepts_safe_v11_product_without_trusting_compiled_scene(tmp_path):
+    original = example_library()
+    wrapper = _product(copy.deepcopy(original))
+    path = _file(tmp_path, wrapper, name='TRUE_B143_PRODUCT.json')
+    raw = path.read_bytes()
+    result = read_external_b143_source(path)
+    assert result == original
+    assert 'compiled' not in result
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('field,value', [
+    ('worldWrites', 1), ('worldContacts', 1), ('readiness', 'READY'),
+    ('executionAllowed', True), ('constructionApproved', True),
+    ('gates', ['BLOCKED'] * 8 + ['PASS']),
+    ('BuildPlan', {'operations': [{'op': 'setblock'}]}),
+])
+def test_rejects_v11_product_with_any_construction_signal(tmp_path, field, value):
+    wrapper = _product(example_library())
+    wrapper[field] = value
+    with pytest.raises(StudioError, match='未施工'):
+        read_external_b143_source(_file(tmp_path, wrapper))
+
+
+def test_product_cannot_smuggle_new_engine_geometry_or_source_shapes(tmp_path):
+    wrapper = _product(copy.deepcopy(example_library()))
+    wrapper['design']['elements'][0]['repeat'] = {'count': 2, 'offset': [4,0,0]}
+    with pytest.raises(StudioError, match='固定B143に未対応'):
+        read_external_b143_source(_file(tmp_path, wrapper))
+    # Bad/missing canonical designs still reject, even inside a safe wrapper.
+    wrapper['design'] = {'id': 'not-an-engine-source'}
+    with pytest.raises(StudioError, match='B143設計JSONではありません'):
+        read_external_b143_source(_file(tmp_path, wrapper))
+
+
+def test_gui_v11_product_must_remain_unapproved_until_explicit_save(studio, tmp_path, monkeypatch):
+    app, _ = studio
+    before = app.history.head()['revisionId']
+    design = copy.deepcopy(example_library())
+    design['title'] = 'V11 TRUE B143 PRODUCT 提案'
+    source = _file(tmp_path, _product(design), name='TRUE_B143_PRODUCT.json')
+    monkeypatch.setattr(studio_main.filedialog, 'askopenfilename', lambda **kw: str(source))
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _engine, doc: _scene(doc))
+    app.import_v11_btn.invoke()
+    _complete(app)
+    assert app.pending_revision['kind'] == 'new'
+    assert app.history.head()['revisionId'] == before
+    assert app.preview.scene['title'] == design['title']
+    assert app.pending_revision['scene']['primitives'] == _scene(design)['primitives']
+    app.reject_draft_btn.invoke()
+    assert app.history.head()['revisionId'] == before
+
+
 def test_accepts_only_canonical_source_data_without_mutating_file(tmp_path):
     source = _file(tmp_path, example_library())
     original = source.read_bytes()
