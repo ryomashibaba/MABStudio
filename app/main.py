@@ -48,6 +48,9 @@ class Studio(tk.Tk):
         self.current_snapshot = None
         self.delta = None
         self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
+        # SOURCE-rejected AI output is held only in memory for explicit one-shot
+        # repair. Never save or preview it as an approved B143 model.
+        self.failed_generation = None
         self._education_running = False
         self._education_cancel = threading.Event()
         self._active_cancel_event = None
@@ -366,6 +369,10 @@ class Studio(tk.Tk):
         self.generate_btn = ttk.Button(self._creation_actions, text='AIで建築を設計する',
                                        command=self.generate, style='Primary.TButton')
         self.generate_btn.pack(fill='x', pady=(0, 6))
+        self.repair_generation_btn = ttk.Button(
+            self._creation_actions, text='検証不合格のAI案を修正（1回）',
+            command=self.repair_failed_generation)
+        # Only visible when one real generated proposal failed SOURCE validation.
         self.revise_btn = ttk.Button(self._creation_actions, text='この指示で今の建築を修正',
                                      command=self.revise_design, state='disabled')
         self.revise_btn.pack(fill='x', pady=(0, 6))
@@ -648,6 +655,7 @@ class Studio(tk.Tk):
             if problem:
                 self.caption.set('前回の設計は安全に開けませんでした。履歴を変更していません: '+problem)
             elif saved is not None:
+                self.failed_generation = None
                 self.current_snapshot = saved
                 self.design = saved['design']
                 self.scene = compiled
@@ -751,6 +759,7 @@ class Studio(tk.Tk):
             self._poll_after = self.after(120,self._poll)
 
     def _invalidate_scene(self):
+        self.failed_generation = None
         self.scene = None
         self.preview.show(None)
         self._sync_section_controls()
@@ -763,6 +772,14 @@ class Studio(tk.Tk):
 
     def _refresh_buttons(self):
         ready = not self.busy and self.pending_revision is None
+        can_repair = (ready and self.failed_generation is not None
+                      and self.manager.active_path is not None)
+        if can_repair:
+            if not self.repair_generation_btn.winfo_manager():
+                self.repair_generation_btn.pack(fill='x', pady=(0, 6), before=self.revise_btn)
+            self.repair_generation_btn.configure(state='normal')
+        elif self.repair_generation_btn.winfo_manager():
+            self.repair_generation_btn.pack_forget()
         self.revise_btn.configure(state='normal' if self.design and self.manager.active_path and ready else 'disabled')
         self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
@@ -1183,6 +1200,9 @@ class Studio(tk.Tk):
         except (StudioError, OSError, ValueError) as exc:
             messagebox.showerror('建築履歴の保護', '現在の保存履歴を確認できないため生成を開始しません: '+str(exc))
             return
+        # Starting another generation explicitly discards the old failed
+        # candidate; it is never a persisted SOURCE revision.
+        self.failed_generation = None
         cancel_event = threading.Event()
         def work():
             # An installed-but-idle Ollama model would otherwise auto-load here.
@@ -1198,14 +1218,92 @@ class Studio(tk.Tk):
                              cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
-            scene = run_bridge(engine, design)
-            return design, scene
+            try:
+                scene = run_bridge(engine, design)
+            except StudioError as exc:
+                if 'B143_' not in str(exc):
+                    raise  # Engine failures and world-safety refusals aren't AI repair tasks.
+                return 'invalid', design, str(exc)
+            return 'valid', design, scene
         def done(res):
-            design, scene = res
-            self._display_design(design, scene, provider, model, '1回の生成でSOURCE合格',
-                                 expected_head_id=expected_head_id)
+            state, design, result = res
+            if state == 'invalid':
+                self._hold_failed_generation(design, result, prompt, provider, model,
+                                             expected_head_id)
+            else:
+                self._display_design(design, result, provider, model, '1回の生成でSOURCE合格',
+                                     expected_head_id=expected_head_id)
         self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
                     cancel_event=cancel_event)
+
+    def _hold_failed_generation(self, design, error, prompt, provider, model, expected_head_id):
+        """Retain ONLY an invalid AI proposal for one user-triggered repair."""
+        self.failed_generation = {
+            'design': design, 'error': error, 'prompt': prompt,
+            'provider': provider, 'model': model,
+            'engineSha': self.manager.active_sha,
+            'expectedHead': expected_head_id,
+        }
+        self._refresh_buttons()
+        # No scene/history/latest-output changes; avoid false SOURCE PASS.
+        self.caption.set('AI案はB143検証で不合格です（保存・施工していません）。'
+                         '同じ案を修正するには左の「検証不合格のAI案を修正」を押してください。')
+        self.status.set('SOURCE不合格（自動再推論なし）: ' + str(error)[:300])
+
+    def repair_failed_generation(self):
+        """Explicit one-request repair of a SOURCE-rejected *new* design."""
+        candidate = self.failed_generation
+        if self.busy or self.pending_revision is not None or candidate is None:
+            return
+        engine = self.manager.active_path
+        if engine is None or self.manager.active_sha != candidate['engineSha']:
+            messagebox.showerror('修正案を保護', 'B143エンジンが変わりました。古い不合格案は修正できません。')
+            self.failed_generation = None
+            self._refresh_buttons()
+            return
+        try:
+            head = self.history.head()
+            if (head['revisionId'] if head else None) != candidate['expectedHead']:
+                raise StudioError('ほかの操作で保存履歴が更新されました。古い不合格案を破棄します。')
+        except (StudioError, OSError, ValueError) as exc:
+            self.failed_generation = None
+            self._refresh_buttons()
+            messagebox.showerror('修正案を保護', str(exc))
+            return
+        provider, model = candidate['provider'], candidate['model']
+        cancel_event = threading.Event()
+        def work():
+            status = verify_loaded_model(provider, model)
+            repaired = ask_llm(
+                provider, status['inferenceModel'], candidate['prompt'],
+                error=candidate['error'], previous_design=candidate['design'],
+                on_progress=lambda message: self.pending_events.put(
+                    ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
+                cancel_event=cancel_event)
+            if cancel_event.is_set():
+                raise ModelCancelled('修正をキャンセルしました。回答は破棄しました。')
+            try:
+                scene = run_bridge(engine, repaired)
+            except StudioError as exc:
+                if 'B143_' not in str(exc):
+                    raise
+                return 'invalid', repaired, str(exc)
+            return 'valid', repaired, scene
+        def done(res):
+            state, design, result = res
+            if state == 'invalid':
+                # Still invalid: one click performed exactly one inference.
+                # Offer another EXPLICIT click without hidden retries.
+                self._hold_failed_generation(design, result, candidate['prompt'],
+                                             provider, model, candidate['expectedHead'])
+            else:
+                self._display_design(design, result, provider, model,
+                                     '不合格案を明示的に修正してSOURCE合格',
+                                     expected_head_id=candidate['expectedHead'])
+                self.failed_generation = None
+                self._refresh_buttons()
+        self._start('不合格AI案を1回だけ修正しB143検証中（自動再試行なし）',
+                    work, done, cancel_event=cancel_event)
 
     def show_sample(self):
         if self.pending_revision is not None:
@@ -1258,6 +1356,7 @@ class Studio(tk.Tk):
             snapshot = self.history.commit(design, scene, engine_commit=self.manager.active_sha,
                                            operation='new', **commit_options)
         self.current_snapshot = snapshot
+        self.failed_generation = None
         self.delta = delta
         self.scene = scene
         self.design = design
@@ -1399,6 +1498,7 @@ class Studio(tk.Tk):
         if engine is None:
             return
         def done(data):
+            self.failed_generation = None
             self.current_snapshot=data
             self.design=data['design']
             self.scene=data['scene']
@@ -1429,6 +1529,7 @@ class Studio(tk.Tk):
             return old,scene
         def done(data):
             old,scene=data
+            self.failed_generation = None
             self.current_snapshot=old
             self.design=old['design']
             self.scene=scene
@@ -1498,6 +1599,7 @@ class Studio(tk.Tk):
         previous=self.history.head()
         expected=previous['revisionId'] if previous is not None else None
         def done(snapshot):
+            self.failed_generation = None
             self.current_snapshot=snapshot
             self.design=snapshot['design']
             self.scene=snapshot['scene']
