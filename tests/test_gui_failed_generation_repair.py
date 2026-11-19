@@ -1,4 +1,4 @@
-"""Explicit recovery from a genuine B143 SOURCE refusal, never hidden retries.
+"""Bounded automatic recovery plus explicit fallback for genuine B143 refusals.
 
 The local model and compiler are doubles; this is NOT Windows/native AI QA.
 """
@@ -26,7 +26,7 @@ def _draft(title):
     return d
 
 
-def test_failed_generation_repairs_only_after_user_click(studio,monkeypatch):
+def test_invalid_generation_auto_repairs_once_then_requires_approval(studio,monkeypatch):
     app,_=studio
     invalid=_draft('消防分署（座標不合格）')
     fixed=_draft('消防分署（座標修正済）')
@@ -44,17 +44,12 @@ def test_failed_generation_repairs_only_after_user_click(studio,monkeypatch):
     monkeypatch.setattr(studio_main,'run_bridge',bridge)
     app.generate()
     _complete(app)
-    assert len(model_calls)==1
+    assert len(model_calls)==2  # Second request is disclosed beside Design button.
     assert app.history.head()['revisionId']==initial['revisionId']
     assert app.current_snapshot['revisionId']==initial['revisionId']
     assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==outputs
-    assert app.failed_generation['design']['title']==invalid['title']
-    assert app.repair_generation_btn.winfo_manager()=='pack'
-    assert '不合格' in app.caption.get()
-    assert 'disabled' not in app.repair_generation_btn.state()
-    app.repair_generation_btn.invoke()
-    _complete(app)
-    assert len(model_calls)==2
+    assert app.failed_generation is None
+    assert app.repair_generation_btn.winfo_manager()==''
     assert model_calls[1]['previous_design']==invalid
     assert 'B143_OUTSIDE_LOCAL_BOUNDS' in model_calls[1]['error']
     assert 'revision_base' not in model_calls[1]  # Repair invalid new design; no approved revision base.
@@ -81,9 +76,9 @@ def test_second_b143_failure_never_hidden_retries(studio,monkeypatch):
     monkeypatch.setattr(studio_main,'run_bridge',reject)
     head=app.history.head()['revisionId']
     app.generate(); _complete(app)
-    assert len(calls)==1
-    app.repair_generation_btn.invoke(); _complete(app)
     assert len(calls)==2
+    app.repair_generation_btn.invoke(); _complete(app)
+    assert len(calls)==3
     assert app.failed_generation['design']==invalid
     assert app.history.head()['revisionId']==head
     assert app.repair_generation_btn.winfo_manager()=='pack'
@@ -105,6 +100,7 @@ def test_non_source_engine_error_is_not_repairable(studio,monkeypatch):
 
 def test_stale_approved_head_refuses_repair(studio,monkeypatch):
     app,_=studio
+    app.auto_repair_invalid_generation = False  # Explicit fallback path
     invalid=_draft('座標不合格')
     calls=[];errors=[]
     monkeypatch.setattr(studio_main,'ask_llm',lambda *a,**k:(calls.append(k),copy.deepcopy(invalid))[1])
@@ -122,6 +118,8 @@ def test_stale_approved_head_refuses_repair(studio,monkeypatch):
 
 
 def test_cancel_during_explicit_repair_keeps_failed_candidate(studio,monkeypatch):
+    app,_=studio
+    app.auto_repair_invalid_generation = False  # Explicit fallback path
     import threading
     app,_=studio
     invalid=_draft('失敗案')
@@ -197,3 +195,52 @@ def test_failed_source_is_kept_when_external_import_is_cancelled(studio, monkeyp
                         lambda *_: (_ for _ in ()).throw(AssertionError('should not load')))
     app.import_external_v11_source()
     assert not app.busy and app.failed_generation is old
+
+
+def test_auto_repair_transport_failure_retains_original_without_committing(studio, monkeypatch):
+    app, _ = studio
+    invalid = _draft('自動修正前の保護対象')
+    head = app.history.head()['revisionId']
+    output = (app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    calls = []
+    def model(*args, **kw):
+        calls.append(kw)
+        if len(calls) == 2:
+            raise core.ModelTransportError('Ollama通信中断')
+        return copy.deepcopy(invalid)
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda *_: (_ for _ in ()).throw(
+        core.StudioError('B143_OUTSIDE_LOCAL_BOUNDS: roof')))
+    app.generate(); _complete(app)
+    assert len(calls) == 2
+    assert app.failed_generation['design'] == invalid
+    assert '自動修正は完了しませんでした' in app.failed_generation['error']
+    assert app.history.head()['revisionId'] == head
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes() == output
+
+
+def test_automatic_repair_cancellation_does_not_commit(studio, monkeypatch):
+    import threading
+    app, _ = studio
+    invalid = _draft('キャンセルする不合格案')
+    head = app.history.head()['revisionId']
+    entered = threading.Event(); release = threading.Event()
+    calls = []
+    def model(*args, **kw):
+        calls.append(kw)
+        if len(calls) == 2:
+            entered.set()
+            release.wait(3)
+        return copy.deepcopy(invalid)
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda *_: (_ for _ in ()).throw(
+        core.StudioError('B143_OUTSIDE_LOCAL_BOUNDS: roof')))
+    app.generate()
+    assert entered.wait(2)
+    app.update(); app.cancel_btn.invoke()
+    release.set(); _complete(app)
+    assert len(calls) == 2
+    assert app.history.head()['revisionId'] == head
+    assert app.pending_revision is None
+    assert app.failed_generation is None
+    assert 'キャンセル済み' in app.status.get()

@@ -54,6 +54,9 @@ class Studio(tk.Tk):
         # SOURCE-rejected AI output is held only in memory for explicit one-shot
         # repair. Never save or preview it as an approved B143 model.
         self.failed_generation = None
+        # One visible Design click allows at most one sequential AI repair after
+        # a *B143 SOURCE* refusal. Never retry model/transport failures.
+        self.auto_repair_invalid_generation = True
         self._education_running = False
         self._education_cancel = threading.Event()
         self._active_cancel_event = None
@@ -407,7 +410,10 @@ class Studio(tk.Tk):
         self.prompt.insert('1.0', '未来的な4階建てのビルを作って。窓がたくさんあるように。')
         self.generate_btn = ttk.Button(self._creation_actions, text='AIで建築を設計する',
                                        command=self.generate, style='Primary.TButton')
-        self.generate_btn.pack(fill='x', pady=(0, 6))
+        self.generate_btn.pack(fill='x', pady=(0, 3))
+        ttk.Label(self._creation_actions,
+                  text='SOURCE不合格時はAIが1回自動修正（最大2回推論）',
+                  style='Muted.TLabel').pack(anchor='w', pady=(0, 6))
         self.repair_generation_btn = ttk.Button(
             self._creation_actions, text='検証不合格のAI案を修正（1回）',
             command=self.repair_failed_generation)
@@ -1350,8 +1356,39 @@ class Studio(tk.Tk):
                 scene = run_bridge(engine, design)
             except StudioError as exc:
                 if 'B143_' not in str(exc):
-                    raise  # Engine failures and world-safety refusals aren't AI repair tasks.
-                return 'invalid', design, str(exc)
+                    raise  # Do not disguise engine or safety failures as AI defects.
+                error = str(exc)
+                if not self.auto_repair_invalid_generation:
+                    return 'invalid', design, error
+                # Sequential, bounded second request, explicitly disclosed in
+                # the UI. No change to B143, SOURCE, history or Minecraft.
+                self.pending_events.put((
+                    'progress', 'LOCAL_LLM',
+                    '最初の案がSOURCE不合格。AIが元の案を1回だけ自動修正中…',
+                    None, True, cancel_event))
+                try:
+                    corrected = ask_llm(
+                        provider, inference_model, prompt,
+                        error=error, previous_design=design,
+                        on_progress=lambda message: self.pending_events.put(
+                            ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
+                        cancel_event=cancel_event)
+                except ModelCancelled:
+                    raise
+                except StudioError as retry_exc:
+                    # Preserve the original rejected proposal for a future
+                    # explicit repair, not a silent discard or false success.
+                    return ('invalid', design,
+                            error + ' / 自動修正は完了しませんでした: ' + str(retry_exc)[:220])
+                if cancel_event.is_set():
+                    raise ModelCancelled('修正をキャンセルしました。回答を破棄しました。')
+                try:
+                    corrected_scene = run_bridge(engine, corrected)
+                except StudioError as retry_exc:
+                    if 'B143_' not in str(retry_exc):
+                        raise
+                    return 'invalid', corrected, str(retry_exc)
+                return 'valid', corrected, corrected_scene
             return 'valid', design, scene
         def done(res):
             state, design, result = res
@@ -1361,7 +1398,7 @@ class Studio(tk.Tk):
             else:
                 self._hold_generated_candidate(design, result, provider, model,
                                                expected_head_id)
-        self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
+        self._start('ローカルAIで設計・必要なら1回修正・MAB SOURCE検証中',work,done,
                     cancel_event=cancel_event)
 
     def _hold_generated_candidate(self, design, scene, provider, model, expected_head_id):
