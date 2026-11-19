@@ -209,6 +209,11 @@ def test_gui_uses_exact_loaded_instance_not_catalog_key(studio, monkeypatch, ope
     if operation == 'revise':
         assert app.pending_revision is not None
     else:
+        assert app.pending_revision is not None
+        assert app.pending_revision['kind'] == 'new'
+        assert app.pending_revision['design']['title'] == 'approved draft candidate'
+        app.approve_draft_btn.invoke()
+        _complete(app)
         assert app.history.head()['design']['title'] == 'approved draft candidate'
 
 

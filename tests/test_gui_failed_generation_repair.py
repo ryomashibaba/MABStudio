@@ -60,6 +60,12 @@ def test_failed_generation_repairs_only_after_user_click(studio,monkeypatch):
     assert 'revision_base' not in model_calls[1]  # Repair invalid new design; no approved revision base.
     assert app.failed_generation is None
     assert app.repair_generation_btn.winfo_manager()==''
+    assert app.pending_revision is not None
+    assert app.pending_revision['kind']=='new'
+    assert app.history.head()['revisionId']==initial['revisionId']
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes()==outputs
+    app.approve_draft_btn.invoke()
+    _complete(app)
     assert app.history.head()['design']['title']==fixed['title']
     assert app.history.head()['worldWrites']==0
     assert app.history.head()['parentId'] is None

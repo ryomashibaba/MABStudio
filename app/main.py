@@ -47,6 +47,8 @@ class Studio(tk.Tk):
         self.history = RevisionStore(self.manager.root / 'projects')
         self.current_snapshot = None
         self.delta = None
+        # Includes both revisions and newly generated designs. B143 PASS is
+        # not approval: the user must see the 3D building before committing.
         self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
         # SOURCE-rejected AI output is held only in memory for explicit one-shot
         # repair. Never save or preview it as an approved B143 model.
@@ -432,7 +434,8 @@ class Studio(tk.Tk):
         self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
-        ttk.Label(self.reviewbar, text='未承認の修正案（3Dで確認）', style='Section.TLabel').pack(side='left', padx=(0, 12))
+        self.reviewbar_label = ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel')
+        self.reviewbar_label.pack(side='left', padx=(0, 12))
         self.approve_draft_btn = ttk.Button(self.reviewbar, text='修正案を承認',
                                             command=self.approve_revision, state='disabled',
                                             style='Primary.TButton')
@@ -772,6 +775,8 @@ class Studio(tk.Tk):
 
     def _refresh_buttons(self):
         ready = not self.busy and self.pending_revision is None
+        new_draft = (self.pending_revision is not None
+                     and self.pending_revision.get('kind') == 'new')
         can_repair = (ready and self.failed_generation is not None
                       and self.manager.active_path is not None)
         if can_repair:
@@ -780,13 +785,23 @@ class Studio(tk.Tk):
             self.repair_generation_btn.configure(state='normal')
         elif self.repair_generation_btn.winfo_manager():
             self.repair_generation_btn.pack_forget()
-        self.revise_btn.configure(state='normal' if self.design and self.manager.active_path and ready else 'disabled')
+        self.revise_btn.configure(
+            state='normal' if self.manager.active_path and not self.busy and (
+                (self.design and ready) or new_draft) else 'disabled',
+            text='この指示で未承認の生成案を修正' if new_draft else 'この指示で今の建築を修正')
+        self.export_btn.configure(state='normal' if self.scene is not None and ready else 'disabled')
         self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
         self.browse_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.compare_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        if self.pending_revision is not None:
+            self.reviewbar_label.configure(text=('新規案・未保存' if new_draft
+                                                 else '未承認の修正案'))
+            self.approve_draft_btn.configure(text='承認・保存' if new_draft else '修正案を承認')
+            self.compare_draft_btn.configure(
+                state='normal' if not self.busy and self.scene is not None else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
         self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled',
@@ -911,12 +926,12 @@ class Studio(tk.Tk):
             self.preview.show(scene)
 
     def _refresh_view(self, *, preserve_camera: bool = False):
-        if not self.scene:
+        candidate = self.pending_revision
+        if not self.scene and not candidate:
             self.preview.show(None)
             self._sync_section_controls()
             return
         mode = self.view_mode.get()
-        candidate = self.pending_revision
         active_scene = candidate['scene'] if candidate else self.scene
         active_delta = candidate['delta'] if candidate else self.delta
         if mode == '修正案（未承認）':
@@ -925,13 +940,13 @@ class Studio(tk.Tk):
                 self.status.set('未承認の修正案はありません。承認済み設計を表示しています。')
         elif mode == '変更差分':
             if active_delta is None or not any(active_delta['counts'][p] for p in ('added','removed','replaced')):
-                self._show_view_scene(self.scene, preserve_camera=preserve_camera)
+                self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
                 self.status.set('変更差分がありません。通常モデルを表示します。')
             else:
                 self._show_view_scene(diff_preview_scene(active_delta, active_scene), preserve_camera=preserve_camera)
         elif mode == '地形＋建築':
             if self.terrain is None:
-                self._show_view_scene(self.scene, preserve_camera=preserve_camera)
+                self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
                 self.status.set('地形ブロックは未読取です。.mcworldの読み込みを先に行ってください')
             else:
                 try:
@@ -944,10 +959,10 @@ class Studio(tk.Tk):
                                     ' / 読取範囲外 '+str(r['projectedOutsideSample'])+
                                     ' / 位置を確認できないセル '+str(r['projectedLegacyUnverified']))
                 except StudioError as exc:
-                    self._show_view_scene(self.scene, preserve_camera=preserve_camera)
+                    self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
                     self.status.set(str(exc))
         else:
-            self._show_view_scene(self.scene, preserve_camera=preserve_camera)
+            self._show_view_scene(self.scene or active_scene, preserve_camera=preserve_camera)
         self._sync_section_controls()
         if self.pending_revision is not None:
             self.compare_draft_btn.configure(
@@ -1231,10 +1246,35 @@ class Studio(tk.Tk):
                 self._hold_failed_generation(design, result, prompt, provider, model,
                                              expected_head_id)
             else:
-                self._display_design(design, result, provider, model, '1回の生成でSOURCE合格',
-                                     expected_head_id=expected_head_id)
+                self._hold_generated_candidate(design, result, provider, model,
+                                               expected_head_id)
         self._start('ローカルAIで設計し、MAB SOURCEで検証中',work,done,
                     cancel_event=cancel_event)
+
+    def _hold_generated_candidate(self, design, scene, provider, model, expected_head_id):
+        """Present B143-verified new design without silently persisting it.
+
+        Initial buildings and repairs share this explicit approval step.
+        The currently approved building, output files and history stay intact.
+        """
+        head = self.history.head()
+        if (head['revisionId'] if head else None) != expected_head_id:
+            raise StudioError('建築履歴を保護: 別の操作で保存履歴が変わりました。AI生成案は採用しません')
+        self.failed_generation = None
+        self.pending_revision = {
+            'kind': 'new', 'design': design, 'scene': scene, 'delta': None,
+            'engineSha': self.manager.active_sha, 'expectedHead': expected_head_id,
+            'provider': provider, 'model': model,
+        }
+        self.view_mode.set('修正案（未承認）')
+        # This is a different building: fit its bounds rather than inheriting
+        # an unrelated old building's tiny/offscreen camera scale.
+        self._refresh_view()
+        self._refresh_buttons()
+        self.caption.set(f'{scene.get("title", "新しい建築")} | '
+                         f'{scene["stats"]["voxels"]:,}セル | B143 SOURCE合格 | '
+                         '未承認・未保存。3Dと動線を確認し、修正または承認・破棄してください。')
+        self.status.set('AI生成案を3Dに表示しました。承認するまで保存履歴とSOURCE出力は変更されません。')
 
     def _hold_failed_generation(self, design, error, prompt, provider, model, expected_head_id):
         """Retain ONLY an invalid AI proposal for one user-triggered repair."""
@@ -1297,11 +1337,8 @@ class Studio(tk.Tk):
                 self._hold_failed_generation(design, result, candidate['prompt'],
                                              provider, model, candidate['expectedHead'])
             else:
-                self._display_design(design, result, provider, model,
-                                     '不合格案を明示的に修正してSOURCE合格',
-                                     expected_head_id=candidate['expectedHead'])
-                self.failed_generation = None
-                self._refresh_buttons()
+                self._hold_generated_candidate(design, result, provider, model,
+                                               candidate['expectedHead'])
         self._start('不合格AI案を1回だけ修正しB143検証中（自動再試行なし）',
                     work, done, cancel_event=cancel_event)
 
@@ -1373,6 +1410,8 @@ class Studio(tk.Tk):
 
     def revise_design(self):
         if self.pending_revision is not None:
+            if self.pending_revision.get('kind') == 'new':
+                self._revise_unapproved_generation()
             return
         if not self.scene or not self.design or self.current_snapshot is None:
             messagebox.showwarning('修正元なし','まず建築設計を作成してください。')
@@ -1448,11 +1487,97 @@ class Studio(tk.Tk):
         self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done,
                     cancel_event=cancel_event)
 
+    def _revise_unapproved_generation(self):
+        """Allow improving a *new* B143-pass draft before first approval.
+
+        It uses the existing AI revision schema/engine; does not create a
+        second geometry engine or a premature saved revision.
+        """
+        candidate = self.pending_revision
+        if self.busy or candidate is None or candidate.get('kind') != 'new':
+            return
+        engine = self.manager.active_path
+        instruction = self.prompt.get('1.0', 'end').strip()
+        provider, model = self.llm_provider.get(), self.model.get().strip()
+        if not instruction or not model or engine is None:
+            messagebox.showwarning('入力不足', '生成案への修正内容とローカルAIモデルを選択してください。')
+            return
+        if candidate['engineSha'] != self.manager.active_sha:
+            messagebox.showerror('生成案の保護', 'B143エンジンが変更されました。生成案は修正できません。')
+            return
+        try:
+            head = self.history.head()
+            if (head['revisionId'] if head else None) != candidate['expectedHead']:
+                raise StudioError('保存履歴が別の操作で変更されました。生成案を修正できません')
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('生成案の保護', str(exc))
+            return
+        revision_mode = 'delta' if self.fast_revision_mode.get() else 'full'
+        original, original_scene = candidate['design'], candidate['scene']
+        cancel_event = threading.Event()
+        def work():
+            status = verify_loaded_model(provider, model)
+            # Revalidate the draft that is actually visible in 3D, not a
+            # separately loaded approved project or the stale latest output.
+            checked = run_bridge(engine, original)
+            if (checked['geometrySha256'] != original_scene['geometrySha256']
+                    or checked['sourceSha256'] != original_scene['sourceSha256']):
+                raise StudioError('未承認の生成案を同じB143で再現できません')
+            revised = ask_llm(
+                provider, status['inferenceModel'], instruction,
+                revision_base=original, revision_mode=revision_mode,
+                on_progress=lambda msg: self.pending_events.put(
+                    ('progress', 'LOCAL_LLM', msg, None, True, cancel_event)),
+                cancel_event=cancel_event)
+            if cancel_event.is_set():
+                raise ModelCancelled('生成案の修正をキャンセルしました。回答は破棄しました。')
+            scene = run_bridge(engine, revised)
+            return revised, scene
+        def done(res):
+            revised, scene = res
+            if self.pending_revision is not candidate:
+                raise StudioError('生成案が切り替わりました。古いAI応答は破棄しました')
+            candidate['design'] = revised
+            candidate['scene'] = scene
+            candidate['provider'] = provider
+            candidate['model'] = model
+            self.view_mode.set('修正案（未承認）')
+            self._refresh_view(preserve_camera=True)
+            self.caption.set('未承認の生成案を修正：' + describe_design_changes(original, revised)
+                             + ' | 3D・入口・動線を確認して承認・破棄（保存前）')
+            self.status.set('生成案の修正がB143に合格しました。承認済み履歴はまだ変更されていません。')
+        self._start('未承認の生成案を1回修正しB143で検証中（自動再試行なし）',
+                    work, done, cancel_event=cancel_event)
+
     def approve_revision(self):
         candidate = self.pending_revision
         if not candidate:
             return
         engine = self.manager.active_path
+        if candidate.get('kind') == 'new':
+            if engine is None or self.manager.active_sha != candidate['engineSha']:
+                messagebox.showerror('生成案の承認を保留', '使用中のB143エンジンが変わりました。')
+                return
+            def work():
+                # Final B143 verification precedes the first history commit.
+                scene = run_bridge(engine, candidate['design'])
+                if (scene['sourceSha256'] != candidate['scene']['sourceSha256']
+                        or scene['geometrySha256'] != candidate['scene']['geometrySha256']):
+                    raise StudioError('生成案を承認前に再検証できませんでした')
+                return scene
+            def done(scene):
+                # Existing RevisionStore enforces the expected-head lease even
+                # if another process changed the active project mid-request.
+                self._display_design(candidate['design'], scene, candidate['provider'],
+                                     candidate['model'], '利用者が3Dを確認して承認 / 施工なし',
+                                     expected_head_id=candidate['expectedHead'])
+                self.pending_revision = None
+                self.view_mode.set('建築のみ')
+                self._refresh_view()
+                self._refresh_buttons()
+                self.status.set('新しい建築を承認・保存しました。Minecraftワールドは未変更です。')
+            self._start('新規生成案を承認前にSOURCE再検証（ワールド未接続）', work, done)
+            return
         if (engine is None or self.manager.active_sha != candidate['engineSha']
                 or self.current_snapshot is None or self.scene is None
                 or self.current_snapshot['revisionId'] != candidate['parentId']
@@ -1486,12 +1611,14 @@ class Studio(tk.Tk):
     def reject_revision(self):
         if self.pending_revision is None or self.busy:
             return
+        was_new = self.pending_revision.get('kind') == 'new'
         self.pending_revision = None
         self.view_mode.set('建築のみ')
         self._refresh_view()
         self._update_engine_label()
-        self.caption.set('AI修正案を却下しました。承認済みの元設計と履歴を維持しています。')
-        self.status.set('修正案を破棄しました。Minecraftワールドは未変更です。')
+        self.caption.set('AI生成案を破棄しました。保存済み建築と履歴は維持しています。' if was_new else
+                         'AI修正案を却下しました。承認済みの元設計と履歴を維持しています。')
+        self.status.set('未承認案を破棄しました。Minecraftワールドは未変更です。')
 
     def restore_previous(self):
         engine=self.manager.active_path
