@@ -73,8 +73,8 @@ def test_initial_prompt_explains_b143_shell_thickness_constraints():
 def test_initial_prompt_explains_b143_bounds_for_rooftop_shapes():
     guidance=core.INITIAL_GENERATION_GUIDANCE
     assert 'ellipsoidはcenter±radii' in guidance
-    assert 'bounds.heightに余裕' in guidance
-    assert 'はみ出させない' in guidance
+    assert 'bounds.heightはセル数' in guidance
+    assert 'Y=heightを含めない' in guidance
 
 
 def test_initial_prompt_prioritizes_connected_architectural_access():
@@ -83,6 +83,17 @@ def test_initial_prompt_prioritizes_connected_architectural_access():
     assert '外部から入口までの床・段差をつなぐ' in guidance
     assert '床と階段で上下階を接続' in guidance
     assert '装飾より入口・動線・採光を優先' in guidance
+    assert '最大18要素以内' in guidance
+
+
+def test_initial_prompt_limits_small_building_scale_and_solid_obstructions():
+    guidance=core.INITIAL_GENERATION_GUIDANCE
+    assert '幅・奥行12～24、高さ8～18セル程度' in guidance
+    assert '壁厚を貫通' in guidance
+    assert '歩行域を塞ぐ大きな塊にせず' in guidance
+    assert '高さを変えた複数段' in guidance
+    assert 'bounds.heightはセル数' in guidance
+    assert 'Y=heightを含めない' in guidance
     assert '最大18要素以内' in guidance
 
 
