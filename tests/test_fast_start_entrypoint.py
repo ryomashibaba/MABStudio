@@ -14,7 +14,7 @@ def test_fast_start_is_windows_51_plain_ascii_and_does_not_rebuild_or_run_ai():
     assert 'Get-StudioSourceFingerprint -Root $PSScriptRoot' in s
     assert 'FAST_START_RECEIPT.json' in s
     assert 'previewZipSha256' in s
-    assert 'Get-FileHash -Algorithm SHA256' in s
+    assert 'Get-StudioFileSha256 -Path' in s
     assert 'Expand-Archive' in s
     assert 'Start-Process -FilePath $exe' in s
     assert 'CACHED_EXE_INVALID' in s

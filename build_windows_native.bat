@@ -4,7 +4,14 @@ cd /d "%~dp0"
 rem Explicit opt-in: building a native VTK Windows EXE is separate from daily source use.
 rem No global Python upgrades, local LLM activity or Minecraft world modification.
 if not exist ".venv-native\Scripts\python.exe" (
-  py -3.13 -m venv .venv-native || goto :error
+  rem Prefer an installed Python 3.13 executable when the Windows py launcher
+  rem has no registered interpreters (common in managed Windows sessions).
+  python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,13) else 1)" >nul 2>nul
+  if errorlevel 1 (
+    py -3.13 -m venv .venv-native || goto :error
+  ) else (
+    python -m venv .venv-native || goto :error
+  )
 )
 ".venv-native\Scripts\python.exe" -m pip install --disable-pip-version-check "vtk==9.6.2" "Pillow>=10,<13" "pyinstaller" || goto :error
 call prepare_education_readonly.bat || goto :error

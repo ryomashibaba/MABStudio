@@ -71,12 +71,26 @@ try {
         throw 'ISOLATED_STUDIO_SOURCE_FINGERPRINT_MISMATCH'
     }
     Set-Location -LiteralPath $work
-    $summary.stage = 'PINNED_B143_DOWNLOAD'
+    $summary.stage = 'PINNED_B143_SOURCE'
     $engine = Join-Path $work 'verified-engine'
     $js = Join-Path $engine 'source\ai\b143-building-dsl.mjs'
     New-Item -ItemType Directory -Force (Split-Path $js -Parent) | Out-Null
-    $url = 'https://raw.githubusercontent.com/ryomashibaba/MinecraftAIBuilder/' + $summary.sourceCommit + '/source/ai/b143-building-dsl.mjs'
-    Invoke-WebRequest -Uri $url -OutFile $js
+    # Prefer the user's already-installed, pinned Studio engine when it exists.
+    # Do not mutate that engine. A mismatching local file fails closed rather than
+    # silently falling back to network or a different MAB commit.
+    $localEngine = Join-Path (Join-Path (Join-Path $studioDataRoot 'engines') $summary.sourceCommit) 'source\ai\b143-building-dsl.mjs'
+    if (Test-Path -LiteralPath $localEngine -PathType Leaf) {
+        if ((Get-NativeSha256 -Path $localEngine) -cne $summary.sourcePinnedHash) {
+            throw 'LOCAL_PINNED_B143_HASH_MISMATCH'
+        }
+        Copy-Item -LiteralPath $localEngine -Destination $js -Force
+        $summary.b143Source = 'LOCAL_SHA256_VERIFIED_COPY'
+    } else {
+        $summary.stage = 'PINNED_B143_DOWNLOAD'
+        $url = 'https://raw.githubusercontent.com/ryomashibaba/MinecraftAIBuilder/' + $summary.sourceCommit + '/source/ai/b143-building-dsl.mjs'
+        Invoke-WebRequest -Uri $url -OutFile $js
+        $summary.b143Source = 'NETWORK_SHA256_VERIFIED_DOWNLOAD'
+    }
     $digest = Get-NativeSha256 -Path $js
     if ($digest -cne $summary.sourcePinnedHash) { throw 'PINNED_B143_HASH_MISMATCH' }
 

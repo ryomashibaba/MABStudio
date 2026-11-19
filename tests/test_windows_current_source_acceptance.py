@@ -17,7 +17,7 @@ def test_source_fingerprint_shared_by_native_qa_and_real_acceptance():
     assert 'build_windows_native.bat' in helper
     assert 'prepare_education_readonly.bat' in helper
     assert '__pycache__|node_modules' in helper
-    assert 'Get-FileHash -Algorithm SHA256' in helper
+    assert 'Get-StudioFileSha256 -Path' in helper
     assert 'Get-StudioSourceFingerprint -Root $source' in qa
     assert 'ISOLATED_STUDIO_SOURCE_FINGERPRINT_MISMATCH' in qa
     assert "sourceFingerprintSha256 = ''" in qa
