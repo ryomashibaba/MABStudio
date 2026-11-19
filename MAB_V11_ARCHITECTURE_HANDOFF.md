@@ -21,3 +21,13 @@ rechecks the published design through its frozen, SHA-pinned B143; it does not
 flatten `repeat`, `staircase`, `beam`, `torus`, or change the engine. New arrivals
 are previewed only after the user's review action and always remain unapproved
 until explicitly saved. Engine upgrades need a reviewed Studio release.
+
+Producer handoff implementation (Studio-owned transport only): once V11 has
+actually authored a fixed-B143-compatible design, its local producer may call
+`python -m app.v11_publisher --source B143_DESIGN.json` from this Studio source
+environment. The helper discovers the installed, checked B143 and the existing
+sync folder (or the private `v11-inbox`), recompiles through that same engine,
+and atomically publishes `V11_READY_SOURCE.json`. An incompatible V11 design
+is rejected without altering the last published design. This does **not**
+convert newer V11 geometry, approve art, or save a Studio project. No new model
+request or Minecraft world operation occurs.
