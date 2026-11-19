@@ -21,6 +21,7 @@ from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_depe
 from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
+from app.v11_source_import import read_external_b143_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
@@ -381,6 +382,10 @@ class Studio(tk.Tk):
         self.sample_btn = ttk.Button(self._creation_actions, text='AIなしでサンプルを見る',
                                      command=self.show_sample, style='Quiet.TButton')
         self.sample_btn.pack(anchor='w')
+        self.import_v11_btn = ttk.Button(
+            self._creation_actions, text='V11のSOURCE JSONを読み込む',
+            command=self.import_external_v11_source, style='Quiet.TButton')
+        self.import_v11_btn.pack(anchor='w', pady=(3, 0))
         # Keyboard alternative when Windows display scaling limits visible space.
         # ttk.Button.invoke() respects its disabled state, including during AI work.
         self.prompt.bind('<Control-Return>', self._submit_prompt_shortcut)
@@ -791,6 +796,7 @@ class Studio(tk.Tk):
             text='この指示で未承認の生成案を修正' if new_draft else 'この指示で今の建築を修正')
         self.export_btn.configure(state='normal' if self.scene is not None and ready else 'disabled')
         self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
+        self.import_v11_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
         self.browse_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
@@ -1203,6 +1209,50 @@ class Studio(tk.Tk):
             self.status.set('接続診断完了：MAB / Node / ローカルAIのみ。Minecraft未接続。')
         self._start('MAB SOURCEとローカルAIの読み取り診断中',
                     lambda: check_local_setup(self.manager,provider),done)
+
+    def import_external_v11_source(self):
+        """Open an external B143 design as a NEW unapproved project proposal.
+
+        No model inference, conversion, accepted history writes, or world I/O.
+        The frozen SHA-checked B143 is the only geometry compiler.
+        """
+        if self.busy or self.pending_revision is not None:
+            return
+        engine = self.manager.active_path
+        if engine is None:
+            messagebox.showwarning('固定B143未導入', '確認済みB143を導入してから読み込んでください。')
+            return
+        filename = filedialog.askopenfilename(
+            title='V11のB143設計SOURCE JSONを選ぶ（未承認で3D確認）',
+            filetypes=[('B143 SOURCE JSON', '*.json')])
+        if not filename:
+            return
+        try:
+            previous = self.history.head()
+            expected_head_id = previous['revisionId'] if previous else None
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('履歴保護', '保存履歴を確認できません: ' + str(exc))
+            return
+        engine_sha = self.manager.active_sha
+        def work():
+            design = read_external_b143_source(filename)
+            try:
+                scene = run_bridge(engine, design)
+            except StudioError as exc:
+                if 'B143_' in str(exc):
+                    raise StudioError('この外部SOURCEは固定B143で不合格です。'
+                                      '自動変換せず元ファイルを維持しました: ' + str(exc)) from exc
+                raise
+            return design, scene
+        def done(result):
+            if self.manager.active_sha != engine_sha:
+                raise StudioError('B143が読み込み中に変わりました。外部案は破棄しました')
+            design, scene = result
+            self._hold_generated_candidate(design, scene, 'V11_EXTERNAL_SOURCE', '', expected_head_id)
+            self.caption.set('外部B143 SOURCE：' + str(design['title'])[:100]
+                             + ' | 未承認・未保存。3Dで確認後に承認・破棄してください')
+            self.status.set('外部SOURCEを固定B143で検証しました。元ファイル・保存履歴・Minecraftは未変更です。')
+        self._start('外部V11 SOURCEを固定B143で読み込み・3D検証中', work, done)
 
     def generate(self):
         if self.pending_revision is not None:

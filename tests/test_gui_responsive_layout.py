@@ -81,7 +81,7 @@ def test_creation_buttons_stay_inside_panel_on_high_dpi(tmp_path, monkeypatch,
         left = app._creation_actions.master
         top = left.winfo_rooty()
         bottom = top + left.winfo_height()
-        for widget in (app.generate_btn, app.revise_btn, app.sample_btn):
+        for widget in (app.generate_btn, app.revise_btn, app.sample_btn, app.import_v11_btn):
             assert widget.winfo_ismapped()
             assert top <= widget.winfo_rooty()
             assert widget.winfo_rooty() + widget.winfo_height() <= bottom
