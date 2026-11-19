@@ -22,7 +22,7 @@ from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
 from app.v11_source_import import read_external_b143_source
-from app.v11_watch import newest_v11_ready_source
+from app.v11_watch import newest_v11_ready_source, sync_v11_github_ready_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
@@ -90,6 +90,8 @@ class Studio(tk.Tk):
         self._check_after = None
         self._v11_seen_sha = ''
         self._v11_ready = None
+        self._v11_remote_last_check = 0.0
+        self._v11_remote_running = False
         self._v11_watch_after = self.after(8000, self._check_v11_ready_source)
 
     def request_close(self):
@@ -1275,11 +1277,28 @@ class Studio(tk.Tk):
             '別の案が生成・読み込みできた場合、この不合格案に戻れなくなります。\n'
             '新しい案へ進みますか？', parent=self)
 
+    def _refresh_v11_github_feed(self):
+        # Never call GitHub on Tk's UI thread or interfere with local inference.
+        try:
+            sync_v11_github_ready_source(self.manager.root)
+        except (OSError, ValueError, StudioError):
+            pass  # Offline/no compatible publisher is not a Studio failure.
+        finally:
+            self._v11_remote_running = False
+
     def _check_v11_ready_source(self):
         # File discovery only: no model inference, SOURCE compiler or history
         # mutation. A new V11 research commit alone is NOT a compatible release.
         if self._closed:
             return
+        # An explicit GitHub SOURCE publication is separate from unreviewed
+        # research code. A background poll every >=10 minutes never blocks UI.
+        if (not self._v11_remote_running and
+                time.monotonic() - self._v11_remote_last_check >= 600):
+            self._v11_remote_running = True
+            self._v11_remote_last_check = time.monotonic()
+            threading.Thread(target=self._refresh_v11_github_feed,
+                             name='MABStudio-V11-readonly-feed', daemon=True).start()
         try:
             ready = newest_v11_ready_source(self.manager.root, self._v11_seen_sha)
             self._v11_ready = ready

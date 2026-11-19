@@ -426,6 +426,12 @@ release publication and Windows auto-update need an end-to-end user-PC check.
 
 For V11 handoff, the producer publishes only `V11_READY_SOURCE.json` in the
 same synced folder, or locally to `%LOCALAPPDATA%/MABStudio/v11-inbox/`.
+Alternatively, Studio checks the public V11 research branch (about every 10 minutes,
+background only) for an explicitly published
+`studio-handoff/V11_READY_SOURCE.json`. It downloads **JSON only**, verifies
+Git blob integrity, rejects unsupported primitives, and stages the result
+without running remote code or auto-approving. The currently published V11
+research evidence uses `repeat`/`staircase`, so it is NOT a compatible handoff.
 Studio notices compatible B143 designs about every 2 minutes while open;
 **no new V11 research commit is executable by Studio**. The user still reviews
 3D and explicitly approves a new SOURCE before it enters saved history.
