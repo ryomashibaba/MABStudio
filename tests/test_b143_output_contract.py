@@ -77,6 +77,15 @@ def test_initial_prompt_explains_b143_bounds_for_rooftop_shapes():
     assert 'はみ出させない' in guidance
 
 
+def test_initial_prompt_prioritizes_connected_architectural_access():
+    guidance=core.INITIAL_GENERATION_GUIDANCE
+    assert '入口のcutを実際の外壁と交差' in guidance
+    assert '外部から入口までの床・段差をつなぐ' in guidance
+    assert '床と階段で上下階を接続' in guidance
+    assert '装飾より入口・動線・採光を優先' in guidance
+    assert '最大18要素以内' in guidance
+
+
 def test_failure_diagnostics_do_not_record_model_content_or_autofix():
     original={'title':'SECRET_REQUEST', 'elements':[
        {'id':'x','shape':'box','mode':'add','origin':[1,2,3],'size':[4,5,6]},
