@@ -92,6 +92,52 @@ def test_revision_delta_sends_one_post_and_returns_complete_b143_source(monkeypa
     assert not any('Minecraft' in name for name in schema['properties'])
 
 
+@pytest.mark.parametrize('provider', ['Ollama', 'LM Studio'])
+def test_delta_schema_restricts_only_existing_ids_without_new_geometry(monkeypatch, provider):
+    posted = []
+
+    def fake_response(url, payload, timeout, progress, cancel):
+        posted.append(payload)
+        content = json.dumps(_revision_patch())
+        if provider == 'Ollama':
+            return {'done': True, 'done_reason': 'stop', 'message': {'content': content}}
+        return {'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]}
+
+    monkeypatch.setattr(core, '_model_response', fake_response)
+    monkeypatch.setattr(core, '_output_budget', lambda *args: (4000, None))
+    original = copy.deepcopy(DESIGN)
+    result = core.ask_llm(provider, 'test-loaded', '入口を改善', revision_base=original,
+                          revision_mode='delta')
+    assert result['elements'][0]['id'] == original['elements'][0]['id']
+    assert original == DESIGN
+    assert len(posted) == 1
+    schema = (posted[0]['format'] if provider == 'Ollama'
+              else posted[0]['response_format']['json_schema']['schema'])
+    assert schema['properties']['removeIds']['items']['enum'] == ['base']
+    assert all(variant['properties']['id']['enum'] == ['base']
+               for variant in schema['properties']['replace']['items']['anyOf'])
+    assert all('enum' not in variant['properties']['id']
+               for variant in schema['properties']['add']['items']['anyOf'])
+    # The shared schema stays untouched, so other projects/modes do not inherit IDs.
+    assert 'enum' not in core.REVISION_DELTA_SCHEMA['properties']['removeIds']['items']
+
+
+def test_delta_large_approved_design_keeps_bounded_schema_size():
+    many = copy.deepcopy(DESIGN)
+    many['elements'] = [dict(many['elements'][0], id=f'part_{i}')
+                        for i in range(core.MAX_DELTA_CHANGES + 1)]
+    schema = core._revision_delta_output_schema(many)
+    assert 'enum' not in schema['properties']['removeIds']['items']
+    assert 'enum' not in schema['properties']['replace']['items']['anyOf'][0]['properties']['id']
+
+
+def test_delta_rejects_duplicate_base_ids_before_model_request():
+    many = copy.deepcopy(DESIGN)
+    many['elements'] += copy.deepcopy(many['elements'])
+    with pytest.raises(core.StudioError):
+        core._revision_delta_output_schema(many)
+
+
 def test_default_full_source_revision_path_still_available(monkeypatch):
     seen=[]
     def fake_response(url, payload, timeout, progress, cancel):
@@ -105,9 +151,15 @@ def test_default_full_source_revision_path_still_available(monkeypatch):
 
 
 def test_patch_output_requires_full_verified_source_contract(tmp_path):
-    from tests.test_core import fake_engine
+    from tests.test_core import FAKE_MODULE
     result=core.apply_revision_delta(DESIGN,_revision_patch())
-    scene=core.run_bridge(fake_engine(tmp_path/'engine'),result)
+    # Write the test engine bytes directly. Path.write_text translates LF to
+    # CRLF on Windows, which otherwise makes its expected SHA platform-specific.
+    engine=tmp_path/'engine'
+    module=engine/core.ENGINE_FILE
+    module.parent.mkdir(parents=True)
+    module.write_bytes(FAKE_MODULE.encode('utf-8'))
+    scene=core.run_bridge(engine,result)
     assert scene['stats']['voxels'] > 0
     assert scene['BuildPlan']['operations']==[]
 

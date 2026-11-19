@@ -802,6 +802,34 @@ REVISION_DELTA_SCHEMA = {
 }
 
 
+def _revision_delta_output_schema(base: dict) -> dict:
+    """Constrain EXISTING edit targets to their exact approved SOURCE IDs.
+
+    For ordinary <=32-element proposals, the existing transport schema already
+    supports JSON Schema enums. The model may freely name NEW `add` elements,
+    but it must use a real ID for `replace` and `removeIds`. Larger approved
+    designs retain the prior schema to avoid a huge repeated enum grammar;
+    apply_revision_delta always validates the returned IDs independently.
+    """
+    elements = base.get('elements') if isinstance(base, dict) else None
+    if not isinstance(elements, list) or not elements:
+        raise StudioError('軽量修正の元SOURCE要素が不正です')
+    identifiers = [e.get('id') if isinstance(e, dict) else None for e in elements]
+    if (any(not isinstance(i, str) or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,39}', i)
+            for i in identifiers) or len(identifiers) != len(set(identifiers))):
+        raise StudioError('軽量修正の元SOURCE要素IDが不正または重複しています')
+    schema = copy.deepcopy(REVISION_DELTA_SCHEMA)
+    if len(identifiers) <= MAX_DELTA_CHANGES:
+        # The base schema intentionally shares the variant definition between
+        # replace and add. Detach before binding IDs, or new IDs get blocked.
+        schema['properties']['replace']['items'] = copy.deepcopy(
+            schema['properties']['replace']['items'])
+        for variant in schema['properties']['replace']['items']['anyOf']:
+            variant['properties']['id']['enum'] = identifiers
+        schema['properties']['removeIds']['items']['enum'] = identifiers
+    return schema
+
+
 def apply_revision_delta(base: dict, delta: dict) -> dict:
     """Merge an explicitly model-authored edit without inventing any geometry.
 
@@ -1372,7 +1400,7 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                          else _shape_specific_output_schema(max_elements=max_elements,
                                                             compact=False))
     if revision_mode == 'delta':
-        generation_schema = REVISION_DELTA_SCHEMA
+        generation_schema = _revision_delta_output_schema(revision_base)
         system_prompt = ('あなたはB143の変更箇所だけを返すJSON編集器です。'
                          '指定された要素の変更・追加・削除だけを行い、元SOURCE全文を繰り返さない。'
                          '変更のない要素は保持されます。B143に適合する座標を返し、'
