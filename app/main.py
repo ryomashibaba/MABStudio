@@ -22,6 +22,7 @@ from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
 from app.project_io import export_verified_source
 from app.v11_source_import import read_external_b143_source
+from app.v11_watch import newest_v11_ready_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.examples import example_library
@@ -87,6 +88,9 @@ class Studio(tk.Tk):
         # Reviewed engine updates are not automatically installable. Do not
         # interrupt users with periodic remote checks; manual check stays available.
         self._check_after = None
+        self._v11_seen_sha = ''
+        self._v11_ready = None
+        self._v11_watch_after = self.after(8000, self._check_v11_ready_source)
 
     def request_close(self):
         """Close only after warning about work that exists solely in memory.
@@ -132,7 +136,7 @@ class Studio(tk.Tk):
         # this Studio request's socket; never leave a hidden long-running POST.
         if self._active_cancel_event is not None:
             self._active_cancel_event.set()
-        for attr in ('_poll_after','_startup_after','_check_after','_section_after'):
+        for attr in ('_poll_after','_startup_after','_check_after','_section_after','_v11_watch_after'):
             handle=getattr(self,attr,None)
             if handle is not None:
                 try:self.after_cancel(handle)
@@ -362,7 +366,7 @@ class Studio(tk.Tk):
         body.columnconfigure(0, minsize=320, weight=0)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
-        left = ttk.Frame(body, style='Panel.TFrame', padding=(18, 18, 18, 16), width=345)
+        left = ttk.Frame(body, style='Panel.TFrame', padding=(18, 11, 18, 10), width=345)
         right = ttk.Frame(body, style='Panel.TFrame', padding=(14, 14, 14, 13))
         left.grid(row=0, column=0, sticky='nsew', padx=(0, 13))
         left.pack_propagate(False)
@@ -397,7 +401,7 @@ class Studio(tk.Tk):
                                      command=self.unload_selected_model,
                                      style='Quiet.TButton')
         self.unload_btn.pack(anchor='w', pady=(0, 10))
-        ttk.Separator(left).pack(fill='x', pady=(4, 13))
+        ttk.Separator(left).pack(fill='x', pady=(2, 8))
 
         ttk.Label(left, text='どんな建築を作りたい？', style='Section.TLabel').pack(anchor='w')
         ttk.Label(left, text='日本語で自由に指示できます', style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
@@ -406,7 +410,7 @@ class Studio(tk.Tk):
                               padx=12, pady=12, insertbackground=c['ink'],
                               highlightbackground=c['line'], highlightcolor=c['accent'],
                               highlightthickness=1, undo=True)
-        self.prompt.pack(fill='both', expand=True, pady=(0, 13))
+        self.prompt.pack(fill='both', expand=True, pady=(0, 8))
         self.prompt.insert('1.0', '未来的な4階建てのビルを作って。窓がたくさんあるように。')
         self.generate_btn = ttk.Button(self._creation_actions, text='AIで建築を設計する',
                                        command=self.generate, style='Primary.TButton')
@@ -428,6 +432,11 @@ class Studio(tk.Tk):
             self._creation_actions, text='V11のSOURCE/成果物JSONを読み込む',
             command=self.import_external_v11_source, style='Quiet.TButton')
         self.import_v11_btn.pack(anchor='w', pady=(3, 0))
+        self.v11_ready_btn = ttk.Button(
+            self._creation_actions, text='V11の新しい建築案を確認',
+            command=self.import_latest_v11_source, style='Quiet.TButton')
+        # Only appears when a producer has published a compatible SOURCE;
+        # it is never accepted as a saved project without a separate click.
         # Keyboard alternative when Windows display scaling limits visible space.
         # ttk.Button.invoke() respects its disabled state, including during AI work.
         self.prompt.bind('<Control-Return>', self._submit_prompt_shortcut)
@@ -1266,6 +1275,47 @@ class Studio(tk.Tk):
             '別の案が生成・読み込みできた場合、この不合格案に戻れなくなります。\n'
             '新しい案へ進みますか？', parent=self)
 
+    def _check_v11_ready_source(self):
+        # File discovery only: no model inference, SOURCE compiler or history
+        # mutation. A new V11 research commit alone is NOT a compatible release.
+        if self._closed:
+            return
+        try:
+            ready = newest_v11_ready_source(self.manager.root, self._v11_seen_sha)
+            self._v11_ready = ready
+            if ready:
+                self.v11_ready_btn.configure(text='V11の新しい案を確認: ' + ready[2][:18])
+                if not self.v11_ready_btn.winfo_manager():
+                    self.v11_ready_btn.pack(anchor='w', pady=(3, 0))
+            elif self.v11_ready_btn.winfo_manager():
+                self.v11_ready_btn.pack_forget()
+        except (OSError, ValueError):
+            # The GUI continues to work when a sync drive is offline.
+            pass
+        self._v11_watch_after = self.after(120000, self._check_v11_ready_source)
+
+    def import_latest_v11_source(self):
+        ready = self._v11_ready
+        if not ready or self.busy or self.pending_revision is not None:
+            return
+        # If a cloud sync replaced the file after discovery, let the next
+        # poll inspect the new proposal rather than importing unseen bytes.
+        try:
+            import hashlib
+            if hashlib.sha256(ready[0].read_bytes()).hexdigest() != ready[1]:
+                self._v11_ready = None
+                self.v11_ready_btn.pack_forget()
+                return
+        except OSError:
+            self._v11_ready = None
+            self.v11_ready_btn.pack_forget()
+            return
+        def on_loaded():
+            self._v11_seen_sha = ready[1]
+            self._v11_ready = None
+            self.v11_ready_btn.pack_forget()
+        self._import_v11_filename(str(ready[0]), on_imported=on_loaded)
+
     def import_external_v11_source(self):
         """Open an external B143 design as a NEW unapproved project proposal.
 
@@ -1282,7 +1332,15 @@ class Studio(tk.Tk):
             title='V11のB143設計またはTRUE_B143_PRODUCT JSONを選ぶ（未承認）',
             filetypes=[('B143 SOURCE JSON', '*.json')])
         if not filename:
-            return
+            return False
+        return self._import_v11_filename(filename)
+
+    def _import_v11_filename(self, filename, on_imported=None):
+        if self.busy or self.pending_revision is not None:
+            return False
+        engine = self.manager.active_path
+        if engine is None:
+            return False
         try:
             previous = self.history.head()
             expected_head_id = previous['revisionId'] if previous else None
@@ -1310,7 +1368,10 @@ class Studio(tk.Tk):
             self.caption.set('外部B143 SOURCE：' + str(design['title'])[:100]
                              + ' | 未承認・未保存。3Dで確認後に承認・破棄してください')
             self.status.set('外部SOURCEを固定B143で検証しました。元ファイル・保存履歴・Minecraftは未変更です。')
+            if on_imported is not None:
+                on_imported()
         self._start('外部V11 SOURCEを固定B143で読み込み・3D検証中', work, done)
+        return True
 
     def generate(self):
         if self.pending_revision is not None:

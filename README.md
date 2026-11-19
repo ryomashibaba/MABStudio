@@ -403,3 +403,29 @@ After extracting this updated **source** ZIP on Windows, run
 then use `OPEN_MAB_STUDIO.bat` for ordinary launches without rebuilding.
 The update does not automatically run real-model inference.
 The preserved previous EXE is not patched in place.
+
+### Personal automatic update stream (v0.3)
+
+The stable `OPEN_MAB_STUDIO.bat` now invokes `AUTO_UPDATE_STUDIO.ps1`. It first
+checks the user-owned `MABStudio_Work_Handoff_20261118` folder mounted by Google
+Drive for desktop (or the local folder chosen **once** with
+`SET_STUDIO_UPDATE_FOLDER_ONCE.bat`). Without a synced folder the last
+Windows-QA-accepted Studio still opens normally, without an online update.
+
+The publisher uploads `MABStudio_v03_<7-char-SHA>_Windows_Update_Once.zip` and
+then atomically publishes `STUDIO_RELEASE.json` with schema
+`mab-studio-source-release-v1`, `releaseSha` (full git commit),
+`releaseSequence` (increasing integer), `archiveName`, and `archiveSha256`.
+On the *next launch*, the updater checks the local sync copy, SHA-verifies the
+source ZIP, stages it under `%LOCALAPPDATA%/MABStudio/auto-update/sources/`,
+performs the existing isolated Windows QA, and switches the local source pointer
+only after an exact-source PASS. On failure it launches the last accepted EXE.
+No Minecraft world write, saved project overwrite, or real model inference.
+This is a **user-trusted synced-folder feed**, not signed public distribution;
+release publication and Windows auto-update need an end-to-end user-PC check.
+
+For V11 handoff, the producer publishes only `V11_READY_SOURCE.json` in the
+same synced folder, or locally to `%LOCALAPPDATA%/MABStudio/v11-inbox/`.
+Studio notices compatible B143 designs about every 2 minutes while open;
+**no new V11 research commit is executable by Studio**. The user still reviews
+3D and explicitly approves a new SOURCE before it enters saved history.
