@@ -1394,6 +1394,71 @@ def _ollama_qwen3_thinking_can_be_disabled(model: str) -> bool:
     return bool(re.search(r'(?<![A-Za-z0-9])qwen3(?=$|[.:/_-])', model, re.I))
 
 
+def _compact_revision_reference(design: dict) -> str:
+    """Preserve a large B143 draft's *entire* element list in a short AI reference.
+
+    This is input context, never a SOURCE export, compiler, change proposal or
+    saved format. For unexpected fields, use the original lossless JSON rather
+    than hide material or geometry from the model. The exact design object is
+    retained and the verified delta merger still runs against that original.
+    """
+    original = json.dumps(design, ensure_ascii=False, separators=(',', ':'))
+    elements = design.get('elements')
+    if not isinstance(elements, list) or len(elements) <= 32:
+        return original
+    shapes = {
+        'box': ('b', ('origin', 'size')),
+        'ellipsoid': ('e', ('center', 'radii')),
+        'cylinder': ('c', ('origin', 'axis', 'radius', 'length')),
+    }
+    if set(design) != {'schema', 'id', 'title', 'brief', 'bounds', 'elements', 'designOnly'}:
+        return original
+    lines = []
+    for element in elements:
+        if not isinstance(element, dict) or element.get('shape') not in shapes:
+            return original
+        shape, fields = shapes[element['shape']]
+        allowed = {'id', 'shape', 'mode', 'material', 'shell', *fields}
+        if set(element) - allowed or element.get('mode') not in ('add', 'cut'):
+            return original
+        if not isinstance(element.get('id'), str) or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,39}', element['id']):
+            return original
+        mode = '+' if element['mode'] == 'add' else '-'
+        material = element.get('material', '_')
+        if (mode == '+' and material not in B143_JSON_SCHEMA['properties']['elements']['items']['properties']['material']['enum']
+                or mode == '-' and 'material' in element):
+            return original
+        parts = [element['id'], shape, mode, material]
+        for field in fields:
+            value = element.get(field)
+            if isinstance(value, list) and len(value) == 3 and all(type(n) is int for n in value):
+                parts.append(','.join(map(str, value)))
+            elif field == 'axis' and value in ('x', 'y', 'z'):
+                parts.append(value)
+            elif field in ('radius', 'length') and type(value) is int:
+                parts.append(str(value))
+            else:
+                return original
+        if 'shell' in element:
+            if type(element['shell']) is not int:
+                return original
+            parts.append('shell='+str(element['shell']))
+        lines.append('|'.join(parts))
+    # SOURCE array order and original element IDs are preserved in every row.
+    # No original content is mutated or replaced by this representation.
+    return ('AI向け大規模SOURCE参照一覧（要素省略なし。B143保存原本ではない）:\n'
+            '形状 b=box(origin,size), e=ellipsoid(center,radii), '
+            'c=cylinder(origin,axis,radius,length)。\n'
+            '列はID|形状|操作(+ add / - cut)|材質(_ はcut)|形状別の座標と寸法'
+            '|shell=n(記載がある場合のみ)。座標と寸法の3数はX,Y,Z順。'
+            '各行は原SOURCEの要素順、IDは完全一致。\n'
+            'ID='+json.dumps(design['id'], ensure_ascii=False)+'; '
+            'title='+json.dumps(design['title'], ensure_ascii=False)+'; '
+            'brief='+json.dumps(design['brief'], ensure_ascii=False)+'; '
+            'designOnly=true; bounds='+json.dumps(design['bounds'], ensure_ascii=False, separators=(',', ':'))+'\n'
+            + '\n'.join(lines))
+
+
 def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
             previous_design: dict | None = None, timeout: int = 180,
             revision_base: dict | None = None, on_progress=None,
@@ -1436,7 +1501,7 @@ def ask_llm(provider: str, model: str, user_prompt: str, error: str = "",
                     'title/briefを変える場合だけ指定。'
                     '修正後の全要素がboundsに収まるようにする。'
                     'Studioは幾何形状を自動修理しない。\n'
-                    + envelope + '既存設計: ' + prior + '\n修正指示: ' + user_prompt)
+                    + envelope + '既存設計: ' + _compact_revision_reference(revision_base) + '\n修正指示: ' + user_prompt)
         else:
             task = ('【既存の確定設計を修正】以下のB143 JSONを保ち、変更の必要な部分だけ修正し、'
                     '省略のないB143 JSON全体を返してください。Minecraftに実行しないこと。\n'
