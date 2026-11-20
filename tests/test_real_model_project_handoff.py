@@ -116,6 +116,13 @@ def test_integrated_source_gui_and_studio_handoff(tmp_path, monkeypatch):
         calls.append((args, kwargs))
         return copy.deepcopy(DESIGN)
     monkeypatch.setattr(acceptance, 'ask_llm', fake_model)
+    # The real CLI now enforces a read-only loaded-model preflight.  This
+    # integration fixture uses a fake model, so fake the preflight as well;
+    # never connect to LM Studio or claim a genuine provider inference.
+    monkeypatch.setattr(acceptance, 'verify_loaded_model',
+                        lambda provider, model: {'loaded': True,
+                                                 'verifiedBy': 'TEST_DOUBLE_PREFLIGHT',
+                                                 'inferenceModel': model})
     report_path = tmp_path / 'real-path-simulated-model.json'
     result = acceptance.run_acceptance([
         '--acceptance','--save-to-studio', '--provider','LM Studio',

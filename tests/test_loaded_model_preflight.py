@@ -99,7 +99,7 @@ def test_gui_revision_blocks_inference_if_model_unloaded(studio,monkeypatch):
     assert app.pending_revision is None
 
 
-def test_new_design_source_failure_does_not_trigger_second_inference(studio, monkeypatch):
+def test_new_design_source_failure_respects_one_disclosed_repair_limit(studio, monkeypatch):
     app,_ = studio
     app.prompt.delete('1.0', 'end')
     app.prompt.insert('1.0', '未知の日本語の別要求')
@@ -115,9 +115,10 @@ def test_new_design_source_failure_does_not_trigger_second_inference(studio, mon
     monkeypatch.setattr(studio_main.messagebox, 'showerror', lambda *a,**kw:None)
     app.generate_btn.invoke()
     _complete(app)
-    assert len(model_calls) == 1
+    assert len(model_calls) == 2  # One visible generate click includes at most one SOURCE-only AI correction.
     assert app.history.head()['revisionId'] == before
     assert app.pending_revision is None
+    assert app.failed_generation is not None
 
 
 def test_revision_source_failure_does_not_trigger_second_inference(studio, monkeypatch):

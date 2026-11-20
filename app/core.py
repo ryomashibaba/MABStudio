@@ -618,6 +618,78 @@ def repair_generated_metadata(design: dict, user_prompt: str,
                      'geometryUnchanged': True, 'worldWrites': 0}
 
 
+def expand_generated_canvas_bounds(design: dict) -> tuple[dict, dict] | None:
+    """Expand only a B143 draft's local canvas to contain its *unchanged* elements.
+
+    Call this ONLY after the frozen B143 has rejected the original draft with
+    B143_OUTSIDE_LOCAL_BOUNDS. Other syntax/geometry/source errors remain HOLD.
+    This is no claim of visual quality and never grants construction approval.
+    The caller MUST recompile and verify the resulting source with frozen B143.
+    """
+    if (not isinstance(design, dict) or design.get('schema') != SCHEMA
+            or design.get('designOnly') is not True):
+        return None
+    bounds = design.get('bounds')
+    elements = design.get('elements')
+    if (not isinstance(bounds, dict) or set(bounds) != {'width', 'height', 'depth'}
+            or not isinstance(elements, list) or not 1 <= len(elements) <= 160):
+        return None
+    axes = ('width', 'height', 'depth')
+    limits = (128, 96, 128)
+    dims = [bounds[k] for k in axes]
+    if any(type(v) is not int or not 8 <= v <= limit
+           for v, limit in zip(dims, limits)) or dims[0] * dims[1] * dims[2] > 500000:
+        return None
+
+    required = dims[:]
+    def triplet(values, minimum, maximum):
+        return (isinstance(values, list) and len(values) == 3
+                and all(type(v) is int and minimum <= v <= maximum for v in values))
+
+    for element in elements:
+        if not isinstance(element, dict) or 'repeat' in element:
+            return None  # No V11 extension or implicit source translation.
+        shape = element.get('shape')
+        if shape == 'box':
+            origin, size = element.get('origin'), element.get('size')
+            if not triplet(origin, 0, 128) or not triplet(size, 1, 128):
+                return None
+            low = origin
+            high = [a + b - 1 for a, b in zip(origin, size)]
+        elif shape == 'ellipsoid':
+            center, radii = element.get('center'), element.get('radii')
+            if not triplet(center, 0, 128) or not triplet(radii, 1, 64):
+                return None
+            low = [c - r for c, r in zip(center, radii)]
+            high = [c + r for c, r in zip(center, radii)]
+        elif shape == 'cylinder':
+            origin = element.get('origin')
+            axis = element.get('axis')
+            radius, length = element.get('radius'), element.get('length')
+            if (not triplet(origin, 0, 128) or axis not in ('x', 'y', 'z')
+                    or type(radius) is not int or not 1 <= radius <= 64
+                    or type(length) is not int or not 1 <= length <= 128):
+                return None
+            along = ('x', 'y', 'z').index(axis)
+            low = [v if i == along else v - radius for i, v in enumerate(origin)]
+            high = [(v + length - 1) if i == along else v + radius
+                    for i, v in enumerate(origin)]
+        else:
+            return None  # Unsupported geometry is NEVER guessed or repaired.
+        if any(v < 0 for v in low):
+            return None  # A canvas enlargement cannot fix negative coordinates.
+        required = [max(old, endpoint + 1) for old, endpoint in zip(required, high)]
+
+    if (required == dims or any(value > limit for value, limit in zip(required, limits))
+            or required[0] * required[1] * required[2] > 500000):
+        return None
+    corrected = {**design, 'bounds': dict(zip(axes, required))}
+    changed = {key: {'before': old, 'after': new}
+               for key, old, new in zip(axes, dims, required) if old != new}
+    return corrected, {'boundsOnly': True, 'changes': changed,
+                       'geometryElementsUnchanged': True, 'worldWrites': 0}
+
+
 COMMON_SYSTEM_PROMPT = """あなたはMinecraftAIBuilder B143の設計JSON生成器です。
 ユーザーの日本語の建築意図を保持した概念建築を生成します。
 出力はB143設計JSONオブジェクト1個のみ。前置き・Markdown・思考過程・解説は不要です。

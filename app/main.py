@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
     BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelCancelled,
-    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, verify_loaded_model, run_bridge, atomic_json
+    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, verify_loaded_model, run_bridge, atomic_json, expand_generated_canvas_bounds
 )
 from app.preview import VoxelPreview
 from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_dependencies_available
@@ -1392,6 +1392,35 @@ class Studio(tk.Tk):
         self._start('外部V11 SOURCEを固定B143で読み込み・3D検証中', work, done)
         return True
 
+    @staticmethod
+    def _compile_new_model_draft(engine, design):
+        """Frozen B143 remains authority; only an out-of-bounds canvas may grow.
+
+        Never change the generated elements, fabricate geometry, or circumvent a
+        SOURCE refusal. A second *compiler* check is not a second LLM request.
+        """
+        try:
+            return design, run_bridge(engine, design), ''
+        except StudioError as error:
+            if 'B143_OUTSIDE_LOCAL_BOUNDS' not in str(error):
+                raise
+            expanded = expand_generated_canvas_bounds(design)
+            if expanded is None:
+                raise
+            candidate, report = expanded
+            try:
+                scene = run_bridge(engine, candidate)
+            except StudioError as retry_error:
+                if 'B143_' not in str(retry_error):
+                    raise  # Never mask a changed engine or safety failure.
+                raise error from retry_error
+            dimensions = ', '.join(
+                f'{axis} {change["before"]}→{change["after"]}'
+                for axis, change in report['changes'].items())
+            note = ('SOURCEの建築範囲のみ自動補正（' + dimensions +
+                    '）。要素を変えず固定B143で再検証済み。')
+            return candidate, scene, note
+
     def generate(self):
         if self.pending_revision is not None:
             messagebox.showwarning('未承認の修正案', '先に修正案を承認または却下してください。')
@@ -1433,13 +1462,13 @@ class Studio(tk.Tk):
             if cancel_event.is_set():
                 raise ModelCancelled('生成をキャンセルしました。回答を破棄しました。')
             try:
-                scene = run_bridge(engine, design)
+                design, scene, note = self._compile_new_model_draft(engine, design)
             except StudioError as exc:
                 if 'B143_' not in str(exc):
                     raise  # Do not disguise engine or safety failures as AI defects.
                 error = str(exc)
                 if not self.auto_repair_invalid_generation:
-                    return 'invalid', design, error
+                    return 'invalid', design, error, ''
                 # Sequential, bounded second request, explicitly disclosed in
                 # the UI. No change to B143, SOURCE, history or Minecraft.
                 self.pending_events.put((
@@ -1459,29 +1488,30 @@ class Studio(tk.Tk):
                     # Preserve the original rejected proposal for a future
                     # explicit repair, not a silent discard or false success.
                     return ('invalid', design,
-                            error + ' / 自動修正は完了しませんでした: ' + str(retry_exc)[:220])
+                            error + ' / 自動修正は完了しませんでした: ' + str(retry_exc)[:220], '')
                 if cancel_event.is_set():
                     raise ModelCancelled('修正をキャンセルしました。回答を破棄しました。')
                 try:
-                    corrected_scene = run_bridge(engine, corrected)
+                    corrected, corrected_scene, note = self._compile_new_model_draft(engine, corrected)
                 except StudioError as retry_exc:
                     if 'B143_' not in str(retry_exc):
                         raise
-                    return 'invalid', corrected, str(retry_exc)
-                return 'valid', corrected, corrected_scene
-            return 'valid', design, scene
+                    return 'invalid', corrected, str(retry_exc), ''
+                return 'valid', corrected, corrected_scene, note
+            return 'valid', design, scene, note
         def done(res):
-            state, design, result = res
+            state, design, result, note = res
             if state == 'invalid':
                 self._hold_failed_generation(design, result, prompt, provider, model,
                                              expected_head_id)
             else:
                 self._hold_generated_candidate(design, result, provider, model,
-                                               expected_head_id)
+                                               expected_head_id, source_note=note)
         self._start('ローカルAIで設計・必要なら1回修正・MAB SOURCE検証中',work,done,
                     cancel_event=cancel_event)
 
-    def _hold_generated_candidate(self, design, scene, provider, model, expected_head_id):
+    def _hold_generated_candidate(self, design, scene, provider, model, expected_head_id,
+                                  source_note=''):
         """Present B143-verified new design without silently persisting it.
 
         Initial buildings and repairs share this explicit approval step.
@@ -1504,7 +1534,8 @@ class Studio(tk.Tk):
         self.caption.set(f'{scene.get("title", "新しい建築")} | '
                          f'{scene["stats"]["voxels"]:,}セル | B143 SOURCE合格 | '
                          '未承認・未保存。3Dと動線を確認し、修正または承認・破棄してください。')
-        self.status.set('AI生成案を3Dに表示しました。承認するまで保存履歴とSOURCE出力は変更されません。')
+        self.status.set('AI生成案を3Dに表示しました。承認するまで保存履歴とSOURCE出力は変更されません。'
+                        + (' ' + source_note if source_note else ''))
 
     def _hold_failed_generation(self, design, error, prompt, provider, model, expected_head_id):
         """Retain ONLY an invalid AI proposal for one user-triggered repair."""
@@ -1553,14 +1584,14 @@ class Studio(tk.Tk):
             if cancel_event.is_set():
                 raise ModelCancelled('修正をキャンセルしました。回答は破棄しました。')
             try:
-                scene = run_bridge(engine, repaired)
+                repaired, scene, note = self._compile_new_model_draft(engine, repaired)
             except StudioError as exc:
                 if 'B143_' not in str(exc):
                     raise
-                return 'invalid', repaired, str(exc)
-            return 'valid', repaired, scene
+                return 'invalid', repaired, str(exc), ''
+            return 'valid', repaired, scene, note
         def done(res):
-            state, design, result = res
+            state, design, result, note = res
             if state == 'invalid':
                 # Still invalid: one click performed exactly one inference.
                 # Offer another EXPLICIT click without hidden retries.
@@ -1568,7 +1599,7 @@ class Studio(tk.Tk):
                                              provider, model, candidate['expectedHead'])
             else:
                 self._hold_generated_candidate(design, result, provider, model,
-                                               candidate['expectedHead'])
+                                               candidate['expectedHead'], source_note=note)
         self._start('不合格AI案を1回だけ修正しB143検証中（自動再試行なし）',
                     work, done, cancel_event=cancel_event)
 
