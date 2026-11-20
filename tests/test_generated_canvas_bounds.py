@@ -116,3 +116,70 @@ def test_one_model_request_yields_reviewable_draft_without_save(studio, monkeypa
     assert (app.manager.root/'outputs'/'latest-design.json').read_bytes() == original_output
     assert app.failed_generation is None
     assert '建築範囲のみ自動補正' in app.status.get()
+
+
+def test_unapproved_revision_auto_fixes_canvas_without_second_model_call(studio, monkeypatch):
+    """A disappointing SOURCE error shouldn't require another manual repair click.
+
+    Neither the original approved history nor the still-unapproved original
+    is silently replaced; the corrected revision remains independently reviewable.
+    """
+    app, _ = studio
+    initial = copy.deepcopy(example_library())
+    initial['title'] = '修正前の建築'
+    bad_revision = copy.deepcopy(initial)
+    bad_revision['title'] = '高窓と入口を修正'
+    bad_revision['bounds']['width'] = 16
+    answers = iter([initial, bad_revision])
+    requested = []
+
+    def fake_llm(*args, **kwargs):
+        requested.append(kwargs)
+        return next(answers)
+
+    def fake_bridge(engine, design):
+        if design['bounds']['width'] < 18:
+            raise core.StudioError('B143_OUTSIDE_LOCAL_BOUNDS')
+        return _scene(design)
+
+    monkeypatch.setattr(studio_main, 'ask_llm', fake_llm)
+    monkeypatch.setattr(studio_main, 'run_bridge', fake_bridge)
+    head_id = app.history.head()['revisionId']
+    saved_output = (app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    app.generate()
+    _complete(app)
+    assert app.pending_revision['design'] == initial
+    app.prompt.delete('1.0', 'end')
+    app.prompt.insert('1.0', '入口と高窓を改善')
+    app.revise_btn.invoke()
+    _complete(app)
+    assert len(requested) == 2  # initial + one user-requested revision
+    assert app.pending_revision['design']['bounds']['width'] == 18
+    assert app.pending_revision['design']['elements'] == initial['elements']
+    assert app.pending_revision['previousDraft']['design'] == initial
+    assert '建築範囲のみ自動補正' in app.status.get()
+    assert app.history.head()['revisionId'] == head_id
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes() == saved_output
+    app.restore_btn.invoke()
+    _complete(app)
+    assert len(requested) == 2
+    assert app.pending_revision['design'] == initial
+    assert app.history.head()['revisionId'] == head_id
+
+
+@pytest.mark.real_engine
+def test_real_frozen_b143_unapproved_revision_canvas_compiles_unchanged():
+    """Use the actual frozen engine, not only the GUI fixture's bridge."""
+    root = os.getenv('MAB_B143_VERIFIED_ENGINE')
+    if not root:
+        pytest.skip('Frozen B143 engine not supplied')
+    original = example_library()
+    bad_revision = _outside()
+    with pytest.raises(core.StudioError, match='B143_OUTSIDE_LOCAL_BOUNDS'):
+        core.run_bridge(Path(root), bad_revision)
+    fixed, scene, note = studio_main.Studio._compile_new_model_draft(Path(root), bad_revision)
+    assert fixed['elements'] == original['elements']
+    assert scene['primitives'] == core.run_bridge(Path(root), original)['primitives']
+    assert scene['BuildPlan']['operations'] == []
+    assert scene['stats']['constructionApproved'] is False
+    assert '建築範囲のみ自動補正' in note

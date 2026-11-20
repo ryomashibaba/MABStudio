@@ -1806,10 +1806,14 @@ class Studio(tk.Tk):
                 cancel_event=cancel_event)
             if cancel_event.is_set():
                 raise ModelCancelled('生成案の修正をキャンセルしました。回答は破棄しました。')
-            scene = run_bridge(engine, revised)
-            return revised, scene
+            # As with the first proposal, a bounds-only compiler rejection
+            # may be repaired without another expensive model request.
+            # This is limited to a still-unapproved NEW building; approved
+            # revision and external V11 SOURCE paths retain their own rules.
+            revised, scene, source_note = self._compile_new_model_draft(engine, revised)
+            return revised, scene, source_note
         def done(res):
-            revised, scene = res
+            revised, scene, source_note = res
             if self.pending_revision is not candidate:
                 raise StudioError('生成案が切り替わりました。古いAI応答は破棄しました')
             # Keep exactly ONE earlier unapproved candidate, not a saved
@@ -1830,7 +1834,8 @@ class Studio(tk.Tk):
             self._refresh_buttons()
             self.caption.set('未承認の生成案を修正：' + describe_design_changes(original, revised)
                              + ' | 3D・入口・動線を確認して承認・破棄（保存前）')
-            self.status.set('生成案の修正がB143に合格しました。承認済み履歴はまだ変更されていません。')
+            self.status.set('生成案の修正がB143に合格しました。承認済み履歴はまだ変更されていません。'
+                            + (' ' + source_note if source_note else ''))
         self._start('未承認の生成案を1回修正しB143で検証中（自動再試行なし）',
                     work, done, cancel_event=cancel_event)
 
