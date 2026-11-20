@@ -1,6 +1,7 @@
 """Collect upstream notices for dependencies shipped in the Windows native build."""
 from __future__ import annotations
 
+import hashlib
 from importlib import metadata
 from pathlib import Path
 import re
@@ -33,8 +34,16 @@ def collect_notices(bundle: Path) -> dict:
         if not entries:
             raise RuntimeError(f"UPSTREAM_LICENSE_FILES_MISSING:{name}")
         for rel, src in entries:
-            suffix = Path(str(rel))
-            dst = target / f"{project}-{version}" / suffix
+            # Distribution metadata may nest vendor notices under deep source
+            # paths (for example NumPy's bundled libdivide tree). Preserve every
+            # notice while keeping the Windows destination below MAX_PATH.
+            relative_name = str(rel).replace("\\", "/")
+            suffix = Path(relative_name)
+            path_id = hashlib.sha256(relative_name.encode("utf-8")).hexdigest()[:12]
+            stem = re.sub(r"[^A-Za-z0-9._-]+", "_", suffix.stem)[:32] or "license"
+            extension = re.sub(r"[^A-Za-z0-9._-]+", "_", suffix.suffix)[:8]
+            filename = f"{path_id}-{stem}{extension}"
+            dst = target / f"{project}-{version}" / filename
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             copied.append(dst.relative_to(bundle).as_posix())
