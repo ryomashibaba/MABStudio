@@ -5,6 +5,7 @@ Fixture model and SOURCE bridge, NOT a real Windows/Ollama inference.
 from __future__ import annotations
 import copy
 import threading
+import pytest
 
 from app import main as studio_main, core
 from app.examples import example_library
@@ -246,3 +247,115 @@ def test_revision_delta_cannot_be_approved_without_showing_actual_revised_scene(
     assert app.view_mode.get() == '修正案（未承認）'
     app.approve_draft_btn.invoke(); _complete(app)
     assert app.history.head()['revisionId'] != old_head
+
+
+def test_undo_unapproved_edit_without_new_ai_call_or_history_write(studio, monkeypatch):
+    """Try a design improvement; one click restores the still-unapproved original."""
+    app, _ = studio
+    initial = _design('初回の形状')
+    revised = _design('試したが気に入らない修正')
+    calls = []
+    def model(*args, **kwargs):
+        calls.append(kwargs)
+        return copy.deepcopy(initial if len(calls) == 1 else revised)
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _, design: _scene(design))
+    saved = app.history.head()['revisionId']
+    output = (app.manager.root/'outputs'/'latest-design.json').read_bytes()
+    app.generate(); _complete(app)
+    assert 'disabled' in app.restore_btn.state()
+    app.prompt.delete('1.0', 'end'); app.prompt.insert('1.0', '窓を増やす')
+    app.revise_btn.invoke(); _complete(app)
+    assert app.pending_revision['design'] == revised
+    assert app.restore_btn.cget('text') == '修正前の案に戻す'
+    assert 'disabled' not in app.restore_btn.state()
+    app.restore_btn.invoke(); _complete(app)
+    assert len(calls) == 2  # Never reinfers, including undo.
+    assert app.pending_revision['design'] == initial
+    assert app.preview.scene['title'] == initial['title']
+    assert app.view_mode.get() == '修正案（未承認）'
+    assert app.history.head()['revisionId'] == saved
+    assert (app.manager.root/'outputs'/'latest-design.json').read_bytes() == output
+    assert 'disabled' in app.restore_btn.state()  # Exactly one step of undo.
+    app.approve_draft_btn.invoke(); _complete(app)
+    assert app.history.head()['design'] == initial
+
+
+def test_undo_returns_to_latest_prior_draft_not_first(studio, monkeypatch):
+    app, _ = studio
+    candidates = [_design(t) for t in ('初稿', '修正その1', '修正その2')]
+    calls = []
+    def model(*args, **kwargs):
+        calls.append(1)
+        return copy.deepcopy(candidates[len(calls)-1])
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _, design: _scene(design))
+    app.generate(); _complete(app)
+    app.revise_btn.invoke(); _complete(app)
+    app.revise_btn.invoke(); _complete(app)
+    assert app.pending_revision['design'] == candidates[2]
+    app.restore_btn.invoke(); _complete(app)
+    assert app.pending_revision['design'] == candidates[1]
+    assert len(calls) == 3
+    assert 'disabled' in app.restore_btn.state()
+
+
+def test_undo_refuses_modified_history_or_corrupted_source(studio, monkeypatch):
+    app, _ = studio
+    candidates = [_design('元の案'), _design('未承認の変更')]
+    calls=[]
+    def model(*args, **kwargs):
+        calls.append(1)
+        return copy.deepcopy(candidates[len(calls)-1])
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    monkeypatch.setattr(studio_main, 'run_bridge', lambda _, d: _scene(d))
+    monkeypatch.setattr(studio_main.messagebox, 'showerror', lambda *a, **k: None)
+    app.generate(); _complete(app)
+    app.revise_btn.invoke(); _complete(app)
+    original_candidate = app.pending_revision
+    # Tamper with in-memory previous version's proof; only the undo is refused.
+    original_candidate['previousDraft']['scene']['sourceSha256'] = 'invalid'
+    app.restore_btn.invoke(); _complete(app)
+    assert app.pending_revision is original_candidate
+    assert app.pending_revision['design'] == candidates[1]
+    assert 'previousDraft' in app.pending_revision
+    # A modified approved history head also blocks restoring the stale draft.
+    original_candidate['previousDraft']['scene'] = _scene(candidates[0])
+    latest = _design('別の操作で確定された元案')
+    app.history.commit(latest, _scene(latest), engine_commit=core.BASELINE_SHA,
+                       operation='new')
+    app.restore_btn.invoke(); _complete(app)
+    assert app.pending_revision['design'] == candidates[1]
+    assert app.history.head()['design'] == latest
+    assert len(calls) == 2
+
+
+@pytest.mark.real_engine
+def test_undo_new_draft_with_actual_frozen_b143(studio, monkeypatch):
+    """Actual pinned Node compiler: undo must recompile both SOURCE versions."""
+    import os
+    from pathlib import Path
+    path = os.environ.get('MAB_B143_VERIFIED_ENGINE')
+    if not path:
+        pytest.skip('Frozen B143 engine not supplied')
+    app, _ = studio
+    app.manager.active_path = Path(path)
+    monkeypatch.setattr(studio_main, 'run_bridge', core.run_bridge)
+    drafts = [_design('原型のSOURCE'), _design('修正後のSOURCE')]
+    drafts[1]['elements'][0]['material'] = 'glass'  # Recompiled material cells differ.
+    model_calls=[]
+    def model(*a, **k):
+        model_calls.append(1)
+        return copy.deepcopy(drafts[len(model_calls)-1])
+    monkeypatch.setattr(studio_main, 'ask_llm', model)
+    saved = app.history.head()['revisionId']
+    app.generate(); _complete(app, limit=8)
+    first_sha = app.pending_revision['scene']['geometrySha256']
+    app.revise_btn.invoke(); _complete(app, limit=8)
+    assert app.pending_revision['scene']['geometrySha256'] != first_sha
+    app.restore_btn.invoke(); _complete(app, limit=8)
+    assert app.pending_revision['design'] == drafts[0]
+    assert app.pending_revision['scene']['geometrySha256'] == first_sha
+    assert app.pending_revision['scene']['BuildPlan']['operations'] == []
+    assert app.history.head()['revisionId'] == saved
+    assert len(model_calls) == 2

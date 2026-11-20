@@ -1,5 +1,6 @@
 """MAB Studio Windows GUI. Offline-first, test-world only. No world-writing calls."""
 from __future__ import annotations
+import copy
 import json
 import os
 import gc
@@ -459,7 +460,7 @@ class Studio(tk.Tk):
                                      command=self.export_design, style='Quiet.TButton', state='disabled')
         self.export_btn.pack(side='right', padx=(6, 0))
         self.restore_btn = ttk.Button(self._preview_actions, text='前に戻す',
-                                      command=self.restore_previous, style='Quiet.TButton', state='disabled')
+                                      command=self.undo_or_restore, style='Quiet.TButton', state='disabled')
         self.restore_btn.pack(side='right')
 
         tools = ttk.Frame(right, style='Panel.TFrame')
@@ -848,7 +849,14 @@ class Studio(tk.Tk):
                 (self.design and ready) or new_draft) else 'disabled',
             text='この指示で未承認の生成案を修正' if new_draft else 'この指示で今の建築を修正')
         self.export_btn.configure(state='normal' if self.scene is not None and ready else 'disabled')
-        self.restore_btn.configure(state='normal' if self.current_snapshot and self.current_snapshot.get('parentId') and ready else 'disabled')
+        can_undo_draft = (new_draft and not self.busy
+                          and self.pending_revision.get('previousDraft') is not None
+                          and self.manager.active_path is not None)
+        can_restore_saved = (ready and self.current_snapshot is not None
+                             and self.current_snapshot.get('parentId') is not None)
+        self.restore_btn.configure(
+            state='normal' if can_undo_draft or can_restore_saved else 'disabled',
+            text='修正前の案に戻す' if can_undo_draft else '前に戻す')
         self.import_v11_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
         self.browse_btn.configure(state='normal' if ready else 'disabled')
@@ -1804,17 +1812,85 @@ class Studio(tk.Tk):
             revised, scene = res
             if self.pending_revision is not candidate:
                 raise StudioError('生成案が切り替わりました。古いAI応答は破棄しました')
+            # Keep exactly ONE earlier unapproved candidate, not a saved
+            # revision or an unlimited hidden history. Revert a disappointing
+            # AI iteration without repeating expensive inference.
+            candidate['previousDraft'] = {
+                'design': copy.deepcopy(original),
+                'scene': copy.deepcopy(original_scene),
+                'provider': candidate['provider'],
+                'model': candidate['model'],
+            }
             candidate['design'] = revised
             candidate['scene'] = scene
             candidate['provider'] = provider
             candidate['model'] = model
             self.view_mode.set('修正案（未承認）')
             self._refresh_view(preserve_camera=True)
+            self._refresh_buttons()
             self.caption.set('未承認の生成案を修正：' + describe_design_changes(original, revised)
                              + ' | 3D・入口・動線を確認して承認・破棄（保存前）')
             self.status.set('生成案の修正がB143に合格しました。承認済み履歴はまだ変更されていません。')
         self._start('未承認の生成案を1回修正しB143で検証中（自動再試行なし）',
                     work, done, cancel_event=cancel_event)
+
+    def undo_or_restore(self):
+        """One existing back button: undo a NEW draft edit or a saved revision."""
+        candidate = self.pending_revision
+        if candidate is not None:
+            if candidate.get('kind') == 'new' and candidate.get('previousDraft') is not None:
+                self.undo_unapproved_draft()
+            return
+        self.restore_previous()
+
+    def undo_unapproved_draft(self):
+        """Restore one earlier unapproved candidate; never infer/save.
+
+        Both source versions must be reproducible by the exact pinned engine.
+        A changed approved-history head blocks this in-memory operation.
+        """
+        candidate = self.pending_revision
+        if (self.busy or candidate is None or candidate.get('kind') != 'new'
+                or candidate.get('previousDraft') is None):
+            return
+        engine = self.manager.active_path
+        previous = candidate['previousDraft']
+        if engine is None or candidate['engineSha'] != self.manager.active_sha:
+            messagebox.showerror('生成案の保護', 'B143エンジンが変更されました。元の案に戻せません。')
+            return
+
+        def work():
+            head = self.history.head()
+            if (head['revisionId'] if head else None) != candidate['expectedHead']:
+                raise StudioError('保存済み履歴が変更されました。未承認案の復元を停止しました')
+            current = run_bridge(engine, candidate['design'])
+            if (current['sourceSha256'] != candidate['scene']['sourceSha256']
+                    or current['geometrySha256'] != candidate['scene']['geometrySha256']):
+                raise StudioError('現在表示中の未承認案をSOURCEで再現できません')
+            restored = run_bridge(engine, previous['design'])
+            if (restored['sourceSha256'] != previous['scene']['sourceSha256']
+                    or restored['geometrySha256'] != previous['scene']['geometrySha256']):
+                raise StudioError('修正前の案を固定B143で再現できません')
+            return restored
+
+        def done(scene):
+            if self.pending_revision is not candidate or candidate.get('previousDraft') is not previous:
+                raise StudioError('未承認案が切り替わりました。古い復元結果は破棄しました')
+            head = self.history.head()
+            if (head['revisionId'] if head else None) != candidate['expectedHead']:
+                raise StudioError('保存済み履歴が変更されました。復元結果は採用しません')
+            candidate['design'] = copy.deepcopy(previous['design'])
+            candidate['scene'] = scene
+            candidate['provider'] = previous['provider']
+            candidate['model'] = previous['model']
+            del candidate['previousDraft']  # One step back; no hidden redo chain.
+            self.view_mode.set('修正案（未承認）')
+            self._refresh_view()
+            self._refresh_buttons()
+            self.caption.set('修正前の未承認案を復元しました。3Dを確認して修正または承認できます。')
+            self.status.set('修正前の案を固定B143で再確認しました。追加AI推論・保存・ワールド操作なし。')
+
+        self._start('修正前の未承認案をSOURCE再検証して復元中', work, done)
 
     def approve_revision(self):
         candidate = self.pending_revision
