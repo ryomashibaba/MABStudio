@@ -493,19 +493,20 @@ class Studio(tk.Tk):
         self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
+        self.reviewbar.columnconfigure(0, weight=1)
         self.reviewbar_label = ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel')
-        self.reviewbar_label.pack(side='left', padx=(0, 12))
+        self.reviewbar_label.grid(row=0, column=0, sticky='w', padx=(0, 12))
         self.approve_draft_btn = ttk.Button(self.reviewbar, text='修正案を承認',
                                             command=self.approve_revision, state='disabled',
                                             style='Primary.TButton')
-        self.approve_draft_btn.pack(side='left', padx=(0, 6))
+        self.approve_draft_btn.grid(row=0, column=1, sticky='w', padx=(0, 6))
         self.reject_draft_btn = ttk.Button(self.reviewbar, text='却下',
                                            command=self.reject_revision, state='disabled')
-        self.reject_draft_btn.pack(side='left')
+        self.reject_draft_btn.grid(row=0, column=2, sticky='w')
         self.compare_draft_btn = ttk.Button(self.reviewbar, text='元の建築を見る',
                                             command=self.toggle_draft_comparison,
-                                            style='Quiet.TButton', state='disabled')
-        self.compare_draft_btn.pack(side='left', padx=(9, 0))
+                                            style='Quiet.TButton', state='disabled', width=12)
+        self.compare_draft_btn.grid(row=1, column=0, columnspan=3, sticky='w', pady=(6, 0))
         self._reviewbar_visible = False
         self.viewer_host = ttk.Frame(right, style='Panel.TFrame')
         self.viewer_host.pack(fill='both', expand=True)
