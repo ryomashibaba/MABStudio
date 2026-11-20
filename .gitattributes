@@ -3,3 +3,4 @@
 *.bat -text
 *.cmd -text
 *.ps1 -text
+app/education_runtime/bridge.mjs text eol=lf
