@@ -163,6 +163,47 @@ function readPayload(file){
       fs.statSync(file).size>9*1024*1024)fail('PAYLOAD_FILE');
   return JSON.parse(fs.readFileSync(file,'utf8'));
 }
+
+/** A few read-only block probes bind a saved site to the currently connected
+ * world, without assuming that the SocketBE connection ID survives a restart.
+ */
+export function resumeSamples(previous,target=previous) {
+  validatePayload(previous);
+  validatePayload(target);
+  const targetMaterials=new Map(target.primitives.map(c=>[c.slice(0,3).join(','),c[3]]));
+  // A partially completed revision may already have changed its edited cells.
+  // Check only anchors whose material is unchanged in BOTH designs.
+  const cells=previous.primitives.filter(c=>
+    targetMaterials.get(c.slice(0,3).join(','))===c[3]);
+  if(!cells.length)fail('RESUME_SITE_NO_STABLE_ANCHOR');
+  const indices=[0,Math.floor((cells.length-1)/4),Math.floor((cells.length-1)/2),
+    Math.floor(3*(cells.length-1)/4),cells.length-1];
+  return [...new Set(indices)].map(i=>cells[i]);
+}
+export async function verifyResumeSite(world,previous,target=previous) {
+  for(const [x,y,z,m] of resumeSamples(previous,target)){
+    const o=previous.origin;
+    const command=`testforblock ${o.x+x} ${o.y+y} ${o.z+z} ${MATERIALS[m]}`;
+    let response;
+    try {response=await world.runCommand(command,{timeout:8000,noResponse:false});}
+    catch {fail('RESUME_SITE_READBACK_FAILED');}
+    if(!response || !integer(response.statusCode) ||
+        response.statusCode<0 || response.successCount!==1)
+      fail('RESUME_SITE_NOT_MATCHED');
+  }
+}
+function uncertainKeys(input) {
+  if(!Array.isArray(input) || input.length>MAX_VOXELS*2)fail('RESUME_UNCERTAIN');
+  const result=new Set();
+  for(const key of input) {
+    if(typeof key!=='string'||!/^(?:0|[1-9][0-9]*),(?:0|[1-9][0-9]*),(?:0|[1-9][0-9]*)$/.test(key))
+      fail('RESUME_UNCERTAIN');
+    const [x,y,z]=key.split(',').map(Number);
+    if(x>=128||y>=96||z>=128)fail('RESUME_UNCERTAIN');
+    result.add(key);
+  }
+  return result;
+}
 export function commandSucceeded(result){
   // SocketBE CommandResult supplies statusCode, not a guaranteed successCount.
   // The same nonnegative status contract is used by its World.fillBlocks API.
@@ -257,9 +298,13 @@ async function serve(){
       prior=projectId ? deployments.get(projectId) : null;
       if(prior && prior.world!==world)prior=null;
       payload=request.payload;
+      const resume=(!prior && projectId && request.resume &&
+        typeof request.resume==='object') ? request.resume : null;
+      const old=resume?.previous ? validatePayload(resume.previous) : null;
       if(payload?.placementMode==='player'){
         let origin;
         if(prior)origin=prior.origin;
+        else if(old)origin=old.origin;
         else {
           const player=await world.getLocalPlayer();
           const position=await player.getLocation();
@@ -273,6 +318,12 @@ async function serve(){
       validatePayload(payload);
       if(prior && ['x','y','z'].some(axis=>prior.origin[axis]!==payload.origin[axis]))
         prior=null;
+      if(!prior && old && ['x','y','z'].every(axis=>old.origin[axis]===payload.origin[axis])){
+        // Zero writes when the saved site cannot be matched by read-only probes.
+        await verifyResumeSite(world,old,payload);
+        prior={world,origin:old.origin,payload:old,
+          uncertain:uncertainKeys(resume.uncertain??[])};
+      }
       compiled=prior ? planRevision(payload,prior.payload,prior.uncertain) : plan(payload);
       report('started',{commands:compiled.commands.length,blocks:compiled.blocks,
         origin:compiled.origin});
@@ -324,6 +375,17 @@ async function selfTest(){
   const recovered=planRevision(revised,payload,new Set(['7,1,0']));
   if(recovered.blocks!==7||!recovered.commands.some(c=>c.command.includes('minecraft:air')))
     fail('PARTIAL_REPAIR_SELF_TEST');
+  let probes=0;
+  await verifyResumeSite({runCommand:async command=>{
+    if(!command.startsWith('testforblock '))fail('RESUME_PROBE_NOT_READONLY');
+    probes++;
+    return {statusCode:0,successCount:1};
+  }},payload);
+  if(probes!==5)fail('RESUME_PROBE_COUNT');
+  let rejected=false;
+  try {await verifyResumeSite({runCommand:async()=>({statusCode:0,successCount:0})},payload);}
+  catch(e){rejected=String(e.message).includes('RESUME_SITE_NOT_MATCHED');}
+  if(!rejected)fail('RESUME_PROBE_UNMATCHED_ACCEPTED');
   report('test',{result:'PASS',commands:2,blocks:5,worldConnections:0,
     revisionTest:'PASS',partialRepairTest:'PASS'});
 }

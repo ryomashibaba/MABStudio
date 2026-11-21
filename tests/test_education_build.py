@@ -91,12 +91,19 @@ for line in sys.stdin:
                       'geometrySha256':p['geometrySha256']}),flush=True)
 ''')
     session=EducationBuildSession(script=program,node=sys.executable)
+    project_id='c'*32
     try:
         for i in range(2):
             result=run_education_build(payload(),script=program,node=sys.executable,
-                                       session=session,output_root=tmp_path/'logs')
+                                       session=session,output_root=tmp_path/'logs',
+                                       project_id=project_id)
             assert result['status']=='COMMANDS_ACKNOWLEDGED'
             assert result['confirmedBlocks']==7
         assert session.process.poll() is None
+        path=tmp_path/'logs'/('EDUCATION_SITE_'+project_id+'.json')
+        site=json.loads(path.read_text(encoding='utf-8'))
+        assert site['previous']['voxels']==7
+        assert site['previous']['origin']=={'x':20,'y':65,'z':-30}
+        assert site['uncertain']==[]
     finally:
         session.close()

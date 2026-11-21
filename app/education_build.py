@@ -22,7 +22,7 @@ from app.core import StudioError, atomic_json, node_binary, user_root
 from app.education import parse_probe_coordinates
 
 SCHEMA = 'mab-studio-education-placement-v1'
-BUILD_BRIDGE_SHA256 = '5e72afc0218a02cd6f21ce9439348de8e25a052447cf4fdee8e1a4458d06f7f9'
+BUILD_BRIDGE_SHA256 = '8776a1564d2788590c4283d7702693e6dcfc96a961087061530bfb3f05868800'
 MAX_OUTPUT_LINE = 16_384
 
 
@@ -46,6 +46,36 @@ def build_payload(scene: dict, xyz: tuple[int, int, int], *, use_player_position
         'voxels': scene['stats']['voxels'],
         'primitives': scene['primitives'],
     }
+
+
+SITE_SCHEMA = 'mab-studio-education-site-v1'
+
+
+def _site_file(destination: Path, project_id: str) -> Path:
+    if not isinstance(project_id,str) or len(project_id)!=32 or any(
+            ch not in '0123456789abcdef' for ch in project_id):
+        raise StudioError('Education施工のプロジェクト識別子が不正です')
+    return destination / ('EDUCATION_SITE_' + project_id + '.json')
+
+
+def _site_state(path: Path, project_id: str) -> dict:
+    """A single locally saved placement, not a verified world identifier."""
+    if not path.exists():
+        return {'schema':SITE_SCHEMA,'projectId':project_id,
+                'previous':None,'uncertain':[]}
+    try:
+        if path.stat().st_size > 12 * 1024 * 1024:
+            raise ValueError('oversize')
+        data=json.loads(path.read_text(encoding='utf-8'))
+        if (not isinstance(data,dict) or data.get('schema')!=SITE_SCHEMA or
+            data.get('projectId')!=project_id or
+            (data.get('previous') is not None and not isinstance(data['previous'],dict)) or
+            not isinstance(data.get('uncertain'),list) or
+            len(data['uncertain'])>320000):
+            raise ValueError('schema')
+        return data
+    except (OSError,ValueError,UnicodeError) as exc:
+        raise StudioError('Education施工位置の保存データを確認できません。ワールドは変更しません') from exc
 
 
 class EducationBuildSession:
@@ -92,7 +122,7 @@ class EducationBuildSession:
             threading.Thread(target=read_stderr,daemon=True).start()
             return self.process
 
-    def submit(self,payload, *, project_id: str | None = None):
+    def submit(self,payload, *, project_id: str | None = None, resume: dict | None = None):
         proc=self.ensure_started()
         if proc.poll() is not None:raise StudioError('Education接続プロセスが停止しています')
         try:
@@ -102,6 +132,8 @@ class EducationBuildSession:
                         ch not in '0123456789abcdef' for ch in project_id):
                     raise StudioError('プロジェクト識別子が不正です')
                 request['projectId']=project_id
+            if resume is not None:
+                request['resume']=resume
             proc.stdin.write(json.dumps(request,separators=(',',':'))+'\n')
             proc.stdin.flush()
         except (BrokenPipeError,OSError) as e:
@@ -154,6 +186,7 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
     events = []
     stderr_parts = []
     proc = None
+    site_file = _site_file(destination, project_id) if (session is not None and project_id is not None) else None
     with tempfile.TemporaryDirectory(prefix='mab-education-build-') as temp:
         file = Path(temp) / 'payload.json'
         file.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
@@ -161,7 +194,23 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
             if session is not None:
                 proc=session.ensure_started()
                 output=session.output
-                session.submit(payload,project_id=project_id)
+                resume=None
+                if site_file is not None:
+                    prior=_site_state(site_file,project_id)
+                    pending=set(prior['uncertain'])
+                    pending.update(','.join(str(v) for v in c[:3])
+                                   for c in payload['primitives'])
+                    # Save the in-flight footprint first. A crash must not
+                    # forget cells that may have been written in the world.
+                    atomic_json(site_file,{'schema':SITE_SCHEMA,
+                        'projectId':project_id,'previous':prior['previous'],
+                        'uncertain':sorted(pending)})
+                    if prior['previous'] is not None:
+                        # Only previous failures need full repair. A healthy
+                        # revision must still send only its actual differences.
+                        resume={'previous':prior['previous'],
+                                'uncertain':prior['uncertain']}
+                session.submit(payload,project_id=project_id,resume=resume)
             else:
                 proc = subprocess.Popen(
                     [node, str(script), '--listen', str(file)],
@@ -251,6 +300,10 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                 raise StudioError('Education施工未完了: ' + reason +
                                   f'（確認済み {record["confirmedBlocks"]}セル。途中まで配置済みの可能性）')
             record['status'] = 'COMMANDS_ACKNOWLEDGED'
+            if site_file is not None:
+                applied={**payload,'origin':record['origin'],'placementMode':'manual'}
+                atomic_json(site_file,{'schema':SITE_SCHEMA,'projectId':project_id,
+                                       'previous':applied,'uncertain':[]})
             return {**record, 'receiptPath': str(receipt)}
         except Exception as exc:
             record['status'] = 'PARTIAL_OR_FAILED'
