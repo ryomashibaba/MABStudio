@@ -4,3 +4,4 @@
 *.cmd -text
 *.ps1 -text
 app/education_runtime/bridge.mjs text eol=lf
+app/education_runtime/build.mjs text eol=lf
