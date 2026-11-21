@@ -306,7 +306,7 @@ def run_bridge(engine: Path, design: dict, timeout: int = 60) -> dict:
         inp = tmp / "design.json"
         out = tmp / "scene.json"
         inp.write_text(json.dumps(design, ensure_ascii=False), encoding="utf-8")
-        args = _sandbox_node_args(node_binary(), engine, inp, out) + ["compile", str(engine.resolve()), str(inp), str(out)]
+        args = _sandbox_node_args(node_binary(), engine, inp, out) + ["compile", str(engine.resolve()), str(inp.resolve()), str(out.resolve())]
         try:
             r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, cwd=d)
         except subprocess.TimeoutExpired as e:

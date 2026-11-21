@@ -31,8 +31,12 @@ main().catch(e => {
   // boundary without exposing a user's file paths, prompt, or building JSON.
   if(e?.code==='ERR_ACCESS_DENIED'){
     const resource=String(e.resource??'unknown').replace(/\\/g,'/');
+    const input=process.argv[4];
+    const inputGranted=typeof input==='string' &&
+      process.permission?.has('fs.read',path.resolve(input));
     process.stderr.write('NODE_PERMISSION_DENIED '+String(e.permission??'unknown')+
-      ' '+resource.split('/').pop().slice(0,100)+'\n');
+      ' '+resource.split('/').pop().slice(0,100)+
+      ' inputGrant='+String(Boolean(inputGranted))+'\n');
   }else process.stderr.write(String(e?.message || e) + '\n');
   process.exitCode=1;
 });
