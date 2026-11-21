@@ -154,7 +154,7 @@ def test_mcworld_rejects_unsafe_paths(tmp_path,unsafe):
             assert len(cleaned)==len(dangerous) and raw.count(cleaned)==2
             path.write_bytes(raw.replace(cleaned,dangerous))
         with zipfile.ZipFile(path) as z:
-            assert unsafe in z.namelist()
+            assert unsafe in [member.orig_filename for member in z.infolist()]
     with pytest.raises(core.StudioError): inspect_mcworld(path)
 
 

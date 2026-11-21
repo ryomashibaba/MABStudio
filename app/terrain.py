@@ -41,7 +41,11 @@ def inspect_mcworld(filename: str | Path) -> dict:
             files = {}
             for entry in entries:
                 name = entry.filename
-                if name.startswith('/') or name.startswith('\\') or '\\' in name or '\x00' in name:
+                # On Windows zipfile normalizes raw backslashes to '/' before
+                # exposing .filename. Reject any such original ZIP name rather
+                # than trusting its normalized, potentially ambiguous form.
+                if (entry.orig_filename != name or name.startswith('/') or
+                    name.startswith('\\') or '\\' in name or '\x00' in name):
                     raise StudioError('ワールドZIPに危険なパスがあります')
                 parts = name.rstrip('/').split('/')
                 if any(p in ('', '.', '..') or ':' in p or p[-1:] in (' ', '.') for p in parts):
