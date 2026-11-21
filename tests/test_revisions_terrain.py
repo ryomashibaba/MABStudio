@@ -141,6 +141,20 @@ def test_mcworld_inspection_only_not_block_data(tmp_path):
                                       'db/file:alt', 'folder\\evil', 'db/trailing.'])
 def test_mcworld_rejects_unsafe_paths(tmp_path,unsafe):
     path=mcworld_zip(tmp_path,{unsafe:b'bad'})
+    # zipfile normalizes '\\' to '/' when WRITING ZIP entries on Windows.
+    # Restore the intended malicious filename in both ZIP headers using an
+    # equal-byte-length substitution, without altering any file content/CRC.
+    if '\\' in unsafe:
+        with zipfile.ZipFile(path) as z:
+            actual=z.namelist()
+        if unsafe not in actual:
+            cleaned=unsafe.replace('\\','/').encode('utf-8')
+            dangerous=unsafe.encode('utf-8')
+            raw=path.read_bytes()
+            assert len(cleaned)==len(dangerous) and raw.count(cleaned)==2
+            path.write_bytes(raw.replace(cleaned,dangerous))
+        with zipfile.ZipFile(path) as z:
+            assert unsafe in z.namelist()
     with pytest.raises(core.StudioError): inspect_mcworld(path)
 
 
