@@ -36,7 +36,17 @@ def make_archive(paths, sha="a"*40):
     with zipfile.ZipFile(mem, 'w') as z:
         for path, body in paths.items():
             z.writestr('MinecraftAIBuilder-'+sha+'/'+path, body)
-    return mem.getvalue()
+    data=mem.getvalue()
+    # ZipInfo normalizes backslash paths while *writing* archives on Windows.
+    # Keep the unsafe names in the raw ZIP headers, so production validation
+    # is exercised against identical bytes on both Windows and Linux.
+    for filename in paths:
+        if '\\' in filename:
+            actual=('MinecraftAIBuilder-'+sha+'/'+filename).encode('utf-8')
+            cleaned=actual.replace(b'\\',b'/')
+            assert len(actual)==len(cleaned) and data.count(cleaned)==2
+            data=data.replace(cleaned,actual)
+    return data
 
 
 def archive_engine(sha="a"*40):

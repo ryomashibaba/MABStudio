@@ -373,7 +373,10 @@ def _safe_extract_zip(zbytes: bytes, target: Path, expected_commit: str | None =
         for member in items:
             # ZIP entries must be portable to Windows, even during Linux tests.
             name = member.filename
-            if "\\" in name or name.startswith("/") or name.startswith("//"):
+            # ZIP names can be normalized by zipfile on Windows before
+            # .filename is exposed; refuse the original raw entry as well.
+            if (member.orig_filename != name or "\\" in name or
+                    name.startswith("/") or name.startswith("//")):
                 raise StudioError("ZIPにWindows非互換パスがあります")
             parts = name.rstrip("/").split("/")
             if member.is_dir() and parts == [root_name]:
