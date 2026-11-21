@@ -85,8 +85,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          npm.cmd install --prefix app/education_runtime --omit=dev --ignore-scripts --no-audit --no-fund --package-lock
-          if ($LASTEXITCODE -ne 0) { throw 'EDUCATION_NPM_PREPARE_FAILED' }
+          Push-Location app/education_runtime
+          try {
+            npm.cmd install --omit=dev --ignore-scripts --no-audit --no-fund --package-lock
+            if ($LASTEXITCODE -ne 0) { throw 'EDUCATION_NPM_PREPARE_FAILED' }
+          } finally {
+            Pop-Location
+          }
           $pkg = Get-Content -Raw app/education_runtime/node_modules/socket-be/package.json | ConvertFrom-Json
           if ($pkg.version -ne '2.8.0') { throw 'SOCKETBE_VERSION_MISMATCH' }
       - name: Native VTK and Pillow read-only Windows render QA
