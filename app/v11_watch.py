@@ -25,7 +25,7 @@ READY_NAME = 'V11_READY_SOURCE.json'
 REMOTE_READY_NAME = 'V11_GITHUB_READY_SOURCE.json'
 REMOTE_API = ('https://api.github.com/repos/ryomashibaba/MinecraftAIBuilder/'
               'contents/studio-handoff/V11_READY_SOURCE.json'
-              '?ref=research%2Fr125-v6-readonly-facade-diagnostic-20261111')
+              '?ref=main')
 MAX_GITHUB_RESPONSE = 1500000
 
 

@@ -127,3 +127,56 @@ def test_public_v11_rejects_unsupported_or_tampered_artifact_without_overwrite(t
     with pytest.raises(StudioError, match='整合性'):
         run('0'*40)
     assert target.read_bytes() == original
+
+
+def test_portable_release_metadata_and_zip_reject_untrusted_packages(tmp_path):
+    import io
+    import hashlib
+    import json
+    import zipfile
+    import pytest
+    from app.portable_update import _download_metadata, _validate_zip, REPO, ASSET_NAME
+
+    sha = 'a' * 40
+    tag = 'mabstudio-v03-' + sha
+    url = 'https://github.com/' + REPO + '/releases/download/' + tag + '/' + ASSET_NAME
+    meta = {
+        'tag_name': tag, 'draft': False, 'prerelease': False,
+        'target_commitish': sha, 'published_at': '2026-11-21T12:00:00Z',
+        'assets': [{'name': ASSET_NAME, 'size': 150_000_000,
+                    'digest': 'sha256:' + 'b' * 64,
+                    'browser_download_url': url}],
+    }
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_): self.close()
+    def opener(req, timeout):
+        assert req.full_url.endswith('/releases/latest') and timeout <= 5
+        return Response(json.dumps(meta).encode())
+    assert _download_metadata(opener=opener)['sha'] == sha
+    meta['target_commitish'] = 'main'
+    with pytest.raises(ValueError, match='RELEASE_SHA'):
+        _download_metadata(opener=opener)
+    meta['target_commitish'] = sha
+    meta['assets'][0]['digest'] = None
+    with pytest.raises(ValueError, match='ASSET_NOT_VERIFIABLE'):
+        _download_metadata(opener=opener)
+    broken = tmp_path / 'bad.zip'
+    with zipfile.ZipFile(broken, 'w') as z:
+        for i in range(12):
+            z.writestr('MABStudio/test' + str(i), b'0')
+        z.writestr('../escape.txt', b'x')
+    with pytest.raises(ValueError, match='UNSAFE_PATH'):
+        _validate_zip(broken)
+
+
+def test_portable_updater_does_not_run_during_source_or_without_consent_env(monkeypatch):
+    from app.portable_update import prepare_update, launch_ready_at_startup
+    import sys
+    monkeypatch.delattr(sys, 'frozen', raising=False)
+    assert not prepare_update()
+    assert not launch_ready_at_startup()
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setenv('MAB_STUDIO_DISABLE_AUTO_UPDATE', '1')
+    assert not prepare_update()
+    assert not launch_ready_at_startup()

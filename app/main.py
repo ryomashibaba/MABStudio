@@ -2233,7 +2233,13 @@ def main():
     try:
         from app.release_runtime import verify_packaged_runtime
         verify_packaged_runtime()
-        Studio().mainloop()
+        from app.portable_update import launch_ready_at_startup, prepare_in_background
+        if launch_ready_at_startup():
+            return 0  # Next verified version is running; don't start two GUIs.
+        gui = Studio()
+        if getattr(sys, 'frozen', False):
+            gui.after(5000, prepare_in_background)
+        gui.mainloop()
     except (StudioError, OSError, ValueError) as exc:
         try:
             from tkinter import messagebox as startup_messagebox

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import subprocess
@@ -133,11 +135,19 @@ def build_manifest(root: Path, *, exercise: bool = True) -> dict:
         run(['--input-type=module', '-e',
              'import("socket-be").then(m=>{if(typeof m.Server!=="function" || !m.ServerEvent)process.exit(4)}).catch(e=>{console.error(e);process.exit(5)})'],
              cwd=str(root / RUNTIME_FOLDER))
+    release_sha = os.environ.get('GITHUB_SHA', '')
+    release_identity = {}
+    if re.fullmatch(r'[a-f0-9]{40}', release_sha):
+        release_identity = {
+            'studioGitSha': release_sha,
+            'builtAtUtc': datetime.now(timezone.utc).isoformat(),
+        }
     return {
         'schema': SCHEMA,
         'nodeVersionAtBuild': version,
         'socketBeVersion': '2.8.0',
         'assets': {name: _digest(root / name) for name in names},
+        **release_identity,
         'meaning': 'Critical runtime file integrity only; not Windows execution, model, world or licensing certification',
     }
 

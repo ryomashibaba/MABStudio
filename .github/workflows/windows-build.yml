@@ -13,12 +13,17 @@ on:
       - 'RUN_WINDOWS_ACCEPTANCE.*'
       - '.github/workflows/windows-build.yml'
 
+# Prefer the newest verified build; obsolete pushes must not publish late.
+concurrency:
+  group: mabstudio-v03-verified-windows-release
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 35
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -300,3 +305,20 @@ jobs:
           name: MABStudio-Windows-Native-Preview
           path: ${{ runner.temp }}/MABStudio-Windows-Native-Preview.zip
           retention-days: 14
+      - name: Publish verified portable app release for automatic updates
+        if: success() && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = Join-Path $env:RUNNER_TEMP 'MABStudio-Windows-Native-Preview.zip'
+          if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+            throw 'VERIFIED_PORTABLE_ZIP_MISSING'
+          }
+          $tag = 'mabstudio-v03-' + $env:GITHUB_SHA
+          & gh release create $tag $file --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA --latest `
+            --title ('MAB Studio v0.3 verified ' + $env:GITHUB_SHA.Substring(0,12)) `
+            --notes 'Windows native EXE: CI SOURCE/3D/portable re-extraction PASS. Real local LLM and Minecraft Education world writes require separate acceptance.'
+          if ($LASTEXITCODE -ne 0) { throw 'VERIFIED_RELEASE_PUBLISH_FAILED' }
