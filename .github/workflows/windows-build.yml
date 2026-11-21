@@ -99,6 +99,38 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install 'vtk==9.6.2' 'Pillow>=10,<13'
+          if ($LASTEXITCODE -ne 0) { throw 'VTK_INSTALL_FAILED' }
+          # Hosted Windows runners have no OpenGL 3.2 device. Use a runner-only
+          # Mesa OSMesa version that still ships osmesa.dll (removed in 25.1).
+          # Never install drivers system-wide or bundle Mesa with the app.
+          $mesaRoot = Join-Path $env:RUNNER_TEMP 'mab-runner-only-osmesa'
+          $mesaArchive = Join-Path $env:RUNNER_TEMP 'mesa3d-24.3.4-release-msvc.7z'
+          $url = 'https://github.com/pal1000/mesa-dist-win/releases/download/24.3.4/mesa3d-24.3.4-release-msvc.7z'
+          Invoke-WebRequest -Uri $url -OutFile $mesaArchive
+          $archiveSize = (Get-Item -LiteralPath $mesaArchive).Length
+          if ($archiveSize -ne 61425236) { throw 'OSMESA_ARCHIVE_SIZE_MISMATCH' }
+          Write-Host ('Runner-only Mesa 24.3.4 SHA256: ' +
+              (Get-FileHash -LiteralPath $mesaArchive -Algorithm SHA256).Hash.ToLowerInvariant())
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (!(Test-Path -LiteralPath $sevenZip -PathType Leaf)) { throw '7ZIP_NOT_AVAILABLE' }
+          & $sevenZip t $mesaArchive | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'OSMESA_ARCHIVE_INVALID' }
+          New-Item -ItemType Directory -Force -Path $mesaRoot | Out-Null
+          & $sevenZip x -y "-o$mesaRoot" $mesaArchive 'x64/*' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'OSMESA_ARCHIVE_EXTRACT_FAILED' }
+          $mesaBin = Join-Path $mesaRoot 'x64'
+          if (!(Test-Path -LiteralPath (Join-Path $mesaBin 'osmesa.dll') -PathType Leaf) -or
+              !(Test-Path -LiteralPath (Join-Path $mesaBin 'libglapi.dll') -PathType Leaf)) {
+            throw 'OSMESA_REQUIRED_DLL_MISSING'
+          }
+          # Export only to this Actions job, including later packaged EXE pixel QA.
+          # These environment settings are NOT bundled into the user's EXE.
+          $env:PATH = "$mesaBin;$env:PATH"
+          $env:VTK_DEFAULT_OPENGL_WINDOW = 'vtkOSOpenGLRenderWindow'
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          $mesaBin >> $env:GITHUB_PATH
+          "VTK_DEFAULT_OPENGL_WINDOW=vtkOSOpenGLRenderWindow" >> $env:GITHUB_ENV
+          "GALLIUM_DRIVER=llvmpipe" >> $env:GITHUB_ENV
           python -m app.native_selfcheck --report "$env:RUNNER_TEMP/mab-native-smoke.json"
           if ($LASTEXITCODE -ne 0) { throw 'NATIVE_RENDER_SELF_CHECK_FAILED' }
           $check = Get-Content -Raw "$env:RUNNER_TEMP/mab-native-smoke.json" | ConvertFrom-Json
