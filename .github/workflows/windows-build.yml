@@ -143,9 +143,9 @@ jobs:
           # runner-only Mesa DLL was accidentally bundled under _internal.
           # PyInstaller's DLL discovery MUST NOT see the CI software renderer.
           $mesaBin = Join-Path $env:RUNNER_TEMP 'mab-runner-only-osmesa/x64'
-          $mesaPath = $mesaBin.TrimEnd('\\','/')
+          $mesaPath = $mesaBin.TrimEnd([char]92,[char]47)
           $env:PATH = (($env:PATH -split ';' |
-            Where-Object { $_.TrimEnd('\\','/') -ine $mesaPath }) -join ';')
+            Where-Object { $_.TrimEnd([char]92,[char]47) -ine $mesaPath }) -join ';')
           Remove-Item Env:VTK_DEFAULT_OPENGL_WINDOW -ErrorAction SilentlyContinue
           Remove-Item Env:GALLIUM_DRIVER -ErrorAction SilentlyContinue
           python -m pip install pyinstaller
@@ -155,7 +155,7 @@ jobs:
           # No accidental Mesa renderer/driver may be shipped to real Windows
           # machines. Fail the build; do NOT silently delete DLLs post-build.
           $bad = @(Get-ChildItem -LiteralPath 'dist/MABStudio/_internal' -Recurse -File |
-            Where-Object { $_.Name -match '^(?:libgallium.*|osmesa|libglapi|opengl32|libegl|libglesv2|mesa.*|gallium.*)\\.dll$' })
+            Where-Object { $_.Name -match '^(?:libgallium.*|osmesa|libglapi|opengl32|libegl|libglesv2|mesa.*|gallium.*)[.]dll$' })
           if ($bad.Count -gt 0) {
             Write-Host ('CI-only graphics DLL found in release: ' + (($bad | ForEach-Object Name) -join ', '))
             throw 'CI_SOFTWARE_RENDERER_DLL_BUNDLED'
