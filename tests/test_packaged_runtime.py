@@ -62,6 +62,7 @@ def test_frozen_app_requires_license_bridge_and_transport(tmp_path, monkeypatch)
         release_runtime.verify_packaged_runtime()
     from app.education import education_bridge_script
     (internal / 'education_runtime' / 'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (internal / 'education_runtime' / 'build.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/build.mjs').read_bytes())
     (internal / 'education_runtime' / 'package.json').write_text(json.dumps({'dependencies': {'socket-be':'2.8.0'}}))
     (internal / 'education_runtime' / 'node_modules' / 'socket-be').mkdir(parents=True)
     (internal / 'education_runtime' / 'node_modules' / 'socket-be' / 'package.json').write_text(json.dumps({'version':'2.8.0','license':'MIT'}))
@@ -122,6 +123,7 @@ def test_bundle_modification_and_missing_socketbe_file_rejected(tmp_path, monkey
     (internal / 'engine_bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/engine_bridge.mjs').read_bytes())
     transport = internal / 'education_runtime'
     (transport / 'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (transport / 'build.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/build.mjs').read_bytes())
     (transport / 'package.json').write_text(json.dumps({'dependencies':{'socket-be':'2.8.0'}}))
     (transport / 'node_modules/socket-be').mkdir(parents=True)
     (transport / 'node_modules/socket-be/package.json').write_text(json.dumps({'version':'2.8.0'}))
@@ -160,6 +162,7 @@ def test_release_audit_checks_private_node_permission_and_socket_import(tmp_path
     _copy_gpu_assets(dist)
     transport=dist / '_internal/app/education_runtime'
     (transport/'bridge.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/bridge.mjs').read_bytes())
+    (transport/'build.mjs').write_bytes((Path(__file__).resolve().parents[1] / 'app/education_runtime/build.mjs').read_bytes())
     (transport/'package.json').write_text(json.dumps({'dependencies':{'socket-be':'2.8.0'}}))
     (transport/'node_modules/socket-be/package.json').write_text(json.dumps({'version':'2.8.0'}))
     calls=[]
@@ -169,7 +172,7 @@ def test_release_audit_checks_private_node_permission_and_socket_import(tmp_path
     monkeypatch.setattr(release_audit.subprocess,'run',fake_run)
     audit=release_audit.build_manifest(dist,exercise=True)
     assert audit['nodeVersionAtBuild']=='v22.16.0'
-    assert len(calls)==4
+    assert len(calls)==5
     assert any('--permission' in args for args,_ in calls)
     assert any('--self-test' in args for args,_ in calls)
     assert any('socket-be' in ' '.join(args) for args,_ in calls)

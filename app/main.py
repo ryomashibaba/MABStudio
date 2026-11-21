@@ -1,4 +1,4 @@
-"""MAB Studio Windows GUI. Offline-first, test-world only. No world-writing calls."""
+"""MAB Studio Windows GUI. Offline-first SOURCE editing and opt-in Education placement."""
 from __future__ import annotations
 import copy
 import json
@@ -26,6 +26,7 @@ from app.v11_source_import import read_external_b143_source
 from app.v11_watch import newest_v11_ready_source, sync_v11_github_ready_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
+from app.education_build import build_payload, run_education_build, EducationBuildSession
 from app.examples import example_library
 from app.revisions import RevisionStore, compare_scenes, diff_preview_scene, describe_design_changes
 from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_scene
@@ -35,7 +36,7 @@ class Studio(tk.Tk):
     def __init__(self):
         enable_windows_dpi_awareness()
         super().__init__()
-        self.title('MAB Studio — Minecraft Education 建築AI（安全プレビュー）')
+        self.title('MAB Studio — Minecraft Education 建築AI')
         if os.environ.get('MAB_STUDIO_ONE_CLICK_FALLBACK') == '1':
             self.title('MAB Studio — 安全プレビュー（軽量3D・ネイティブ準備未完了）')
         self.geometry('1210x880')
@@ -60,7 +61,9 @@ class Studio(tk.Tk):
         # a *B143 SOURCE* refusal. Never retry model/transport failures.
         self.auto_repair_invalid_generation = True
         self._education_running = False
+        self._education_building = False
         self._education_cancel = threading.Event()
+        self._education_session = EducationBuildSession()
         self._active_cancel_event = None
         self._closed = False
         self._section_after = None
@@ -74,6 +77,7 @@ class Studio(tk.Tk):
         self.section_axis = tk.StringVar(value='Y')
         self.section_side = tk.StringVar(value='低い側')
         self.place_xyz = tk.StringVar(value='0 64 0')
+        self.use_player_position = tk.BooleanVar(value=True)
         self.fast_revision_mode = tk.BooleanVar(value=True)
         provider_saved, model_saved = read_local_choice(self.manager.root)
         self.llm_provider = tk.StringVar(value=provider_saved)
@@ -86,6 +90,7 @@ class Studio(tk.Tk):
         self.place_xyz.trace_add('write', self._on_anchor_changed)
         self._poll_after = self.after(120, self._poll)
         self._startup_after = self.after(2000, self._startup)
+        self.after(750, self._start_education_server)
         # Reviewed engine updates are not automatically installable. Do not
         # interrupt users with periodic remote checks; manual check stays available.
         self._check_after = None
@@ -135,6 +140,7 @@ class Studio(tk.Tk):
             return
         self._closed = True
         self._education_cancel.set()
+        self._education_session.close()
         # Closing the window discards any in-flight AI candidate and interrupts
         # this Studio request's socket; never leave a hidden long-running POST.
         if self._active_cancel_event is not None:
@@ -475,7 +481,17 @@ class Studio(tk.Tk):
         ttk.Button(tools, text='全体表示', command=lambda: self.preview.reset_view(),
                    style='Quiet.TButton').pack(side='left', padx=(8, 0))
         detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
-        ttk.Label(tools, text='SOURCE検証済み・施工なし', style='Muted.TLabel').pack(side='right')
+        ttk.Label(tools, text='SOURCE検証・3D編集・Education施工', style='Muted.TLabel').pack(side='right')
+        # Keep the construction button visible without shrinking the creation prompt
+        # on small or high-DPI screens. The advanced panel has the manual XYZ entry.
+        placement = ttk.Frame(right, style='Panel.TFrame')
+        placement.pack(fill='x', pady=(0, 8))
+        ttk.Checkbutton(placement, text='プレイヤーの近くに建築',
+                        variable=self.use_player_position).pack(side='left')
+        self.edu_btn = ttk.Button(placement, text='Minecraft Educationに建てる',
+                                  command=self.start_education_build,
+                                  style='Primary.TButton', state='disabled')
+        self.edu_btn.pack(side='right')
 
         # One-click camera directions for reviewing different facades/floors.
         # Pure view state; no new SOURCE computation, history, or world writes.
@@ -612,7 +628,7 @@ class Studio(tk.Tk):
         ttk.Checkbutton(advanced, text='AI修正を軽量化（変更要素だけ生成）',
                         variable=self.fast_revision_mode).pack(anchor='w', pady=(0, 8))
         ttk.Separator(advanced).pack(fill='x', pady=(1, 14))
-        ttk.Label(advanced, text='地形・Education（読み取り専用）', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(advanced, text='地形・Minecraft Education', style='Section.TLabel').pack(anchor='w')
         terrainbar = ttk.Frame(advanced)
         terrainbar.pack(fill='x', pady=(9, 6))
         ttk.Label(terrainbar, text='予定位置 XYZ').pack(side='left')
@@ -632,12 +648,8 @@ class Studio(tk.Tk):
         self.edu_stop_btn = ttk.Button(educationbar, text='読取待機を停止',
                                        command=self.stop_education_readonly, state='disabled')
         self.edu_stop_btn.pack(side='left')
-        self.edu_btn = ttk.Button(advanced, text='Minecraftに施工（未実装・利用不可）',
-                                  state='disabled')
-        self.edu_btn.pack(anchor='w', pady=(4, 4))
-        ttk.Label(advanced, text='B143は設計専用です。施工許可はありません。\n'
-                 'Educationへの直接接続は既存の1点読取診断に限定します。',
-                 style='Muted.TLabel').pack(anchor='w')
+        ttk.Label(advanced, text='建築ボタンはメイン画面にあります。予定位置XYZを原点にします。',
+                  style='Muted.TLabel').pack(anchor='w')
         ttk.Button(advanced, text='閉じる', command=self._advanced.place_forget).pack(side='right', pady=(10, 0))
 
     def _submit_prompt_shortcut(self, _event):
@@ -785,9 +797,9 @@ class Studio(tk.Tk):
                     # A cancelled request can enqueue progress just before a new
                     # request begins. Ignore that stale message, not just the
                     # cancelled request's final response.
-                    if (self.busy and cancel_event is not None
-                            and self._active_cancel_event is cancel_event
-                            and not cancel_event.is_set()):
+                    if (self.busy and (cancel_event is None or
+                            (self._active_cancel_event is cancel_event
+                             and not cancel_event.is_set()))):
                         self.status.set(str(result))
                     continue
                 self.busy=False
@@ -799,8 +811,9 @@ class Studio(tk.Tk):
                         self.status.set('キャンセル済み：回答は破棄しました。サーバー側の推論停止は確認できません。')
                         self._update_engine_label()
                         continue
-                if title.startswith('Education直接読取'):
+                if title.startswith(('Education直接読取', 'Education建築')):
                     self._education_running=False
+                    self._education_building=False
                 if kind=='error':
                     if title.startswith('Education直接読取') and '接続待機を中止しました' in str(result):
                         quiet=True
@@ -871,7 +884,11 @@ class Studio(tk.Tk):
             self.compare_draft_btn.configure(
                 state='normal' if not self.busy and self.scene is not None else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
-        self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled')
+        self.edu_btn.configure(state='normal' if (ready and self.current_snapshot is not None
+            and self.scene is not None and self.design is not None
+            and self.manager.active_path is not None) else 'disabled')
+        self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled',
+            text='施工を中止' if self._education_building else '読取待機を停止')
         self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled',
                                     text='軽量3Dに切替' if isinstance(self.preview, NativeVoxelPreview) else '高精細3D（アプリ内）')
         self.unload_btn.configure(state='normal' if not self.busy and bool(self.model.get().strip()) else 'disabled')
@@ -1046,6 +1063,57 @@ class Studio(tk.Tk):
             self.compare_draft_btn.configure(
                 text='修正案を見る' if mode == '建築のみ' else '元の建築を見る')
 
+    def _start_education_server(self):
+        # Start accepting Minecraft connections while the GUI is open, not at
+        # the moment Build is pressed. The pairing command is needed once per
+        # Minecraft connection; subsequent builds are one-click.
+        def start():
+            try:self._education_session.ensure_started()
+            except Exception as exc:
+                self.pending_events.put(('progress','Education建築',
+                    'Education接続未準備: '+str(exc),None,True,None))
+        threading.Thread(target=start,daemon=True).start()
+
+    def start_education_build(self):
+        """One button to place the selected, approved SOURCE in Minecraft Education."""
+        if self.busy or self._education_running or self.pending_revision is not None:
+            return
+        if not self.current_snapshot or not self.scene or not self.design:
+            messagebox.showwarning('建築を選択', 'まずSOURCEを3Dで確認し、承認・保存してください。')
+            return
+        try:
+            origin = ((0, 64, 0) if self.use_player_position.get() else
+                      parse_probe_coordinates(self.place_xyz.get().replace(',', ' ')))
+        except StudioError as exc:
+            messagebox.showerror('建築位置', str(exc))
+            return
+        engine = self.manager.active_path
+        design = copy.deepcopy(self.design)
+        displayed_source = self.scene['sourceSha256']
+        displayed_geometry = self.scene['geometrySha256']
+        placement_by_player = self.use_player_position.get()
+        self._education_cancel.clear()
+        self._education_running = True
+        self._education_building = True
+        def work():
+            verified = run_bridge(engine, design)
+            if (verified['sourceSha256'] != displayed_source or
+                    verified['geometrySha256'] != displayed_geometry):
+                raise StudioError('表示中のSOURCEと固定B143の再検証結果が一致しません')
+            payload = build_payload(verified, origin, use_player_position=placement_by_player)
+            def progress(msg):
+                self.pending_events.put(('progress', 'Education建築', msg, None, True, None))
+            return run_education_build(payload, stop=self._education_cancel,
+                                       on_progress=progress, session=self._education_session)
+        def done(result):
+            self.status.set(f'Educationのコマンド確認済み：{result["confirmedBlocks"]:,}セル')
+            messagebox.showinfo('Minecraft Educationへの建築',
+                f'ゲームのコマンド応答で{result["confirmedBlocks"]:,}セルの配置を確認しました。\n'
+                f'実行記録: {result["receiptPath"]}\n\n'
+                'ゲーム内の見た目を確認してください。独立した全ブロック読戻しは未実施です。')
+        self._start('Education建築：配置中', work, done)
+        self.status.set('Educationへ建築を送信しています。未接続ならゲーム内で /wsserver 127.0.0.1:8001 を一度だけ実行')
+
     def start_education_readonly(self):
         """User-initiated test-world transport. Never performs Minecraft writes."""
         if self.busy or self._education_running:
@@ -1087,7 +1155,7 @@ class Studio(tk.Tk):
     def stop_education_readonly(self):
         if self._education_running:
             self._education_cancel.set()
-            self.status.set('Education読取の停止を要求しました。ワールドは変更しません。')
+            self.status.set('Education処理の停止を要求しました。施工中なら一部のブロックが残る可能性があります。')
 
     def import_education_diagnostic(self):
         # Existing B134 connector does the real read-only WebSocket probing.
@@ -1677,7 +1745,7 @@ class Studio(tk.Tk):
         self._refresh_view()
         self._refresh_buttons()
         self.caption.set(f'{scene.get("title", "建築")} | {scene["stats"]["voxels"]:,}セル'
-                         f' | SOURCE検証成功 | {qualifier} | 施工禁止')
+                         f' | SOURCE検証成功 | {qualifier} | Education建築可能')
         self.export_btn.configure(state='normal')
         if self.delta is not None:
             self.caption.set(self.caption.get() + ' | 追加' + str(self.delta['counts']['added']) +

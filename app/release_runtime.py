@@ -29,7 +29,8 @@ def verify_packaged_runtime() -> dict:
     if not bundle:
         raise StudioError('配布EXEの同梱データの場所が分かりません。再展開してください。')
     base = Path(bundle).resolve() / 'app' / 'education_runtime'
-    if not (base / 'bridge.mjs').is_file() or not (base / 'node_modules' / 'socket-be' / 'package.json').is_file():
+    if (not (base / 'bridge.mjs').is_file() or not (base / 'build.mjs').is_file()
+            or not (base / 'node_modules' / 'socket-be' / 'package.json').is_file()):
         raise StudioError('配布EXEのEducation読み取り専用部品がありません。完全な配布フォルダが必要です。')
     # A published onedir build includes a manifest generated ONLY after the
     # private Node, SocketBE import and read-only self-test have run at build.

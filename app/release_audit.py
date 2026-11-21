@@ -15,6 +15,7 @@ import sys
 
 from app.core import StudioError
 from app.education import LIVE_BRIDGE_SOURCE_SHA256
+from app.education_build import BUILD_BRIDGE_SHA256
 
 SCHEMA = 'mab-studio-critical-runtime-manifest-v1'
 MANIFEST = 'RUNTIME_MANIFEST.json'
@@ -60,6 +61,7 @@ def _runtime_files(root: Path) -> list[str]:
             raise StudioError('配布版の部品が大きすぎます: ' + key[:160])
     required = {
         f'{RUNTIME_FOLDER}/bridge.mjs',
+        f'{RUNTIME_FOLDER}/build.mjs',
         f'{RUNTIME_FOLDER}/package.json',
         f'{RUNTIME_FOLDER}/node_modules/socket-be/package.json',
     }
@@ -79,6 +81,8 @@ def _check_transport_metadata(root: Path) -> None:
         raise StudioError('同梱SocketBEが検証対象の2.8.0と一致しません')
     if _digest(folder / 'bridge.mjs') != LIVE_BRIDGE_SOURCE_SHA256:
         raise StudioError('Education読み取り専用コードのSHAが一致しません')
+    if _digest(folder / 'build.mjs') != BUILD_BRIDGE_SHA256:
+        raise StudioError('Education施工コードのSHAが一致しません')
 
 
 def build_manifest(root: Path, *, exercise: bool = True) -> dict:
@@ -105,6 +109,7 @@ def build_manifest(root: Path, *, exercise: bool = True) -> dict:
         run(['--permission', '-e',
              'if (!process.permission || typeof process.permission.has!=="function") process.exit(3)'])
         run([str(root / RUNTIME_FOLDER / 'bridge.mjs'), '--self-test'])
+        run([str(root / RUNTIME_FOLDER / 'build.mjs'), '--self-test'])
         run(['--input-type=module', '-e',
              'import("socket-be").then(m=>{if(typeof m.Server!=="function" || !m.ServerEvent)process.exit(4)}).catch(e=>{console.error(e);process.exit(5)})'],
              cwd=str(root / RUNTIME_FOLDER))
