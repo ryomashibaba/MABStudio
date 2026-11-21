@@ -180,3 +180,90 @@ def test_portable_updater_does_not_run_during_source_or_without_consent_env(monk
     monkeypatch.setenv('MAB_STUDIO_DISABLE_AUTO_UPDATE', '1')
     assert not prepare_update()
     assert not launch_ready_at_startup()
+
+
+def test_portable_update_stages_and_switches_without_touching_world(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    import json
+    import shutil
+    import subprocess
+    import sys
+    import zipfile
+    from types import SimpleNamespace
+    from app import portable_update as updater
+
+    sha_old, sha_new = 'a'*40, 'b'*40
+    base = tmp_path / 'user-data' / 'auto-update'
+    current = tmp_path / 'current' / 'MABStudio.exe'
+    current.parent.mkdir()
+    current.write_bytes(b'old-test-exe')
+    (current.parent/'RUNTIME_MANIFEST.json').write_text(json.dumps({
+        'schema':'mab-studio-critical-runtime-manifest-v1',
+        'studioGitSha': sha_old, 'builtAtUtc':'2026-11-20T11:00:00Z',
+    }), encoding='utf-8')
+    filedata = io.BytesIO()
+    with zipfile.ZipFile(filedata, 'w') as z:
+        files = {
+            'MABStudio/MABStudio.exe': b'new-test-exe',
+            'MABStudio/node.exe': b'fake-node',
+            'MABStudio/RUNTIME_MANIFEST.json': json.dumps({
+                'schema':'mab-studio-critical-runtime-manifest-v1',
+                'studioGitSha':sha_new,
+                'builtAtUtc':'2026-11-21T11:00:00Z',
+            }).encode(),
+            'MABStudio/_internal/app/education_runtime/build.mjs': b'// fake test file',
+        }
+        files.update({'MABStudio/_internal/test' + str(i) + '.txt': b'nonempty'
+                      for i in range(8)})
+        for path, content in files.items():
+            z.writestr(path, content)
+    archive_data = filedata.getvalue()
+    release = {'sha':sha_new, 'digest': hashlib.sha256(archive_data).hexdigest(),
+               'size':len(archive_data), 'publishedAt':'2026-11-21T12:00:00Z',
+               'url':'https://github.com/ryomashibaba/MABStudio/releases/download/test/test.zip'}
+    monkeypatch.setattr(sys,'frozen',True,raising=False)
+    monkeypatch.setattr(sys,'executable',str(current))
+    monkeypatch.setattr(updater,'_base',lambda:base)
+    monkeypatch.setattr(updater,'_download_metadata',lambda:release)
+
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self,*args): self.close()
+    assert updater.prepare_update.__module__ == 'app.portable_update'
+    monkeypatch.setattr(updater.urllib.request,'urlopen',lambda *args,**kw: Response(archive_data))
+    assert updater.prepare_update()
+    dest = base/'portable-versions'/sha_new/'MABStudio'/'MABStudio.exe'
+    assert dest.read_bytes()==b'new-test-exe'
+    assert not (base/'projects').exists()
+    assert not updater.prepare_update()  # already staged, no second download
+
+    observed = []
+    def fake_native(cmd,**kwargs):
+        assert '--native-selfcheck' in cmd
+        report=Path(cmd[cmd.index('--report')+1])
+        report.write_text(json.dumps({'result':'PASS_NATIVE_READONLY_SELF_CHECK'}))
+        observed.append('native')
+        return subprocess.CompletedProcess(cmd,0)
+    class FakeChild:
+        def poll(self): return None
+    def fake_gui(cmd,**kwargs):
+        assert cmd == [str(dest)]
+        observed.append('gui')
+        return FakeChild()
+    monkeypatch.setattr(updater.subprocess,'run',fake_native)
+    monkeypatch.setattr(updater.subprocess,'Popen',fake_gui)
+    monkeypatch.setattr(updater.time,'sleep',lambda _:None)
+    assert updater.launch_ready_at_startup()
+    assert observed==['native','gui']
+    assert current.read_bytes()==b'old-test-exe'
+    # Failed-version cooldown stops repeated GUI crashes on future launches.
+    (base/'portable-failed.json').write_text(json.dumps({
+        'sha':sha_new, 'at':'2026-11-21T11:00:00+00:00',
+    }))
+    # Simulated current clock may be later than 12h; pin it to runtime UTC.
+    from datetime import datetime,timezone
+    (base/'portable-failed.json').write_text(json.dumps({
+        'sha':sha_new, 'at':datetime.now(timezone.utc).isoformat(),
+    }))
+    assert not updater.launch_ready_at_startup()

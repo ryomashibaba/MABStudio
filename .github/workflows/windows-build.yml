@@ -80,7 +80,8 @@ jobs:
             tests/test_source_metadata_repair.py `
             tests/test_release_guards.py `
             tests/test_node_packaging.py `
-            tests/test_packaged_runtime.py
+            tests/test_packaged_runtime.py `
+            tests/test_v11_feed_and_autoupdate.py
           if ($LASTEXITCODE -ne 0) { throw 'PYTEST_FAILED' }
       - name: Node read-only command allowlist offline test
         shell: pwsh

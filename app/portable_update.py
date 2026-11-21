@@ -226,6 +226,9 @@ def prepare_update() -> bool:
         destination = _version_dir(release['sha'])
         if not destination.exists():
             os.replace(extracted, destination)
+        elif _manifest(destination / 'MABStudio' / 'MABStudio.exe').get('studioGitSha') != release['sha']:
+            # Never overwrite someone else's or an incomplete version directory.
+            raise ValueError('UPDATE_VERSION_DIRECTORY_CONFLICT')
         atomic_json(_state_file(), {
             'schema': READY_SCHEMA, 'sha': release['sha'],
             'digest': release['digest'], 'publishedAt': release['publishedAt'],
@@ -263,6 +266,14 @@ def launch_ready_at_startup() -> bool:
     source = _manifest(Path(sys.executable))
     if source.get('studioGitSha') == ready['sha']:
         return False
+    bad = _read_json(_base() / 'portable-failed.json')
+    if bad.get('sha') == ready['sha']:
+        try:
+            if (datetime.now(timezone.utc) -
+                datetime.fromisoformat(bad['at'])).total_seconds() < 12 * 3600:
+                return False
+        except (ValueError, TypeError):
+            pass
     if source.get('studioGitSha') not in ('', None) and source.get('builtAtUtc'):
         try:
             release_date = datetime.fromisoformat(ready['publishedAt'].replace('Z', '+00:00'))
