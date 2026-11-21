@@ -202,14 +202,16 @@ def _source_sha256(engine: Path) -> str:
 
 
 def _sandbox_node_args(node: str, engine: Path, inp: Path, out: Path) -> list[str]:
-    # A reviewed B143 source has zero local JS imports: grant only these 3 reads.
-    # Node 22+ permission model blocks unexpected fs reads/writes, workers and
-    # child processes. This is an additional guard, not a full network sandbox.
+    # Windows Node ESM resolution may read the parent folder while resolving
+    # exact .mjs filenames. Limit reads to these three approved directories,
+    # not the host filesystem. Node still forbids subprocesses and writes
+    # outside the one scene output file. The B143 source SHA is checked first.
     script = bridge_script().resolve()
+    module = (engine / ENGINE_FILE).resolve()
     return [node, "--permission",
-            f"--allow-fs-read={script}",
-            f"--allow-fs-read={(engine / ENGINE_FILE).resolve()}",
-            f"--allow-fs-read={inp.resolve()}",
+            f"--allow-fs-read={script.parent}",
+            f"--allow-fs-read={module.parent}",
+            f"--allow-fs-read={inp.resolve().parent}",
             f"--allow-fs-write={out.resolve()}",
             str(script)]
 
