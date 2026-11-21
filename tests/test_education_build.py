@@ -70,7 +70,7 @@ def test_receipt_success_and_partial_failed_are_not_conflated(tmp_path):
                             output_root=tmp_path/'partial')
     saved=list((tmp_path/'partial').glob('EDUCATION_BUILD_*.json'))
     assert len(saved)==1
-    receipt=json.loads(saved[0].read_text())
+    receipt=json.loads(saved[0].read_text(encoding='utf-8'))
     assert receipt['status']=='PARTIAL_OR_FAILED'
     assert receipt['confirmedBlocks']==6
 
