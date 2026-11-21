@@ -43,8 +43,25 @@ jobs:
       - name: Unit tests including the real pinned B143
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          # setup-python's Tcl/Tk scripts must be resolved from the SAME Python,
+          # not an unrelated runner-installed Tcl. Otherwise Windows runners
+          # can intermittently fail creating Tk with tcl_findLibrary errors.
+          $pyRoot = (python -c "import sys; print(sys.base_prefix)").Trim()
+          $tcl = Join-Path $pyRoot 'tcl/tcl8.6'
+          $tk = Join-Path $pyRoot 'tcl/tk8.6'
+          if (!(Test-Path -LiteralPath (Join-Path $tcl 'init.tcl') -PathType Leaf) -or
+              !(Test-Path -LiteralPath (Join-Path $tk 'tk.tcl') -PathType Leaf)) {
+            throw 'SETUP_PYTHON_TCL_TK_LIBRARIES_MISSING'
+          }
+          $env:TCL_LIBRARY = $tcl
+          $env:TK_LIBRARY = $tk
+          python -c "import tkinter as tk; [(lambda r: (r.withdraw(), r.destroy()))(tk.Tk()) for _ in range(3)]"
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_TK_BOOTSTRAP_FAILED' }
           python -m pip install pytest pytest-timeout
+          if ($LASTEXITCODE -ne 0) { throw 'PYTEST_INSTALL_FAILED' }
           python -m pytest -vv --maxfail=1 --tb=short -rs --timeout=120 --timeout-method=thread
+          if ($LASTEXITCODE -ne 0) { throw 'PYTEST_FAILED' }
       - name: Node read-only command allowlist offline test
         shell: pwsh
         run: |
