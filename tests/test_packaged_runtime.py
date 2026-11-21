@@ -78,6 +78,16 @@ def test_frozen_app_requires_license_bridge_and_transport(tmp_path, monkeypatch)
     assert core.node_binary() == str(dist / 'node.exe')
 
 
+def test_ci_software_opengl_dll_never_shipped(tmp_path, monkeypatch):
+    dist = _frozen(monkeypatch, tmp_path)
+    driver = dist / '_internal' / 'libgallium_wgl.dll'
+    driver.write_bytes(b'runner-only Mesa DLL')
+    with pytest.raises(core.StudioError, match='描画DLL'):
+        release_audit._reject_ci_graphics_dlls(dist)
+    driver.unlink()
+    release_audit._reject_ci_graphics_dlls(dist)
+
+
 def test_windows_launcher_prefers_packaged_exe_and_never_repackages_it():
     launcher = Path(__file__).resolve().parents[1] / 'start_windows.bat'
     source = launcher.read_text(encoding='utf-8').lower()

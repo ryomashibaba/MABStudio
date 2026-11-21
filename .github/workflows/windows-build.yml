@@ -139,8 +139,27 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # The previous artifact crashed on an RTX Windows PC because this
+          # runner-only Mesa DLL was accidentally bundled under _internal.
+          # PyInstaller's DLL discovery MUST NOT see the CI software renderer.
+          $mesaBin = Join-Path $env:RUNNER_TEMP 'mab-runner-only-osmesa/x64'
+          $mesaPath = $mesaBin.TrimEnd('\\','/')
+          $env:PATH = (($env:PATH -split ';' |
+            Where-Object { $_.TrimEnd('\\','/') -ine $mesaPath }) -join ';')
+          Remove-Item Env:VTK_DEFAULT_OPENGL_WINDOW -ErrorAction SilentlyContinue
+          Remove-Item Env:GALLIUM_DRIVER -ErrorAction SilentlyContinue
           python -m pip install pyinstaller
+          if ($LASTEXITCODE -ne 0) { throw 'PYINSTALLER_INSTALL_FAILED' }
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name MABStudio --paths . --collect-all vtkmodules --hidden-import vtkmodules.vtkRenderingOpenGL2 --hidden-import vtkmodules.vtkIOImage --add-data 'app/engine_bridge.mjs;app' --add-data 'app/gpu_viewer_assets;app/gpu_viewer_assets' --add-data 'app/education_runtime;app/education_runtime' app/main.py
+          if ($LASTEXITCODE -ne 0) { throw 'EXE_BUILD_FAILED' }
+          # No accidental Mesa renderer/driver may be shipped to real Windows
+          # machines. Fail the build; do NOT silently delete DLLs post-build.
+          $bad = @(Get-ChildItem -LiteralPath 'dist/MABStudio/_internal' -Recurse -File |
+            Where-Object { $_.Name -match '^(?:libgallium.*|osmesa|libglapi|opengl32|libegl|libglesv2|mesa.*|gallium.*)\\.dll$' })
+          if ($bad.Count -gt 0) {
+            Write-Host ('CI-only graphics DLL found in release: ' + (($bad | ForEach-Object Name) -join ', '))
+            throw 'CI_SOFTWARE_RENDERER_DLL_BUNDLED'
+          }
           python -m app.node_packaging dist/MABStudio
           if ($LASTEXITCODE -ne 0) { throw 'NODE_PACKAGING_AND_LICENSE_FAILED' }
           if (!(Test-Path 'dist/MABStudio/MABStudio.exe')) { throw 'EXE_MISSING' }

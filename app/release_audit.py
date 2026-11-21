@@ -38,8 +38,28 @@ def _digest(path: Path) -> str:
     return h.hexdigest()
 
 
+def _reject_ci_graphics_dlls(root: Path) -> None:
+    """Fail closed if CI's software OpenGL driver was bundled for user PCs.
+
+    A GitHub runner uses temporary Mesa OSMesa for headless pixel verification.
+    That driver must never override the user's native GPU OpenGL driver.
+    """
+    internal = root / '_internal'
+    if not internal.is_dir():
+        raise StudioError('配布版の同梱データがありません')
+    names = ('libgallium', 'osmesa', 'libglapi', 'opengl32',
+             'libegl', 'libglesv2', 'mesa', 'gallium')
+    for item in internal.rglob('*'):
+        if item.is_file() and item.suffix.casefold() == '.dll':
+            base = item.stem.casefold()
+            if base.startswith(names):
+                raise StudioError('配布版に検証専用の描画DLLが混入しています: '
+                                  + item.name[:100])
+
+
 def _runtime_files(root: Path) -> list[str]:
     """Inventory a bounded, deterministic set of essential shipped assets."""
+    _reject_ci_graphics_dlls(root)
     keys = set(BASE_FILES)
     runtime = root / RUNTIME_FOLDER
     if not runtime.is_dir() or runtime.is_symlink():
