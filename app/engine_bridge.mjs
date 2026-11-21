@@ -26,4 +26,13 @@ async function main() {
   fs.writeFileSync(output, JSON.stringify(scene), {encoding: 'utf8', flag: 'wx'});
   process.stdout.write(JSON.stringify({ok:true,sourceSha256:scene.sourceSha256,voxels:scene.primitives.length}) + '\n');
 }
-main().catch(e => {process.stderr.write(String(e?.message || e) + '\n');process.exitCode=1;});
+main().catch(e => {
+  // Report the denied *basename* only: enough to debug a Windows permission
+  // boundary without exposing a user's file paths, prompt, or building JSON.
+  if(e?.code==='ERR_ACCESS_DENIED'){
+    const resource=String(e.resource??'unknown').replace(/\\/g,'/');
+    process.stderr.write('NODE_PERMISSION_DENIED '+String(e.permission??'unknown')+
+      ' '+resource.split('/').pop().slice(0,100)+'\n');
+  }else process.stderr.write(String(e?.message || e) + '\n');
+  process.exitCode=1;
+});
