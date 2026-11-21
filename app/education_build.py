@@ -22,7 +22,7 @@ from app.core import StudioError, atomic_json, node_binary, user_root
 from app.education import parse_probe_coordinates
 
 SCHEMA = 'mab-studio-education-placement-v1'
-BUILD_BRIDGE_SHA256 = 'c9643698d783a7bf58dedf6e7f4cbefd9e2c61f65d1cf9b64a81e4773755331d'
+BUILD_BRIDGE_SHA256 = '5e72afc0218a02cd6f21ce9439348de8e25a052447cf4fdee8e1a4458d06f7f9'
 MAX_OUTPUT_LINE = 16_384
 
 
@@ -92,11 +92,17 @@ class EducationBuildSession:
             threading.Thread(target=read_stderr,daemon=True).start()
             return self.process
 
-    def submit(self,payload):
+    def submit(self,payload, *, project_id: str | None = None):
         proc=self.ensure_started()
         if proc.poll() is not None:raise StudioError('Education接続プロセスが停止しています')
         try:
-            proc.stdin.write(json.dumps({'action':'build','payload':payload},separators=(',',':'))+'\n')
+            request={'action':'build','payload':payload}
+            if project_id is not None:
+                if not isinstance(project_id,str) or len(project_id)!=32 or any(
+                        ch not in '0123456789abcdef' for ch in project_id):
+                    raise StudioError('プロジェクト識別子が不正です')
+                request['projectId']=project_id
+            proc.stdin.write(json.dumps(request,separators=(',',':'))+'\n')
             proc.stdin.flush()
         except (BrokenPipeError,OSError) as e:
             raise StudioError('Education接続へ建築を依頼できません') from e
@@ -120,7 +126,8 @@ class EducationBuildSession:
 def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                         on_progress=None, node: str | None = None,
                         script: Path | None = None, output_root: Path | None = None,
-                        timeout: float = 3600.0, session: EducationBuildSession | None = None) -> dict:
+                        timeout: float = 3600.0, session: EducationBuildSession | None = None,
+                        project_id: str | None = None) -> dict:
     """Send validated blocks; use a persistent paired world if session is provided."""
     script = Path(script) if script is not None else bridge_path()
     if not script.is_file():
@@ -140,6 +147,7 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
         'geometrySha256': payload.get('geometrySha256'),
         'origin': payload.get('origin'),
         'status': 'STARTING', 'confirmedBlocks': 0, 'completedCommands': 0,
+        'targetCells': payload.get('voxels'),
         'readbackVerified': False, 'gameConnectionConfirmed': False,
     }
     output = Queue()
@@ -153,7 +161,7 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
             if session is not None:
                 proc=session.ensure_started()
                 output=session.output
-                session.submit(payload)
+                session.submit(payload,project_id=project_id)
             else:
                 proc = subprocess.Popen(
                     [node, str(script), '--listen', str(file)],
@@ -223,6 +231,9 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                 if event['type'] == 'result':
                     record['status'] = 'COMMANDS_ACKNOWLEDGED'
                     record['totalCommands'] = event.get('commands')
+                    record['plannedBlocks'] = event.get('plannedBlocks',payload['voxels'])
+                    record['targetCells'] = event.get('targetCells',payload['voxels'])
+                    record['changeCounts'] = event.get('changes')
                     record['readbackVerified'] = False
                     if event.get('sourceSha256') != payload.get('sourceSha256') or (
                             event.get('geometrySha256') != payload.get('geometrySha256')):
@@ -235,7 +246,7 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                 proc.wait(timeout=2)
             results = [e for e in events if e['type'] == 'result']
             if ((session is None and proc.returncode != 0) or len(results) != 1 or
-                    record['confirmedBlocks'] != payload['voxels']):
+                    record['confirmedBlocks'] != record.get('plannedBlocks',payload['voxels'])):
                 reason = record.get('error') or ''.join(stderr_parts)[-240:] or 'コマンドの全件確認が取れませんでした'
                 raise StudioError('Education施工未完了: ' + reason +
                                   f'（確認済み {record["confirmedBlocks"]}セル。途中まで配置済みの可能性）')

@@ -20,6 +20,7 @@ export const MATERIALS=Object.freeze([
 ]);
 const LAYERS=Object.freeze(['B143_STONE','B143_CONCRETE','B143_METAL',
   'B143_GLASS','B143_WOOD','B143_GLOW','B143_ACCENT']);
+const AIR='minecraft:air';
 const MAX_VOXELS=160000;
 const MAX_FILL=32768;
 const MAX_COMMANDS=MAX_VOXELS;
@@ -55,10 +56,9 @@ export function validatePayload(p) {
 }
 
 /** Greedily merge X runs, adjacent Z rows, then identical Y rectangles. */
-export function plan(p) {
-  validatePayload(p);
+function compileCells(p,cells) {
   const rows=new Map();
-  for(const [x,y,z,m] of p.primitives){
+  for(const [x,y,z,m] of cells){
     const k=`${y}|${z}`;
     if(!rows.has(k))rows.set(k,[]);
     rows.get(k).push([x,m]);
@@ -104,7 +104,7 @@ export function plan(p) {
       const n=area*(y2-y+1);
       const a=[origin.x+s.x1,origin.y+y,origin.z+s.z1];
       const b=[origin.x+s.x2,origin.y+y2,origin.z+s.z2];
-      const block=MATERIALS[s.m];
+      const block=s.m===MATERIALS.length ? AIR : MATERIALS[s.m];
       const command=n===1 ? `setblock ${a.join(' ')} ${block}` :
         `fill ${a.join(' ')} ${b.join(' ')} ${block}`;
       commands.push({command,blocks:n});
@@ -112,11 +112,50 @@ export function plan(p) {
       if(commands.length>MAX_COMMANDS)fail('COMMAND_BUDGET');
     }
   }
-  if(blocks!==p.voxels)fail('CELL_ACCOUNTING');
+  if(blocks!==cells.length)fail('CELL_ACCOUNTING');
   return {commands,blocks,origin,sourceSha256:p.sourceSha256,
     geometrySha256:p.geometrySha256};
 }
 
+/** Full first build still uses only the verified B143 primitives. */
+export function plan(p) {
+  validatePayload(p);
+  return compileCells(p,p.primitives);
+}
+
+/** Re-place only the changes for this project's known site.
+ * On a partially failed build, overwrite every potentially touched voxel.
+ */
+export function planRevision(p,previous=null,uncertain=new Set()) {
+  validatePayload(p);
+  if(previous) {
+    validatePayload(previous);
+    if(['x','y','z'].some(axis=>p.origin[axis]!==previous.origin[axis]))
+      fail('REVISION_ORIGIN');
+  }
+  if(!(uncertain instanceof Set))fail('UNCERTAIN_CELLS');
+  const old=new Map((previous?.primitives??[]).map(c=>[c.slice(0,3).join(','),c]));
+  const next=new Map(p.primitives.map(c=>[c.slice(0,3).join(','),c]));
+  const edits=[];
+  let added=0,replaced=0,removed=0;
+  for(const [key,c] of next){
+    const before=old.get(key);
+    if(uncertain.size || !before || before[3]!==c[3]) {
+      edits.push(c);
+      if(!before)added++;
+      else if(before[3]!==c[3])replaced++;
+    }
+  }
+  for(const key of new Set([...old.keys(),...uncertain])){
+    if(next.has(key))continue;
+    const xyz=key.split(',').map(Number);
+    if(xyz.length!==3||xyz.some(n=>!integer(n)))fail('UNCERTAIN_CELL_KEY');
+    edits.push([xyz[0],xyz[1],xyz[2],MATERIALS.length,Math.floor(xyz[1]/5)]);
+    removed++;
+  }
+  const compiled=compileCells(p,edits);
+  return {...compiled,changes:{added,replaced,removed},isRevision:true};
+}
 function report(type,body={}){process.stdout.write(JSON.stringify({type,...body})+'\n');}
 function exitSoon(code){setTimeout(()=>process.exit(code),75).unref();}
 function readPayload(file){
@@ -191,6 +230,7 @@ async function serve(){
   const {createInterface}=await import('node:readline');
   const server=new Server({port:PORT,webSocketOptions:{host:'127.0.0.1',maxPayload:65536}});
   let busy=false;
+  const deployments=new Map(); // projectId -> site in the live world
   server.on(ServerEvent.Open,()=>report('listening',{port:PORT,
     connectCommand:`/wsserver 127.0.0.1:${PORT}`}));
   const reader=createInterface({input:process.stdin,crlfDelay:Infinity});
@@ -198,10 +238,14 @@ async function serve(){
     if(line.length>9*1024*1024){report('error',{message:'PAYLOAD_TOO_LARGE'});return;}
     if(busy){report('error',{message:'BUILD_ALREADY_RUNNING'});return;}
     busy=true;
-    let compiled;
+    let compiled,payload,projectId,prior,world;
     try {
       const request=JSON.parse(line);
       if(request?.action!=='build')fail('UNKNOWN_ACTION');
+      projectId=request.projectId;
+      if(projectId!==undefined &&
+          (typeof projectId!=='string'||!/^[a-f0-9]{32}$/.test(projectId)))
+        fail('PROJECT_ID');
       const worlds=server.getWorlds();
       if(worlds.length!==1){
         report('error',{message:worlds.length===0 ?
@@ -209,20 +253,45 @@ async function serve(){
           'MULTIPLE_WORLDS_CONNECTED',completed:0,confirmedBlocks:0});
         return;
       }
-      let payload=request.payload;
+      world=worlds[0];
+      prior=projectId ? deployments.get(projectId) : null;
+      if(prior && prior.world!==world)prior=null;
+      payload=request.payload;
       if(payload?.placementMode==='player'){
-        const player=await worlds[0].getLocalPlayer();
-        const position=await player.getLocation();
-        if(!position || !['x','y','z'].every(a=>Number.isFinite(position[a])))fail('PLAYER_POSITION_UNAVAILABLE');
-        payload={...payload,origin:{x:Math.floor(position.x)+8,
-          y:Math.floor(position.y)-1,z:Math.floor(position.z)+8}};
+        let origin;
+        if(prior)origin=prior.origin;
+        else {
+          const player=await world.getLocalPlayer();
+          const position=await player.getLocation();
+          if(!position || !['x','y','z'].every(a=>Number.isFinite(position[a])))
+            fail('PLAYER_POSITION_UNAVAILABLE');
+          origin={x:Math.floor(position.x)+8,y:Math.floor(position.y)-1,
+            z:Math.floor(position.z)+8};
+        }
+        payload={...payload,origin};
       }
-      compiled=plan(payload);
-      report('started',{commands:compiled.commands.length,blocks:compiled.blocks,origin:compiled.origin});
-      const result=await perform(worlds[0],compiled,p=>report('progress',p));
+      validatePayload(payload);
+      if(prior && ['x','y','z'].some(axis=>prior.origin[axis]!==payload.origin[axis]))
+        prior=null;
+      compiled=prior ? planRevision(payload,prior.payload,prior.uncertain) : plan(payload);
+      report('started',{commands:compiled.commands.length,blocks:compiled.blocks,
+        origin:compiled.origin});
+      const result=await perform(world,compiled,p=>report('progress',p));
+      if(projectId)deployments.set(projectId,{
+        world,origin:payload.origin,payload,uncertain:new Set()});
       report('result',{...result,sourceSha256:compiled.sourceSha256,
-        geometrySha256:compiled.geometrySha256,origin:compiled.origin,readbackVerified:false});
+        geometrySha256:compiled.geometrySha256,origin:compiled.origin,
+        plannedBlocks:compiled.blocks,targetCells:payload.voxels,
+        changes:compiled.changes??{added:payload.voxels,replaced:0,removed:0},
+        readbackVerified:false});
     }catch(error){
+      // Transport errors can happen after the world was partially modified.
+      if(projectId && payload && world && compiled && compiled.commands.length){
+        const record=prior??{world,origin:payload.origin,payload:null,uncertain:new Set()};
+        for(const c of payload.primitives)
+          record.uncertain.add(c.slice(0,3).join(','));
+        deployments.set(projectId,record);
+      }
       report('error',{message:String(error?.message??'error').slice(0,240),
         completed:error?.completed??0,confirmedBlocks:error?.confirmedBlocks??0,
         partialWorldMayRemain:true});
@@ -243,7 +312,20 @@ async function selfTest(){
   if(compiled.blocks!==5||compiled.commands.length!==2||actual.confirmedBlocks!==5||
       calls[0]!=='fill 100 63 -10 101 63 -9 minecraft:stone'||
       calls[1]!=='setblock 103 64 -10 minecraft:oak_planks')fail('SELF_TEST');
-  report('test',{result:'PASS',commands:2,blocks:5,worldConnections:0});
+  const revised={...payload,geometrySha256:'b'.repeat(64),
+    primitives:payload.primitives.filter(c=>!(c[0]===1&&c[2]===1)&&c[0]!==3)
+      .concat([[3,1,0,2,0],[4,1,0,3,0]]),voxels:5};
+  const delta=planRevision(revised,payload);
+  if(delta.blocks!==3||delta.changes.removed!==1||
+      delta.changes.replaced!==1||delta.changes.added!==1||
+      !delta.commands.some(c=>c.command.includes('minecraft:air'))||
+      !delta.commands.some(c=>c.command.includes('minecraft:iron_block')))
+    fail('REVISION_SELF_TEST');
+  const recovered=planRevision(revised,payload,new Set(['7,1,0']));
+  if(recovered.blocks!==7||!recovered.commands.some(c=>c.command.includes('minecraft:air')))
+    fail('PARTIAL_REPAIR_SELF_TEST');
+  report('test',{result:'PASS',commands:2,blocks:5,worldConnections:0,
+    revisionTest:'PASS',partialRepairTest:'PASS'});
 }
 const main=process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href;
 if(main){

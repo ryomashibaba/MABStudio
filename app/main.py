@@ -581,7 +581,7 @@ class Studio(tk.Tk):
         self.cancel_btn.pack(side='right', padx=(8, 0))
         tk.Label(statusbar, textvariable=self.status, bg=c['bg'], fg='#3d5876',
                  anchor='w', font=('Yu Gothic UI', 9)).pack(side='left', fill='x', expand=True)
-        tk.Label(statusbar, text='● 施工機能は無効', bg=c['bg'], fg=c['caution'],
+        tk.Label(statusbar, text='● Education：接続後ワンクリック', bg=c['bg'], fg=c['caution'],
                  font=('Yu Gothic UI', 9)).pack(side='right')
 
         # Advanced controls are constructed once, but never occupy normal view.
@@ -1092,6 +1092,7 @@ class Studio(tk.Tk):
         displayed_source = self.scene['sourceSha256']
         displayed_geometry = self.scene['geometrySha256']
         placement_by_player = self.use_player_position.get()
+        project_id = self.current_snapshot['projectId']
         self._education_cancel.clear()
         self._education_running = True
         self._education_building = True
@@ -1104,13 +1105,16 @@ class Studio(tk.Tk):
             def progress(msg):
                 self.pending_events.put(('progress', 'Education建築', msg, None, True, None))
             return run_education_build(payload, stop=self._education_cancel,
-                                       on_progress=progress, session=self._education_session)
+                                       on_progress=progress, session=self._education_session,
+                                       project_id=project_id)
         def done(result):
-            self.status.set(f'Educationのコマンド確認済み：{result["confirmedBlocks"]:,}セル')
+            self.status.set(f'Education施工応答：{result["confirmedBlocks"]:,}セル更新 '
+                            f'／完成設計 {result["targetCells"]:,}セル（独立読戻し未実施）')
             messagebox.showinfo('Minecraft Educationへの建築',
-                f'ゲームのコマンド応答で{result["confirmedBlocks"]:,}セルの配置を確認しました。\n'
+                f'ゲームからのコマンド応答：{result["confirmedBlocks"]:,}セル更新。\n'
+                f'完成設計：{result["targetCells"]:,}セル。\n'
                 f'実行記録: {result["receiptPath"]}\n\n'
-                'ゲーム内の見た目を確認してください。独立した全ブロック読戻しは未実施です。')
+                '実際の見た目をご確認ください。全セルの独立読戻しは未実施です。')
         self._start('Education建築：配置中', work, done)
         self.status.set('Educationへ建築を送信しています。未接続ならゲーム内で /wsserver 127.0.0.1:8001 を一度だけ実行')
 
