@@ -22,7 +22,7 @@ from app.core import StudioError, atomic_json, node_binary, user_root
 from app.education import parse_probe_coordinates
 
 SCHEMA = 'mab-studio-education-placement-v1'
-BUILD_BRIDGE_SHA256 = '8776a1564d2788590c4283d7702693e6dcfc96a961087061530bfb3f05868800'
+BUILD_BRIDGE_SHA256 = '9f31c85adb91d8277f09b95dd56dd795a5b76d1b5f907f195fe5525c20ecc57a'
 MAX_OUTPUT_LINE = 16_384
 
 
@@ -198,10 +198,26 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                 if site_file is not None:
                     prior=_site_state(site_file,project_id)
                     pending=set(prior['uncertain'])
-                    pending.update(','.join(str(v) for v in c[:3])
-                                   for c in payload['primitives'])
-                    # Save the in-flight footprint first. A crash must not
-                    # forget cells that may have been written in the world.
+                    current={','.join(str(v) for v in c[:3]):c[3]
+                             for c in payload['primitives']}
+                    old_payload=prior['previous']
+                    same_site=(old_payload is not None and
+                        (payload['placementMode']=='player' or
+                         old_payload.get('origin')==payload['origin']))
+                    if same_site:
+                        old_cells=old_payload.get('primitives')
+                        if not isinstance(old_cells,list) or any(
+                                not isinstance(c,list) or len(c)<4 for c in old_cells):
+                            raise StudioError('保存された施工セルが不正です。既存ワールドは変更しません')
+                        previous={','.join(str(v) for v in c[:3]):c[3]
+                                  for c in old_cells}
+                        pending.update(k for k,v in current.items()
+                                       if previous.get(k)!=v)
+                        pending.update(k for k in previous if k not in current)
+                    else:
+                        pending.update(current)
+                    # Save only cells the next command may actually alter,
+                    # rather than marking the entire unchanged building dirty.
                     atomic_json(site_file,{'schema':SITE_SCHEMA,
                         'projectId':project_id,'previous':prior['previous'],
                         'uncertain':sorted(pending)})

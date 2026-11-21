@@ -140,7 +140,7 @@ export function planRevision(p,previous=null,uncertain=new Set()) {
   let added=0,replaced=0,removed=0;
   for(const [key,c] of next){
     const before=old.get(key);
-    if(uncertain.size || !before || before[3]!==c[3]) {
+    if(uncertain.has(key) || !before || before[3]!==c[3]) {
       edits.push(c);
       if(!before)added++;
       else if(before[3]!==c[3])replaced++;
@@ -167,21 +167,24 @@ function readPayload(file){
 /** A few read-only block probes bind a saved site to the currently connected
  * world, without assuming that the SocketBE connection ID survives a restart.
  */
-export function resumeSamples(previous,target=previous) {
+export function resumeSamples(previous,target=previous,uncertain=new Set()) {
   validatePayload(previous);
   validatePayload(target);
+  if(!(uncertain instanceof Set))fail('RESUME_UNCERTAIN');
   const targetMaterials=new Map(target.primitives.map(c=>[c.slice(0,3).join(','),c[3]]));
   // A partially completed revision may already have changed its edited cells.
   // Check only anchors whose material is unchanged in BOTH designs.
-  const cells=previous.primitives.filter(c=>
-    targetMaterials.get(c.slice(0,3).join(','))===c[3]);
+  const cells=previous.primitives.filter(c=>{
+    const key=c.slice(0,3).join(',');
+    return !uncertain.has(key) && targetMaterials.get(key)===c[3];
+  });
   if(!cells.length)fail('RESUME_SITE_NO_STABLE_ANCHOR');
   const indices=[0,Math.floor((cells.length-1)/4),Math.floor((cells.length-1)/2),
     Math.floor(3*(cells.length-1)/4),cells.length-1];
   return [...new Set(indices)].map(i=>cells[i]);
 }
-export async function verifyResumeSite(world,previous,target=previous) {
-  for(const [x,y,z,m] of resumeSamples(previous,target)){
+export async function verifyResumeSite(world,previous,target=previous,uncertain=new Set()) {
+  for(const [x,y,z,m] of resumeSamples(previous,target,uncertain)){
     const o=previous.origin;
     const command=`testforblock ${o.x+x} ${o.y+y} ${o.z+z} ${MATERIALS[m]}`;
     let response;
@@ -320,9 +323,9 @@ async function serve(){
         prior=null;
       if(!prior && old && ['x','y','z'].every(axis=>old.origin[axis]===payload.origin[axis])){
         // Zero writes when the saved site cannot be matched by read-only probes.
-        await verifyResumeSite(world,old,payload);
-        prior={world,origin:old.origin,payload:old,
-          uncertain:uncertainKeys(resume.uncertain??[])};
+        const uncertain=uncertainKeys(resume.uncertain??[]);
+        await verifyResumeSite(world,old,payload,uncertain);
+        prior={world,origin:old.origin,payload:old,uncertain};
       }
       compiled=prior ? planRevision(payload,prior.payload,prior.uncertain) : plan(payload);
       report('started',{commands:compiled.commands.length,blocks:compiled.blocks,
@@ -373,7 +376,7 @@ async function selfTest(){
       !delta.commands.some(c=>c.command.includes('minecraft:iron_block')))
     fail('REVISION_SELF_TEST');
   const recovered=planRevision(revised,payload,new Set(['7,1,0']));
-  if(recovered.blocks!==7||!recovered.commands.some(c=>c.command.includes('minecraft:air')))
+  if(recovered.blocks!==4||!recovered.commands.some(c=>c.command.includes('minecraft:air')))
     fail('PARTIAL_REPAIR_SELF_TEST');
   let probes=0;
   await verifyResumeSite({runCommand:async command=>{
@@ -386,6 +389,19 @@ async function selfTest(){
   try {await verifyResumeSite({runCommand:async()=>({statusCode:0,successCount:0})},payload);}
   catch(e){rejected=String(e.message).includes('RESUME_SITE_NOT_MATCHED');}
   if(!rejected)fail('RESUME_PROBE_UNMATCHED_ACCEPTED');
+  // A previously interrupted revision may have changed one of the old anchors.
+  // Ignore it on resume instead of incorrectly rejecting the still-valid site.
+  const uncertain=new Set(['0,0,0']);
+  const remaining=resumeSamples(payload,payload,uncertain);
+  if(remaining.length!==4 || remaining.some(c=>c[0]===0&&c[2]===0))
+    fail('RESUME_UNCERTAIN_ANCHOR_USED');
+  let recoveryProbes=0;
+  await verifyResumeSite({runCommand:async cmd=>{
+    if(cmd.includes('100 63 -10'))fail('RECHECKED_DIRTY_ANCHOR');
+    recoveryProbes++;
+    return {statusCode:0,successCount:1};
+  }},payload,payload,uncertain);
+  if(recoveryProbes!==4)fail('RESUME_CLEAN_ANCHORS');
   report('test',{result:'PASS',commands:2,blocks:5,worldConnections:0,
     revisionTest:'PASS',partialRepairTest:'PASS'});
 }
