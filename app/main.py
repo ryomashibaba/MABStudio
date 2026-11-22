@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import gc
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 import queue
@@ -21,7 +22,8 @@ from app.preview import VoxelPreview
 from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_dependencies_available
 from app.windows_dpi import enable_windows_dpi_awareness
 from app.preferences import read_local_choice, save_local_choice
-from app.project_io import export_verified_source
+from app.project_io import (export_verified_source, save_unapproved_draft,
+                            read_unapproved_draft)
 from app.v11_source_import import read_external_b143_source
 from app.v11_watch import newest_v11_ready_source, sync_v11_github_ready_source
 from app.diagnostics import check_local_setup, readiness_text
@@ -66,6 +68,7 @@ class Studio(tk.Tk):
         self._education_session = EducationBuildSession()
         self._active_cancel_event = None
         self._closed = False
+        self._startup_draft_offer_shown = False
         self._section_after = None
         self.terrain = None
         self.terrain_archive = None
@@ -116,12 +119,16 @@ class Studio(tk.Tk):
                                 parent=self)
             return
         has_draft = self.pending_revision is not None
+        has_unsaved_draft = bool(has_draft and self.pending_revision.get('savedDraftSourceSha')
+                                  != (self.pending_revision.get('scene') or {}).get('sourceSha256'))
         has_failed = self.failed_generation is not None
         has_ai_request = self.busy and self._active_cancel_event is not None
         if has_draft or has_failed or has_ai_request:
             notes = []
             if has_draft:
-                notes.append('未承認の建築案は終了すると失われます。')
+                notes.append('未承認の建築案の画面は閉じます。'
+                             + ('未保存の案は終了すると失われます。' if has_unsaved_draft
+                                else '保存済み案は次回の起動時に再開できます。'))
             if has_failed:
                 notes.append('検証不合格のAI案も終了すると失われます。')
             if has_ai_request:
@@ -441,6 +448,10 @@ class Studio(tk.Tk):
             self._creation_actions, text='V11のSOURCE/成果物JSONを読み込む',
             command=self.import_external_v11_source, style='Quiet.TButton')
         self.import_v11_btn.pack(anchor='w', pady=(3, 0))
+        self.open_draft_btn = ttk.Button(
+            self._creation_actions, text='保存した未承認案を開く',
+            command=self.open_saved_unapproved_draft, style='Quiet.TButton')
+        self.open_draft_btn.pack(anchor='w', pady=(3, 0))
         self.v11_ready_btn = ttk.Button(
             self._creation_actions, text='V11の新しい建築案を確認',
             command=self.import_latest_v11_source, style='Quiet.TButton')
@@ -522,7 +533,11 @@ class Studio(tk.Tk):
         self.compare_draft_btn = ttk.Button(self.reviewbar, text='元の建築を見る',
                                             command=self.toggle_draft_comparison,
                                             style='Quiet.TButton', state='disabled', width=12)
-        self.compare_draft_btn.grid(row=1, column=0, columnspan=3, sticky='w', pady=(6, 0))
+        self.compare_draft_btn.grid(row=1, column=0, sticky='w', pady=(6, 0))
+        self.export_draft_btn = ttk.Button(self.reviewbar, text='未承認の案を保存',
+                                          command=self.export_draft_source, style='Quiet.TButton',
+                                          state='disabled')
+        self.export_draft_btn.grid(row=1, column=1, columnspan=2, sticky='w', pady=(6, 0))
         self._reviewbar_visible = False
         self.viewer_host = ttk.Frame(right, style='Panel.TFrame')
         self.viewer_host.pack(fill='both', expand=True)
@@ -742,8 +757,120 @@ class Studio(tk.Tk):
                 self._refresh_buttons()
                 self.export_btn.configure(state='normal')
                 self.caption.set('前回の建築「'+self.design['title']+'」をSOURCE再検証して復元（ワールド未変更）')
+            self._offer_saved_unapproved_draft()
             self.refresh_models()
         self._start('前回のSOURCE建築を安全に再開中（推論・施工なし）', work, done, quiet=True)
+
+    def _offer_saved_unapproved_draft(self):
+        """Offer saved proposals after approved-session restore has completed."""
+        if self._startup_draft_offer_shown:
+            return
+        self._startup_draft_offer_shown = True
+        folder = self.manager.root / 'unapproved-drafts'
+        held = 0
+        try:
+            current = self.history.head()
+            head_id = current['revisionId'] if current else None
+            head_sha = current.get('snapshotSha256') if current else None
+            candidates = []
+            for path in folder.glob('*.json'):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                try:
+                    _, metadata = read_unapproved_draft(path)
+                except (StudioError, OSError, ValueError, TypeError):
+                    held += 1
+                    continue
+                if (metadata.get('engineSha') != self.manager.active_sha
+                        or metadata.get('expectedHead') != head_id
+                        or metadata.get('expectedHeadSnapshotSha256') != head_sha):
+                    # Superseded drafts remain on disk, but are not offered as
+                    # current review work after an approval/history change.
+                    continue
+                candidates.append(path)
+        except (StudioError, OSError, ValueError, TypeError):
+            candidates = []
+            held += 1
+        if not candidates:
+            if held:
+                messagebox.showwarning('保存案を復元できません',
+                    f'未承認案ファイル{held}件を破損・不整合のためHOLDしました。\n'
+                    'ファイルと承認済み履歴は変更していません。', parent=self)
+            return
+        if messagebox.askyesno(
+                '保存した未承認案',
+                f'保存済みの未承認案が{len(candidates)}件あります。\n'
+                '承認済み履歴は変更せず、選んだ案を固定B143で確認してレビューを再開しますか？',
+                parent=self):
+            self.open_saved_unapproved_draft()
+
+    def open_saved_unapproved_draft(self):
+        if self.busy or self.pending_revision is not None:
+            return
+        engine = self.manager.active_path
+        if engine is None:
+            messagebox.showwarning('固定B143未導入', '確認済みB143を導入してから開いてください。')
+            return
+        folder = self.manager.root / 'unapproved-drafts'
+        folder.mkdir(parents=True, exist_ok=True)
+        filename = filedialog.askopenfilename(
+            title='保存した未承認案を開く（再検証後も未承認）',
+            initialdir=str(folder), filetypes=[('MAB Studio 未承認案', '*.json')])
+        if filename:
+            return self._open_saved_unapproved_filename(filename)
+
+    def _open_saved_unapproved_filename(self, filename):
+        if self.busy or self.pending_revision is not None:
+            return False
+        engine = self.manager.active_path
+        if engine is None:
+            return False
+        engine_sha = self.manager.active_sha
+        def work():
+            design, metadata = read_unapproved_draft(filename)
+            if engine_sha != BASELINE_SHA or metadata['engineSha'] != engine_sha:
+                raise StudioError('保存時と現在の固定B143 SHAが異なります。復元をHOLDしました')
+            head = self.history.head()
+            head_id = head['revisionId'] if head else None
+            head_sha = head.get('snapshotSha256') if head else None
+            if (metadata.get('expectedHead') != head_id
+                    or metadata.get('expectedHeadSnapshotSha256') != head_sha):
+                raise StudioError('保存時から承認済み履歴HEADが変わりました。復元をHOLDしました')
+            scene = run_bridge(engine, design)
+            if (scene['sourceSha256'] != metadata['sourceSha256']
+                    or scene['geometrySha256'] != metadata['geometrySha256']):
+                raise StudioError('SOURCEまたはgeometryのSHAが保存時と異なります。復元をHOLDしました')
+            if metadata['draftKind'] == 'revision':
+                if (head is None or metadata.get('parentId') != head_id
+                        or metadata.get('parentGeometrySha256') != head['geometrySha256']):
+                    raise StudioError('修正案の承認済み基準建築が一致しません。復元をHOLDしました')
+            return design, metadata, scene, head
+        def done(result):
+            design, metadata, scene, head = result
+            kind = metadata['draftKind']
+            candidate = {
+                'kind': kind, 'design': design, 'scene': scene,
+                'delta': (compare_scenes(head['scene'], scene) if kind == 'revision' else None),
+                'engineSha': metadata['engineSha'], 'expectedHead': metadata['expectedHead'],
+                'provider': metadata.get('provider', 'RESTORED_DRAFT'),
+                'model': metadata.get('model', ''),
+                'savedDraftPaths': [str(Path(filename).resolve())],
+                'savedDraftSourceSha': metadata['sourceSha256'],
+            }
+            if kind == 'revision':
+                candidate['parentId'] = metadata['parentId']
+                candidate['parentGeometrySha256'] = metadata['parentGeometrySha256']
+            self.failed_generation = None
+            self.pending_revision = candidate
+            self.view_mode.set('修正案（未承認）')
+            self._refresh_view()
+            self._refresh_buttons()
+            self.caption.set(('保存済みの未承認' + ('修正案' if kind == 'revision' else '建築案')
+                              + '「' + str(design.get('title', ''))[:80]
+                              + '」を復元。承認されていません。'))
+            self.status.set('SOURCE・3D形状・固定B143・承認済みHEADを照合済み。履歴とワールドは未変更です。')
+        self._start('保存した未承認案を固定B143・履歴HEADと照合中', work, done)
+        return True
 
     def _update_engine_label(self):
         sha=self.manager.active_sha
@@ -872,14 +999,23 @@ class Studio(tk.Tk):
             state='normal' if can_undo_draft or can_restore_saved else 'disabled',
             text='修正前の案に戻す' if can_undo_draft else '前に戻す')
         self.import_v11_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
+        self.open_draft_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
         self.browse_btn.configure(state='normal' if ready else 'disabled')
         self.approve_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         self.reject_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        self.export_draft_btn.configure(state='normal' if not self.busy and self.pending_revision
+                                        and self.manager.active_path else 'disabled')
         self.compare_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
         if self.pending_revision is not None:
-            self.reviewbar_label.configure(text=('新規案・未保存' if new_draft
-                                                 else '未承認の修正案'))
+            saved_current = (self.pending_revision.get('savedDraftSourceSha')
+                             == (self.pending_revision.get('scene') or {}).get('sourceSha256'))
+            self.reviewbar_label.configure(text=(
+                ('新規案・保存済み（未承認）' if saved_current else '新規案・未保存')
+                if new_draft else
+                ('修正案・保存済み（未承認）' if saved_current else '未承認の修正案')))
+            self.export_draft_btn.configure(
+                text='未承認案を保存し直す' if saved_current else '未承認の案を保存')
             self.approve_draft_btn.configure(text='承認・保存' if new_draft else '修正案を承認')
             self.compare_draft_btn.configure(
                 state='normal' if not self.busy and self.scene is not None else 'disabled')
@@ -1601,7 +1737,7 @@ class Studio(tk.Tk):
         self.pending_revision = {
             'kind': 'new', 'design': design, 'scene': scene, 'delta': None,
             'engineSha': self.manager.active_sha, 'expectedHead': expected_head_id,
-            'provider': provider, 'model': model,
+            'provider': provider, 'model': model, 'savedDraftPaths': [],
         }
         self.view_mode.set('修正案（未承認）')
         # This is a different building: fit its bounds rather than inheriting
@@ -1806,11 +1942,12 @@ class Studio(tk.Tk):
                 raise StudioError('修正元が消えたため修正案を破棄しました')
             delta = compare_scenes(self.scene, scene)
             self.pending_revision = {
-                'design': revised, 'scene': scene, 'delta': delta,
+                'kind': 'revision', 'design': revised, 'scene': scene, 'delta': delta,
                 'parentId': self.current_snapshot['revisionId'],
+                'expectedHead': self.current_snapshot['revisionId'],
                 'parentGeometrySha256': self.scene['geometrySha256'],
                 'engineSha': self.manager.active_sha,
-                'provider': provider, 'model': model,
+                'provider': provider, 'model': model, 'savedDraftPaths': [],
             }
             # Review the *finished candidate building* first. A colored delta
             # alone does not show usable rooms, shape or architectural quality.
@@ -1997,6 +2134,7 @@ class Studio(tk.Tk):
                 self._display_design(candidate['design'], scene, candidate['provider'],
                                      candidate['model'], '利用者が3Dを確認して承認 / 施工なし',
                                      expected_head_id=candidate['expectedHead'])
+                self._remove_candidate_draft_files(candidate)
                 self.pending_revision = None
                 self.view_mode.set('建築のみ')
                 self._refresh_view()
@@ -2025,6 +2163,7 @@ class Studio(tk.Tk):
             self._display_design(candidate['design'], scene, candidate['provider'],
                                  candidate['model'], '承認されたAI修正 / 施工なし',
                                  operation='revision')
+            self._remove_candidate_draft_files(candidate)
             self.pending_revision = None
             self._refresh_buttons()
             # After approval show the actual saved building, not abstract
@@ -2037,7 +2176,9 @@ class Studio(tk.Tk):
     def reject_revision(self):
         if self.pending_revision is None or self.busy:
             return
-        was_new = self.pending_revision.get('kind') == 'new'
+        candidate = self.pending_revision
+        was_new = candidate.get('kind') == 'new'
+        self._remove_candidate_draft_files(candidate)
         self.pending_revision = None
         self.view_mode.set('建築のみ')
         self._refresh_view()
@@ -2045,6 +2186,19 @@ class Studio(tk.Tk):
         self.caption.set('AI生成案を破棄しました。保存済み建築と履歴は維持しています。' if was_new else
                          'AI修正案を却下しました。承認済みの元設計と履歴を維持しています。')
         self.status.set('未承認案を破棄しました。Minecraftワールドは未変更です。')
+
+    def _remove_candidate_draft_files(self, candidate):
+        """Retire only draft files attached to an explicitly approved/rejected proposal."""
+        folder = (self.manager.root / 'unapproved-drafts').resolve()
+        for raw in candidate.get('savedDraftPaths', []):
+            try:
+                path = Path(raw).resolve()
+                if path.parent == folder and path.suffix.lower() == '.json':
+                    path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                # A failed cleanup must not obstruct an explicit decision or
+                # touch files outside the Studio draft folder.
+                continue
 
     def restore_previous(self):
         engine=self.manager.active_path
@@ -2177,31 +2331,95 @@ class Studio(tk.Tk):
         if self.pending_revision is not None:
             messagebox.showwarning('修正案は未承認', '承認済みの設計だけを保存できます。')
             return
+        self._export_source(self.design, self.scene)
+
+    def export_draft_source(self):
+        """Save a review copy that will reopen as a draft after restart."""
+        draft = self.pending_revision
+        if draft is None or self.busy:
+            return
+        engine = self.manager.active_path
+        if engine is None or self.manager.active_sha != BASELINE_SHA:
+            messagebox.showwarning('固定B143未導入', '固定B143が一致しないため未承認案を保存できません。')
+            return
+        try:
+            head = self.history.head()
+            head_id = head['revisionId'] if head else None
+            if head_id != draft.get('expectedHead'):
+                raise StudioError('承認済み履歴HEADが変わりました。未承認案の保存をHOLDしました')
+        except (StudioError, OSError, ValueError, TypeError) as exc:
+            messagebox.showerror('未承認案の保存をHOLD', str(exc), parent=self)
+            return
+        name = ''.join(c for c in draft['design'].get('id', 'building')
+                       if c.isascii() and (c.isalnum() or c in '-_'))[:45] or 'building'
+        folder = self.manager.root / 'unapproved-drafts'
+        filename = folder / (name + '-' + datetime.now().strftime('%Y%m%d-%H%M%S-')
+                             + uuid.uuid4().hex[:8] + '-unapproved.json')
+        metadata = {
+            'draftKind': draft.get('kind', 'new'),
+            'origin': ('revision' if draft.get('kind') == 'revision' else
+                       'v11-external' if draft.get('provider') == 'V11_EXTERNAL_SOURCE' else
+                       'offline-sample' if draft.get('provider') == 'OFFLINE_SAMPLE' else 'new-ai'),
+            'engineSha': draft['engineSha'],
+            'expectedHead': draft.get('expectedHead'),
+            'expectedHeadSnapshotSha256': head.get('snapshotSha256') if head else None,
+            'provider': str(draft.get('provider', ''))[:80],
+            'model': str(draft.get('model', ''))[:180],
+        }
+        if draft.get('kind') == 'revision':
+            metadata['parentId'] = draft.get('parentId')
+            metadata['parentGeometrySha256'] = draft.get('parentGeometrySha256')
+        design = json.loads(json.dumps(draft['design'], ensure_ascii=False))
+        source_sha = draft['scene']['sourceSha256']
+        geometry_sha = draft['scene']['geometrySha256']
+        def work():
+            return save_unapproved_draft(filename, design, metadata, source_sha,
+                                         geometry_sha, lambda d: run_bridge(engine, d))
+        def done(path):
+            if self.pending_revision is not draft:
+                raise StudioError('保存中に未承認案が切り替わりました')
+            draft.setdefault('savedDraftPaths', []).append(str(path.resolve()))
+            draft['savedDraftSourceSha'] = source_sha
+            self._refresh_buttons()
+            self.status.set('未承認案を保存しました。承認済み履歴には登録していません: ' + str(path))
+            messagebox.showinfo('未承認案を保存しました',
+                '次回起動時にレビューを再開できます。\n'
+                'この保存は承認や正式履歴への登録ではありません。\n\n' + str(path), parent=self)
+        self._start('未承認案を固定B143で再検証して保存', work, done)
+
+    def _export_source(self, design, scene, *, draft=False):
         engine = self.manager.active_path
         if engine is None:
             messagebox.showwarning('MAB未導入','確認済みB143エンジンが必要です。')
             return
-        name = ''.join(c for c in self.design.get('id','building') if c.isascii() and
+        name = ''.join(c for c in design.get('id','building') if c.isascii() and
                        (c.isalnum() or c in '-_'))[:45] or 'building'
+        label = '未承認案' if draft else '承認済み'
+        suffix = '-unapproved-source.json' if draft else '-source.json'
         filename = filedialog.asksaveasfilename(
-            title='承認済みSOURCE JSONを書き出す（アプリ内履歴とは別）',
-            defaultextension='.json', initialfile=name+'-source.json',
+            title=label+'のSOURCE JSONを書き出す（アプリ内履歴とは別）',
+            defaultextension='.json', initialfile=name+suffix,
             filetypes=[('SOURCE JSON', '*.json')])
         if not filename:
             return
         # Copy bound source/geometry on GUI thread, verify with real MAB worker.
-        design = json.loads(json.dumps(self.design, ensure_ascii=False))
-        source_sha = self.scene['sourceSha256']
-        geometry_sha = self.scene['geometrySha256']
+        design = json.loads(json.dumps(design, ensure_ascii=False))
+        source_sha = scene['sourceSha256']
+        geometry_sha = scene['geometrySha256']
         def work():
             return export_verified_source(filename, design, source_sha,
                                           geometry_sha, lambda d:run_bridge(engine,d))
         def done(path):
-            self.status.set('画面の承認済みSOURCEを検証して保存しました（Minecraft未変更）: '+str(path))
+            self.status.set(label+'のSOURCEを検証して書き出しました: '+str(path))
+            if draft:
+                messagebox.showinfo('未承認案のSOURCEを書き出しました',
+                    '保存先: '+str(path)+'\n\n再起動後は「V11のSOURCE/成果物JSONを読み込む」で未承認案として開けます。'
+                    '\n建築履歴への登録と施工には承認が必要です。')
+                return
             messagebox.showinfo('SOURCE JSON保存完了',
                 '保存先: '+str(path)+'\n\nこれはSOURCE JSONの書き出しです。アプリ内の建築履歴とは別のファイルです。'
                 '\n承認した修正案は建築履歴に自動保存されます。Minecraft施工許可やワールドの復元にはなりません。')
-        self._start('表示中の承認済み設計をSOURCE再検証してJSON保存',work,done)
+        self._start(label+'の設計をSOURCE再検証してJSON保存',work,done)
 
 
 def main():
