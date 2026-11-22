@@ -28,7 +28,9 @@ from app.v11_source_import import read_external_b143_source
 from app.v11_watch import newest_v11_ready_source, sync_v11_github_ready_source
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
-from app.education_build import build_payload, run_education_build, EducationBuildSession
+from app.education_build import (build_payload, run_education_build,
+                                 EducationBuildSession, FORMAL_ART_ADOPTION_VERIFIED,
+                                 ART_ADOPTION_HOLD)
 from app.examples import example_library
 from app.revisions import (RevisionStore, compare_scenes, diff_preview_scene,
                            describe_design_changes, normalize_edit_scope,
@@ -1148,9 +1150,11 @@ class Studio(tk.Tk):
             self.compare_draft_btn.configure(
                 state='normal' if not self.busy and self.scene is not None else 'disabled')
         self.edu_live_btn.configure(state='normal' if not self.busy else 'disabled')
-        self.edu_btn.configure(state='normal' if (ready and self.current_snapshot is not None
-            and self.scene is not None and self.design is not None
-            and self.manager.active_path is not None) else 'disabled')
+        self.edu_btn.configure(state='normal' if (FORMAL_ART_ADOPTION_VERIFIED and ready
+            and self.current_snapshot is not None and self.scene is not None
+            and self.design is not None and self.manager.active_path is not None) else 'disabled',
+            text='Minecraft Educationに建てる' if FORMAL_ART_ADOPTION_VERIFIED else
+                 '正式ART採用前は施工不可')
         self.edu_stop_btn.configure(state='normal' if self._education_running else 'disabled',
             text='施工を中止' if self._education_building else '読取待機を停止')
         self.gpu_view_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled',
@@ -1328,6 +1332,8 @@ class Studio(tk.Tk):
                 text='修正案を見る' if mode == '建築のみ' else '元の建築を見る')
 
     def _start_education_server(self):
+        if not FORMAL_ART_ADOPTION_VERIFIED:
+            return
         # Start accepting Minecraft connections while the GUI is open, not at
         # the moment Build is pressed. The pairing command is needed once per
         # Minecraft connection; subsequent builds are one-click.
@@ -1340,6 +1346,9 @@ class Studio(tk.Tk):
 
     def start_education_build(self):
         """One button to place the selected, approved SOURCE in Minecraft Education."""
+        if not FORMAL_ART_ADOPTION_VERIFIED:
+            messagebox.showwarning('正式ART採用が必要', ART_ADOPTION_HOLD, parent=self)
+            return
         if self.busy or self._education_running or self.pending_revision is not None:
             return
         if not self.current_snapshot or not self.scene or not self.design:

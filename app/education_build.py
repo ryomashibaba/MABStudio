@@ -22,8 +22,17 @@ from app.core import StudioError, atomic_json, node_binary, user_root
 from app.education import parse_probe_coordinates
 
 SCHEMA = 'mab-studio-education-placement-v1'
-BUILD_BRIDGE_SHA256 = 'c9643698d783a7bf58dedf6e7f4cbefd9e2c61f65d1cf9b64a81e4773755331d'
+# Studio has no trusted input for formal ART adoption. SOURCE approval alone
+# therefore cannot grant authority to change a Minecraft world.
+FORMAL_ART_ADOPTION_VERIFIED = False
+ART_ADOPTION_HOLD = '正式ART採用の確認記録がありません。Studioの承認・保存だけでは施工できません'
+BUILD_BRIDGE_SHA256 = '3162d2c4f29ba9c449902f15fc9d53d6c2ddc35643b4cdb34b9b431c9b48df31'
 MAX_OUTPUT_LINE = 16_384
+
+
+def require_formal_art_adoption() -> None:
+    if not FORMAL_ART_ADOPTION_VERIFIED:
+        raise StudioError(ART_ADOPTION_HOLD)
 
 
 def bridge_path() -> Path:
@@ -69,6 +78,8 @@ class EducationBuildSession:
                 raise StudioError('Education接続が終了しました。Studioを起動し直してください')
             if not self.script.is_file():
                 raise StudioError('Education施工ブリッジがありません')
+            if self.script.resolve() == bridge_path().resolve():
+                require_formal_art_adoption()
             if self.script == bridge_path() and hashlib.sha256(self.script.read_bytes()).hexdigest() != BUILD_BRIDGE_SHA256:
                 raise StudioError('Education施工ブリッジの整合性が一致しません')
             flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -123,6 +134,8 @@ def run_education_build(payload: dict, *, stop: threading.Event | None = None,
                         timeout: float = 3600.0, session: EducationBuildSession | None = None) -> dict:
     """Send validated blocks; use a persistent paired world if session is provided."""
     script = Path(script) if script is not None else bridge_path()
+    if script.resolve() == bridge_path().resolve():
+        require_formal_art_adoption()
     if not script.is_file():
         raise StudioError('Education施工ブリッジが見つかりません。新しいStudioをビルドしてください')
     if session is None and script == bridge_path() and hashlib.sha256(script.read_bytes()).hexdigest() != BUILD_BRIDGE_SHA256:

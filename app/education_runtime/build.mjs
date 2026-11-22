@@ -13,6 +13,9 @@ import {pathToFileURL} from 'node:url';
 export const PORT=8001;
 export const BUILD_TOKEN='!mab-build';
 export const SCHEMA='mab-studio-education-placement-v1';
+// Studio currently has no verified source for formal ART adoption. Keep every
+// world-write route closed until an external, trusted approval source exists.
+const FORMAL_ART_ADOPTION_VERIFIED=false;
 export const MATERIALS=Object.freeze([
   'minecraft:stone','minecraft:white_concrete','minecraft:iron_block',
   'minecraft:glass','minecraft:oak_planks','minecraft:glowstone',
@@ -24,6 +27,9 @@ const MAX_VOXELS=160000;
 const MAX_FILL=32768;
 const MAX_COMMANDS=MAX_VOXELS;
 const fail=(reason)=>{throw new Error('EDUCATION_BUILD_'+reason);};
+function requireFormalArtAdoption(){
+  if(!FORMAL_ART_ADOPTION_VERIFIED)fail('FORMAL_ART_ADOPTION_REQUIRED');
+}
 const integer=(n)=>Number.isSafeInteger(n);
 const hex64=(s)=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s);
 
@@ -131,6 +137,7 @@ export function commandSucceeded(result){
     Number.isInteger(result.statusCode) && result.statusCode>=0;
 }
 export async function perform(world,compiled,onProgress=()=>{}){
+  requireFormalArtAdoption();
   if(!world || typeof world.runCommand!=='function')fail('WORLD');
   let completed=0,confirmedBlocks=0;
   for(const entry of compiled.commands){
@@ -151,6 +158,7 @@ export async function perform(world,compiled,onProgress=()=>{}){
   return {completed,commands:compiled.commands.length,confirmedBlocks};
 }
 async function listen(payload){
+  requireFormalArtAdoption();
   const compiled=plan(payload); // parse, validate, and build all commands before opening the port
   const {Server,ServerEvent}=await import('socket-be');
   const server=new Server({port:PORT,webSocketOptions:{host:'127.0.0.1',maxPayload:65536}});
@@ -187,6 +195,7 @@ async function listen(payload){
  * Subsequent Studio button clicks use stdin, never an in-game chat token.
  */
 async function serve(){
+  requireFormalArtAdoption();
   const {Server,ServerEvent}=await import('socket-be');
   const {createInterface}=await import('node:readline');
   const server=new Server({port:PORT,webSocketOptions:{host:'127.0.0.1',maxPayload:65536}});
@@ -236,14 +245,10 @@ async function selfTest(){
     origin:{x:100,y:63,z:-10},layerNames:[...LAYERS],voxels:5,
     primitives:[[0,0,0,0,0],[1,0,0,0,0],[0,0,1,0,0],[1,0,1,0,0],[3,1,0,4,0]]};
   const compiled=plan(payload);
-  const calls=[];
-  const actual=await perform({runCommand:async command=>{
-    calls.push(command);return {statusCode:0};
-  }},compiled);
-  if(compiled.blocks!==5||compiled.commands.length!==2||actual.confirmedBlocks!==5||
-      calls[0]!=='fill 100 63 -10 101 63 -9 minecraft:stone'||
-      calls[1]!=='setblock 103 64 -10 minecraft:oak_planks')fail('SELF_TEST');
-  report('test',{result:'PASS',commands:2,blocks:5,worldConnections:0});
+  if(compiled.blocks!==5||compiled.commands.length!==2||FORMAL_ART_ADOPTION_VERIFIED)
+    fail('SELF_TEST');
+  report('test',{result:'PASS',commands:2,blocks:5,worldWrites:0,
+    formalArtAdoptionVerified:FORMAL_ART_ADOPTION_VERIFIED});
 }
 const main=process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href;
 if(main){
