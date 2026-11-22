@@ -78,6 +78,47 @@ def compare_scenes(old: dict, new: dict) -> dict:
     }
 
 
+def normalize_edit_scope(scope: dict | None) -> dict | None:
+    """Validate a small, voxel-aligned editing cube selected in the 3D view."""
+    if scope is None:
+        return None
+    if not isinstance(scope, dict):
+        raise StudioError('3D修正範囲の形式が不正です')
+    center, radius = scope.get('selected'), scope.get('radius')
+    low, high = scope.get('min'), scope.get('max')
+    if (not isinstance(center, list) or len(center) != 3
+            or any(type(v) is not int or abs(v) > 1_000_000 for v in center)
+            or type(radius) is not int or not 0 <= radius <= 8
+            or not isinstance(low, list) or len(low) != 3
+            or not isinstance(high, list) or len(high) != 3
+            or any(type(v) is not int for v in low + high)):
+        raise StudioError('3D修正範囲の形式が不正です')
+    expected_low = [v-radius for v in center]
+    expected_high = [v+radius for v in center]
+    if low != expected_low or high != expected_high:
+        raise StudioError('3D修正範囲の座標が選択セルと一致しません')
+    return {'selected': list(center), 'radius': radius,
+            'min': list(low), 'max': list(high)}
+
+
+def assert_changes_within_scope(old: dict, new: dict,
+                                scope: dict | None) -> dict:
+    """Reject a draft if any B143 cell outside the selected cube changed."""
+    checked_scope = normalize_edit_scope(scope)
+    delta = compare_scenes(old, new)
+    if checked_scope is None:
+        return delta
+    low, high = checked_scope['min'], checked_scope['max']
+    changed = delta['added'] + delta['removed'] + delta['replaced']
+    outside = [cell[:3] for cell in changed
+               if any(cell[axis] < low[axis] or cell[axis] > high[axis]
+                      for axis in range(3))]
+    if outside:
+        sample = ', '.join(str(tuple(point)) for point in outside[:4])
+        raise StudioError('選択範囲外のSOURCEセル変更を検出しました。修正案をHOLD: ' + sample)
+    return delta
+
+
 def describe_design_changes(old: dict, new: dict, *, max_items: int = 3) -> str:
     """A small, factual, human-readable review aid for SOURCE-verified drafts.
 

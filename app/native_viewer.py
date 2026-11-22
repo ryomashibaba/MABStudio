@@ -203,7 +203,7 @@ def _vtk_runtime():
         from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkCellArray
         from vtkmodules.vtkFiltersCore import vtkPolyDataNormals
         from vtkmodules.vtkRenderingCore import (vtkRenderer, vtkRenderWindow,
-                    vtkPolyDataMapper, vtkActor, vtkLight)
+                    vtkPolyDataMapper, vtkActor, vtkLight, vtkCellPicker)
         import vtkmodules.vtkRenderingOpenGL2  # register OpenGL2 implementation
         from vtkmodules.vtkRenderingCore import vtkWindowToImageFilter
         from vtkmodules.util.numpy_support import vtk_to_numpy
@@ -253,6 +253,11 @@ class NativeVoxelPreview(tk.Frame):
         self._floor_actors = []
         self._axes_actor = None
         self._scene_node = None
+        self._scene_origin = (0.0, 0.0, 0.0)
+        self._selection_actor = None
+        self.edit_scope = None
+        self.edit_pick_mode = False
+        self.on_cell_picked = None
         self._render = self._vtk['vtkRenderer']()
         self._render.GradientBackgroundOn()
         self._render.SetBackground(0.065, 0.105, 0.19)
@@ -306,8 +311,44 @@ class NativeVoxelPreview(tk.Frame):
 
     def _start_rotate(self, e):
         self._image.focus_set()
+        if self.edit_pick_mode and not (e.state & 0x0001):
+            self.pick_source_cell(e.x, e.y)
+            return 'break'
         self._drag = ('pan' if e.state & 0x0001 else 'rotate', e.x, e.y,
                       self.angle, self.elevation, self.pan_x, self.pan_y)
+
+    def set_edit_pick_mode(self, enabled):
+        self.edit_pick_mode = bool(enabled)
+        self._image.configure(cursor='crosshair' if self.edit_pick_mode else 'fleur')
+
+    def set_edit_scope(self, scope):
+        self.edit_scope = scope
+        self._add_edit_scope_overlay()
+        self.draw()
+
+    def pick_source_cell(self, x, y):
+        """Pick a SOURCE voxel through the existing offscreen VTK scene."""
+        if self._scene_node is None or not self.scene:
+            return None
+        picker = self._vtk['vtkCellPicker']()
+        picker.SetTolerance(.002)
+        picker.PickFromListOn()
+        picker.AddPickList(self._scene_node)
+        height = max(1, self._image.winfo_height())
+        if not picker.Pick(float(x), float(height-y), 0.0, self._render):
+            return None
+        if picker.GetActor() != self._scene_node:
+            return None
+        position = picker.GetPickPosition()
+        normal = picker.GetPickNormal()
+        coordinate = tuple(math.floor(position[i] + self._scene_origin[i]
+                                      - normal[i]*1e-4) for i in range(3))
+        voxels = {tuple(cell[:3]) for cell in self.scene.get('primitives', [])}
+        if coordinate not in voxels:
+            return None
+        if callable(self.on_cell_picked):
+            self.on_cell_picked(coordinate)
+        return coordinate
 
     def _start_pan(self, e):
         self._image.focus_set()
@@ -433,6 +474,9 @@ class NativeVoxelPreview(tk.Frame):
         self.draw()
 
     def _rebuild(self):
+        if self._selection_actor:
+            self._render.RemoveActor(self._selection_actor)
+            self._selection_actor = None
         if self._scene_node:
             self._render.RemoveActor(self._scene_node)
             self._scene_node = None
@@ -476,6 +520,7 @@ class NativeVoxelPreview(tk.Frame):
                         min(v[2] for v in visible), max(v[2] for v in visible)+1)
         self._add_mesh(faces, data['palette'], visible)
         self._add_floor_grid()
+        self._add_edit_scope_overlay()
         self._schedule(40)
 
     def _add_mesh(self, faces, palette, visible):
@@ -488,6 +533,7 @@ class NativeVoxelPreview(tk.Frame):
         # Center-local coordinates maintain GPU float precision for remote XYZ.
         b = self._bounds
         ox, oy, oz = (b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2
+        self._scene_origin = (ox, oy, oz)
         edge_points = v['vtkPoints']()
         edge_cells = v['vtkCellArray']()
         for surf in faces:
@@ -571,6 +617,43 @@ class NativeVoxelPreview(tk.Frame):
             self._render.AddActor(actor)
             self._material_actor = actor
         self._add_seams(faces, (ox,oy,oz))
+
+    def _add_edit_scope_overlay(self):
+        if self._selection_actor:
+            self._render.RemoveActor(self._selection_actor)
+            self._selection_actor = None
+        if not self.edit_scope or self._bounds is None:
+            return
+        low, high = self.edit_scope.get('min'), self.edit_scope.get('max')
+        if (not isinstance(low, list) or len(low) != 3
+                or not isinstance(high, list) or len(high) != 3):
+            return
+        ox, oy, oz = self._scene_origin
+        minimum = [low[i] - (ox, oy, oz)[i] - .025 for i in range(3)]
+        maximum = [high[i] + 1 - (ox, oy, oz)[i] + .025 for i in range(3)]
+        corners = [(minimum[0] if not (bits & 1) else maximum[0],
+                    minimum[1] if not (bits & 2) else maximum[1],
+                    minimum[2] if not (bits & 4) else maximum[2]) for bits in range(8)]
+        points, lines = self._vtk['vtkPoints'](), self._vtk['vtkCellArray']()
+        for point in corners:
+            points.InsertNextPoint(*point)
+        for a, b in ((0,1),(2,3),(4,5),(6,7),(0,2),(1,3),
+                     (4,6),(5,7),(0,4),(1,5),(2,6),(3,7)):
+            lines.InsertNextCell(2)
+            lines.InsertCellPoint(a)
+            lines.InsertCellPoint(b)
+        mesh = self._vtk['vtkPolyData']()
+        mesh.SetPoints(points)
+        mesh.SetLines(lines)
+        mapper = self._vtk['vtkPolyDataMapper']()
+        mapper.SetInputData(mesh)
+        actor = self._vtk['vtkActor']()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(1.0, .67, .12)
+        actor.GetProperty().SetLineWidth(3.0)
+        actor.GetProperty().LightingOff()
+        self._render.AddActor(actor)
+        self._selection_actor = actor
 
     def _add_seams(self, faces, offset):
         """Subtle block joints, unlike the previous monolithic flat geometry."""

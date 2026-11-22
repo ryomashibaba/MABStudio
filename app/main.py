@@ -30,7 +30,9 @@ from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.education_build import build_payload, run_education_build, EducationBuildSession
 from app.examples import example_library
-from app.revisions import RevisionStore, compare_scenes, diff_preview_scene, describe_design_changes
+from app.revisions import (RevisionStore, compare_scenes, diff_preview_scene,
+                           describe_design_changes, normalize_edit_scope,
+                           assert_changes_within_scope)
 from app.terrain import inspect_mcworld, read_mcworld_terrain, create_overlay_scene
 
 
@@ -56,6 +58,7 @@ class Studio(tk.Tk):
         # Includes both revisions and newly generated designs. B143 PASS is
         # not approval: the user must see the 3D building before committing.
         self.pending_revision = None  # in-memory DRAFT; NEVER a committed history state
+        self.edit_scope = None  # visual voxel cube selected in the native preview
         # SOURCE-rejected AI output is held only in memory for explicit one-shot
         # repair. Never save or preview it as an approved B143 model.
         self.failed_generation = None
@@ -82,6 +85,7 @@ class Studio(tk.Tk):
         self.place_xyz = tk.StringVar(value='0 64 0')
         self.use_player_position = tk.BooleanVar(value=True)
         self.fast_revision_mode = tk.BooleanVar(value=True)
+        self.edit_scope_radius = tk.StringVar(value='2')
         provider_saved, model_saved = read_local_choice(self.manager.root)
         self.llm_provider = tk.StringVar(value=provider_saved)
         self.model = tk.StringVar(value=model_saved)
@@ -178,6 +182,8 @@ class Studio(tk.Tk):
                                getattr(self.preview, 'section_side', 'low'))
         else:
             viewer.set_cut_level(self.preview.cut_level)
+        if isinstance(viewer, NativeVoxelPreview):
+            viewer.set_edit_scope(self.edit_scope)
         viewer.draw()
 
     def open_large_preview(self):
@@ -284,6 +290,9 @@ class Studio(tk.Tk):
             new_view.on_scene_changed = None
             new_view.set_detail(self.detail_mode.get())
             new_view.show(old.scene)
+            if isinstance(new_view, NativeVoxelPreview):
+                new_view.on_cell_picked = self._on_edit_cell_picked
+                new_view.set_edit_scope(self.edit_scope)
             new_view.angle, new_view.elevation = old.angle, old.elevation
             new_view.zoom = old.zoom
             new_view.pan_x, new_view.pan_y = old.pan_x, old.pan_y
@@ -321,10 +330,94 @@ class Studio(tk.Tk):
         self.status.set('3D表示をアプリ内で切替えました（SOURCE・ワールド未変更）')
 
     def _preview_updated(self):
+        if isinstance(self.preview, NativeVoxelPreview):
+            self.preview.on_cell_picked = self._on_edit_cell_picked
+            self.preview.set_edit_scope(self.edit_scope)
         self._sync_large_preview()
         if hasattr(self, 'gpu_view_btn'):
             self.gpu_view_btn.configure(state='normal' if self.preview.scene and not self.busy else 'disabled',
                                         text='軽量3Dに切替' if isinstance(self.preview, NativeVoxelPreview) else '高精細3D（アプリ内）')
+
+    def toggle_edit_scope_pick(self):
+        if self.busy or not self.preview.scene:
+            return
+        if not isinstance(self.preview, NativeVoxelPreview):
+            if not native_dependencies_available():
+                messagebox.showinfo('3D選択の準備',
+                    '修正対象の選択にはネイティブ3Dが必要です。'
+                    ' RUN_STUDIO_NATIVE.bat で起動してください。', parent=self)
+                return
+            self.open_gpu_preview()
+        if not isinstance(self.preview, NativeVoxelPreview):
+            return
+        enabled = not self.preview.edit_pick_mode
+        if self.view_mode.get() == '変更差分' or self.view_mode.get() == '地形＋建築':
+            self.view_mode.set('修正案（未承認）' if self.pending_revision else '建築のみ')
+            self._refresh_view(preserve_camera=True)
+        self.preview.set_edit_pick_mode(enabled)
+        self.edit_scope_btn.configure(text='3Dで対象をクリック…' if enabled else '3Dで修正範囲を選ぶ')
+        self.status.set('修正したいセルをクリックしてください。ドラッグは視点操作です。' if enabled else
+                        '修正対象の選択を終了しました。')
+
+    def _on_edit_cell_picked(self, cell):
+        radius = self._read_edit_scope_radius()
+        center = [int(value) for value in cell]
+        self.edit_scope = {'selected': center, 'radius': radius,
+                           'min': [value-radius for value in center],
+                           'max': [value+radius for value in center]}
+        self.edit_scope = normalize_edit_scope(self.edit_scope)
+        if self.pending_revision is not None:
+            self.pending_revision['editScope'] = copy.deepcopy(self.edit_scope)
+        if isinstance(self.preview, NativeVoxelPreview):
+            self.preview.set_edit_pick_mode(False)
+            self.preview.set_edit_scope(self.edit_scope)
+        self.edit_scope_btn.configure(text='3Dで修正範囲を選ぶ')
+        self._update_edit_scope_label()
+        low, high = self.edit_scope['min'], self.edit_scope['max']
+        self.status.set(f'選択セル {tuple(center)} 周囲{radius}ブロックを修正対象に設定。'
+                        f'範囲 X{low[0]}–{high[0]} Y{low[1]}–{high[1]} Z{low[2]}–{high[2]}。'
+                        'この箱の外のSOURCEセル変更は自動でHOLDします。')
+
+    def _read_edit_scope_radius(self):
+        try:
+            value = int(self.edit_scope_radius.get())
+        except (ValueError, tk.TclError):
+            value = 2
+        value = max(0, min(8, value))
+        self.edit_scope_radius.set(str(value))
+        return value
+
+    def _update_edit_scope_radius(self):
+        radius = self._read_edit_scope_radius()
+        if self.edit_scope is not None:
+            center = self.edit_scope['selected']
+            self.edit_scope = normalize_edit_scope({
+                'selected': center, 'radius': radius,
+                'min': [v-radius for v in center], 'max': [v+radius for v in center]})
+            if self.pending_revision is not None:
+                self.pending_revision['editScope'] = copy.deepcopy(self.edit_scope)
+            if isinstance(self.preview, NativeVoxelPreview):
+                self.preview.set_edit_scope(self.edit_scope)
+            self._update_edit_scope_label()
+
+    def _update_edit_scope_label(self):
+        if self.edit_scope is None:
+            self.edit_scope_label.configure(text='対象未選択')
+            self.clear_edit_scope_btn.configure(state='disabled')
+        else:
+            x, y, z = self.edit_scope['selected']
+            self.edit_scope_label.configure(text=f'セル {x}, {y}, {z} ±{self.edit_scope["radius"]}')
+            self.clear_edit_scope_btn.configure(state='normal')
+
+    def clear_edit_scope(self):
+        self.edit_scope = None
+        if self.pending_revision is not None:
+            self.pending_revision['editScope'] = None
+        if isinstance(self.preview, NativeVoxelPreview):
+            self.preview.set_edit_pick_mode(False)
+            self.preview.set_edit_scope(None)
+        self.edit_scope_btn.configure(text='3Dで修正範囲を選ぶ')
+        self._update_edit_scope_label()
 
     def _make_ui(self):
         """Creation-first desktop layout. Technical controls live in a separate window."""
@@ -519,6 +612,27 @@ class Studio(tk.Tk):
             self.camera_buttons[name] = button
         self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
+        editbar = ttk.Frame(right, style='Panel.TFrame')
+        editbar.pack(fill='x', pady=(0, 7))
+        self.edit_scope_btn = ttk.Button(editbar, text='3Dで修正範囲を選ぶ',
+                                         command=self.toggle_edit_scope_pick,
+                                         style='Quiet.TButton')
+        self.edit_scope_btn.pack(side='left')
+        ttk.Label(editbar, text='周囲').pack(side='left', padx=(8, 3))
+        self.edit_scope_radius_box = ttk.Spinbox(editbar, from_=0, to=8, width=3,
+                                                textvariable=self.edit_scope_radius,
+                                                command=self._update_edit_scope_radius)
+        self.edit_scope_radius_box.pack(side='left')
+        self.edit_scope_radius_box.bind('<Return>', lambda _: self._update_edit_scope_radius())
+        self.edit_scope_radius_box.bind('<FocusOut>', lambda _: self._update_edit_scope_radius())
+        ttk.Label(editbar, text='ブロック').pack(side='left', padx=(3, 9))
+        self.edit_scope_label = ttk.Label(editbar, text='対象未選択', style='Muted.TLabel')
+        self.edit_scope_label.pack(side='left', fill='x', expand=True)
+        self.clear_edit_scope_btn = ttk.Button(editbar, text='解除',
+                                               command=self.clear_edit_scope,
+                                               style='Quiet.TButton', state='disabled')
+        self.clear_edit_scope_btn.pack(side='right')
+
         self.reviewbar = ttk.Frame(right, style='Panel.TFrame')
         self.reviewbar.columnconfigure(0, weight=1)
         self.reviewbar_label = ttk.Label(self.reviewbar, text='未承認の修正案', style='Section.TLabel')
@@ -556,6 +670,8 @@ class Studio(tk.Tk):
         self._large_preview = None
         self._large_preview_target_mode = None
         self.preview.on_scene_changed = self._preview_updated
+        if isinstance(self.preview, NativeVoxelPreview):
+            self.preview.on_cell_picked = self._on_edit_cell_picked
         self.preview.pack(fill='both', expand=True)
         sectionbar = ttk.Frame(right, style='Panel.TFrame')
         sectionbar.pack(fill='x', pady=(9, 3))
@@ -745,6 +861,8 @@ class Studio(tk.Tk):
             if problem:
                 self.caption.set('前回の設計は安全に開けませんでした。履歴を変更していません: '+problem)
             elif saved is not None:
+                self.edit_scope = None
+                self._update_edit_scope_label()
                 self.failed_generation = None
                 self.current_snapshot = saved
                 self.design = saved['design']
@@ -856,12 +974,16 @@ class Studio(tk.Tk):
                 'model': metadata.get('model', ''),
                 'savedDraftPaths': [str(Path(filename).resolve())],
                 'savedDraftSourceSha': metadata['sourceSha256'],
+                'editScope': copy.deepcopy(metadata.get('editScope')),
             }
             if kind == 'revision':
                 candidate['parentId'] = metadata['parentId']
                 candidate['parentGeometrySha256'] = metadata['parentGeometrySha256']
             self.failed_generation = None
             self.pending_revision = candidate
+            self.edit_scope = copy.deepcopy(candidate['editScope'])
+            self.edit_scope_radius.set(str(self.edit_scope['radius']) if self.edit_scope else '2')
+            self._update_edit_scope_label()
             self.view_mode.set('修正案（未承認）')
             self._refresh_view()
             self._refresh_buttons()
@@ -963,6 +1085,7 @@ class Studio(tk.Tk):
 
     def _invalidate_scene(self):
         self.failed_generation = None
+        self.edit_scope = None
         self.scene = None
         self.preview.show(None)
         self._sync_section_controls()
@@ -993,11 +1116,14 @@ class Studio(tk.Tk):
         can_undo_draft = (new_draft and not self.busy
                           and self.pending_revision.get('previousDraft') is not None
                           and self.manager.active_path is not None)
+        can_undo_revision = (self.pending_revision is not None and not new_draft
+                             and self.pending_revision.get('kind') == 'revision')
         can_restore_saved = (ready and self.current_snapshot is not None
                              and self.current_snapshot.get('parentId') is not None)
         self.restore_btn.configure(
-            state='normal' if can_undo_draft or can_restore_saved else 'disabled',
-            text='修正前の案に戻す' if can_undo_draft else '前に戻す')
+            state='normal' if can_undo_draft or can_undo_revision or can_restore_saved else 'disabled',
+            text=('修正前の案に戻す' if can_undo_draft else
+                  '修正案を取り消す' if can_undo_revision else '前に戻す'))
         self.import_v11_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
         self.open_draft_btn.configure(state='normal' if ready and self.manager.active_path else 'disabled')
         self.load_btn.configure(state='normal' if ready else 'disabled')
@@ -1007,6 +1133,8 @@ class Studio(tk.Tk):
         self.export_draft_btn.configure(state='normal' if not self.busy and self.pending_revision
                                         and self.manager.active_path else 'disabled')
         self.compare_draft_btn.configure(state='normal' if not self.busy and self.pending_revision else 'disabled')
+        self.edit_scope_btn.configure(state='normal' if not self.busy and self.preview.scene else 'disabled')
+        self.edit_scope_radius_box.configure(state='normal' if self.preview.scene else 'disabled')
         if self.pending_revision is not None:
             saved_current = (self.pending_revision.get('savedDraftSourceSha')
                              == (self.pending_revision.get('scene') or {}).get('sourceSha256'))
@@ -1734,6 +1862,8 @@ class Studio(tk.Tk):
         if (head['revisionId'] if head else None) != expected_head_id:
             raise StudioError('建築履歴を保護: 別の操作で保存履歴が変わりました。AI生成案は採用しません')
         self.failed_generation = None
+        self.edit_scope = None
+        self._update_edit_scope_label()
         self.pending_revision = {
             'kind': 'new', 'design': design, 'scene': scene, 'delta': None,
             'engineSha': self.manager.active_sha, 'expectedHead': expected_head_id,
@@ -1874,10 +2004,12 @@ class Studio(tk.Tk):
                                            operation='new', **commit_options)
         self.current_snapshot = snapshot
         self.failed_generation = None
+        self.edit_scope = None
         self.delta = delta
         self.scene = scene
         self.design = design
         self._sync_preview_outputs(design, scene, provider, model)
+        self._update_edit_scope_label()
         self._refresh_view()
         self._refresh_buttons()
         self.caption.set(f'{scene.get("title", "建築")} | {scene["stats"]["voxels"]:,}セル'
@@ -1907,6 +2039,8 @@ class Studio(tk.Tk):
         # Snapshot Tk state on the UI thread, never read Tk variables from
         # the inference worker (which can otherwise fail before the POST).
         revision_mode = 'delta' if self.fast_revision_mode.get() else 'full'
+        edit_scope = normalize_edit_scope(copy.deepcopy(self.edit_scope))
+        scoped_instruction = self._scope_revision_instruction(instruction, edit_scope)
         cancel_event = threading.Event()
         original = self.design
         pinned_hash = self.scene['geometrySha256']
@@ -1918,7 +2052,7 @@ class Studio(tk.Tk):
             if check['geometrySha256'] != pinned_hash:
                 raise StudioError('現在のエンジンは元の設計を再現できません。変更を中止しました')
             ai_started = time.monotonic()
-            draft = ask_llm(provider, inference_model, instruction, revision_base=original,
+            draft = ask_llm(provider, inference_model, scoped_instruction, revision_base=original,
                             revision_mode=revision_mode,
                             on_progress=lambda message: self.pending_events.put(
                                 ('progress', 'LOCAL_LLM', message, None, True, cancel_event)),
@@ -1934,13 +2068,13 @@ class Studio(tk.Tk):
             except StudioError as exc:
                 raise StudioError(f'{exc}\n（AI応答{ai_seconds:.1f}秒後のSOURCE検証で不合格。'
                                   '自動で再推論しません）') from exc
-            return draft, scene
+            delta = assert_changes_within_scope(check, scene, edit_scope)
+            return draft, scene, delta
         def done(data):
-            revised, scene = data
+            revised, scene, delta = data
             # The model response is only a DRAFT. No commit before approval.
             if self.current_snapshot is None or self.scene is None:
                 raise StudioError('修正元が消えたため修正案を破棄しました')
-            delta = compare_scenes(self.scene, scene)
             self.pending_revision = {
                 'kind': 'revision', 'design': revised, 'scene': scene, 'delta': delta,
                 'parentId': self.current_snapshot['revisionId'],
@@ -1948,7 +2082,9 @@ class Studio(tk.Tk):
                 'parentGeometrySha256': self.scene['geometrySha256'],
                 'engineSha': self.manager.active_sha,
                 'provider': provider, 'model': model, 'savedDraftPaths': [],
+                'editScope': edit_scope,
             }
+            self.edit_scope = copy.deepcopy(edit_scope)
             # Review the *finished candidate building* first. A colored delta
             # alone does not show usable rooms, shape or architectural quality.
             # Users can still choose '変更差分' from the existing view selector.
@@ -1967,6 +2103,18 @@ class Studio(tk.Tk):
             self.status.set('修正案の検証に成功しました。承認前の設計履歴は未変更です。')
         self._start('AI修正案の検証＋差分計算（ワールドには未反映）',work,done,
                     cancel_event=cancel_event)
+
+    @staticmethod
+    def _scope_revision_instruction(instruction, scope):
+        if scope is None:
+            return instruction
+        low, high = scope['min'], scope['max']
+        return (instruction + '\n\n【3D選択範囲の制約】'
+                f'選択セルは {scope["selected"]}。変更可能範囲は '
+                f'X={low[0]}..{high[0]}, Y={low[1]}..{high[1]}, '
+                f'Z={low[2]}..{high[2]} のみ。範囲外の形・材質・セルを完全に保持し、'
+                '指定範囲の中だけで修正してください。範囲外セルに変化があれば'
+                'Studioが修正案を自動HOLDします。')
 
     def _revise_unapproved_generation(self):
         """Allow improving a *new* B143-pass draft before first approval.
@@ -1994,6 +2142,8 @@ class Studio(tk.Tk):
             messagebox.showerror('生成案の保護', str(exc))
             return
         revision_mode = 'delta' if self.fast_revision_mode.get() else 'full'
+        edit_scope = normalize_edit_scope(copy.deepcopy(self.edit_scope or candidate.get('editScope')))
+        scoped_instruction = self._scope_revision_instruction(instruction, edit_scope)
         original, original_scene = candidate['design'], candidate['scene']
         cancel_event = threading.Event()
         def work():
@@ -2005,7 +2155,7 @@ class Studio(tk.Tk):
                     or checked['sourceSha256'] != original_scene['sourceSha256']):
                 raise StudioError('未承認の生成案を同じB143で再現できません')
             revised = ask_llm(
-                provider, status['inferenceModel'], instruction,
+                provider, status['inferenceModel'], scoped_instruction,
                 revision_base=original, revision_mode=revision_mode,
                 on_progress=lambda msg: self.pending_events.put(
                     ('progress', 'LOCAL_LLM', msg, None, True, cancel_event)),
@@ -2017,9 +2167,10 @@ class Studio(tk.Tk):
             # This is limited to a still-unapproved NEW building; approved
             # revision and external V11 SOURCE paths retain their own rules.
             revised, scene, source_note = self._compile_new_model_draft(engine, revised)
-            return revised, scene, source_note
+            delta = assert_changes_within_scope(original_scene, scene, edit_scope)
+            return revised, scene, source_note, delta
         def done(res):
-            revised, scene, source_note = res
+            revised, scene, source_note, delta = res
             if self.pending_revision is not candidate:
                 raise StudioError('生成案が切り替わりました。古いAI応答は破棄しました')
             # Keep exactly ONE earlier unapproved candidate, not a saved
@@ -2030,9 +2181,13 @@ class Studio(tk.Tk):
                 'scene': copy.deepcopy(original_scene),
                 'provider': candidate['provider'],
                 'model': candidate['model'],
+                'editScope': copy.deepcopy(candidate.get('editScope')),
             }
             candidate['design'] = revised
             candidate['scene'] = scene
+            candidate['delta'] = delta
+            candidate['editScope'] = edit_scope
+            self.edit_scope = copy.deepcopy(edit_scope)
             candidate['provider'] = provider
             candidate['model'] = model
             self.view_mode.set('修正案（未承認）')
@@ -2046,11 +2201,16 @@ class Studio(tk.Tk):
                     work, done, cancel_event=cancel_event)
 
     def undo_or_restore(self):
-        """One existing back button: undo a NEW draft edit or a saved revision."""
+        """Undo a new-draft iteration or cancel an unapproved revision."""
         candidate = self.pending_revision
         if candidate is not None:
             if candidate.get('kind') == 'new' and candidate.get('previousDraft') is not None:
                 self.undo_unapproved_draft()
+            elif candidate.get('kind') == 'revision':
+                # A revision draft is not an approved history entry. Cancel it
+                # and return to the untouched approved SOURCE in one action.
+                self.reject_revision()
+                self.status.set('未承認の部分修正を取り消しました。承認済みSOURCEと履歴は元のままです。')
             return
         self.restore_previous()
 
@@ -2094,6 +2254,10 @@ class Studio(tk.Tk):
             candidate['scene'] = scene
             candidate['provider'] = previous['provider']
             candidate['model'] = previous['model']
+            candidate['editScope'] = copy.deepcopy(previous.get('editScope'))
+            self.edit_scope = copy.deepcopy(previous.get('editScope'))
+            self.edit_scope_radius.set(str(self.edit_scope['radius']) if self.edit_scope else '2')
+            self._update_edit_scope_label()
             del candidate['previousDraft']  # One step back; no hidden redo chain.
             self.view_mode.set('修正案（未承認）')
             self._refresh_view()
@@ -2180,6 +2344,10 @@ class Studio(tk.Tk):
         was_new = candidate.get('kind') == 'new'
         self._remove_candidate_draft_files(candidate)
         self.pending_revision = None
+        self.edit_scope = None
+        self._update_edit_scope_label()
+        if isinstance(self.preview, NativeVoxelPreview):
+            self.preview.set_edit_scope(None)
         self.view_mode.set('建築のみ')
         self._refresh_view()
         self._update_engine_label()
@@ -2306,6 +2474,8 @@ class Studio(tk.Tk):
         previous=self.history.head()
         expected=previous['revisionId'] if previous is not None else None
         def done(snapshot):
+            self.edit_scope = None
+            self._update_edit_scope_label()
             self.failed_generation = None
             self.current_snapshot=snapshot
             self.design=snapshot['design']
@@ -2363,6 +2533,7 @@ class Studio(tk.Tk):
             'engineSha': draft['engineSha'],
             'expectedHead': draft.get('expectedHead'),
             'expectedHeadSnapshotSha256': head.get('snapshotSha256') if head else None,
+            'editScope': copy.deepcopy(self.edit_scope),
             'provider': str(draft.get('provider', ''))[:80],
             'model': str(draft.get('model', ''))[:180],
         }

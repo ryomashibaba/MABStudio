@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 from app.core import BASELINE_SHA, StudioError, SCHEMA
+from app.revisions import normalize_edit_scope
 
 UNAPPROVED_SCHEMA = 'mab-studio-unapproved-draft-v1'
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
@@ -48,6 +49,9 @@ def save_unapproved_draft(filename, design, metadata, source_sha: str,
         raise StudioError('承認済み履歴HEAD SHAが不正です')
     if (metadata['expectedHead'] is None) != (metadata['expectedHeadSnapshotSha256'] is None):
         raise StudioError('承認済み履歴HEAD情報が不整合です')
+    metadata = dict(metadata)
+    if 'editScope' in metadata:
+        metadata['editScope'] = normalize_edit_scope(metadata['editScope'])
     if (metadata['draftKind'] == 'revision') != (metadata['origin'] == 'revision'):
         raise StudioError('未承認案の種類と由来が一致しません')
     if metadata['draftKind'] == 'revision':
@@ -122,6 +126,8 @@ def read_unapproved_draft(filename) -> tuple[dict, dict]:
         raise StudioError('承認済み履歴HEAD SHAが不正です')
     if (expected_head is None) != (head_sha is None):
         raise StudioError('承認済み履歴HEAD情報が不整合です')
+    if 'editScope' in metadata:
+        metadata['editScope'] = normalize_edit_scope(metadata['editScope'])
     if metadata['draftKind'] == 'revision':
         if (metadata.get('origin') != 'revision'
                 or not isinstance(metadata.get('parentId'), str)
