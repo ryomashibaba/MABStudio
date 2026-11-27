@@ -15,7 +15,7 @@ on:
 
 # Prefer the newest verified build; obsolete pushes must not publish late.
 concurrency:
-  group: mabstudio-v03-verified-windows-release
+  group: ${{ github.ref == 'refs/heads/research/v11-owned-revision-bridge-20261128' && 'mabstudio-p1-offline-candidate' || 'mabstudio-v03-verified-windows-release' }}
   cancel-in-progress: true
 
 jobs:
@@ -81,6 +81,7 @@ jobs:
             tests/test_release_guards.py `
             tests/test_node_packaging.py `
             tests/test_packaged_runtime.py `
+            tests/test_v11_revision_bridge.py `
             tests/test_v11_feed_and_autoupdate.py
           if ($LASTEXITCODE -ne 0) { throw 'PYTEST_FAILED' }
       - name: Node read-only command allowlist offline test
