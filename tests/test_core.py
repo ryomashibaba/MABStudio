@@ -27,7 +27,8 @@ export function verifyCompiled(d,s){return s?.primitives?.length===192;}
 def fake_engine(root: Path):
     p = root / core.ENGINE_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(FAKE_MODULE, encoding='utf-8')
+    # Preserve exact LF bytes used by the approval digest on Windows.
+    p.write_bytes(FAKE_MODULE.encode('utf-8'))
     return root
 
 

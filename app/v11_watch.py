@@ -80,6 +80,67 @@ def newest_v11_ready_source(app_root: Path, seen_sha: str = '') -> tuple[Path, s
     return None
 
 
+def newest_v11_ready_run(app_root: Path, seen_sha: str = '') -> tuple[Path, str, str] | None:
+    """Discover completed one-shot run folders in the same trusted feeds.
+
+    This only reads the small report header. Full receipts, raw-response
+    integrity and pinned-B143 compilation happen after the user clicks.
+    The current V11 runner does not publish to every Studio feed by default;
+    absence means generation remains disconnected, not that another path is
+    silently launched.
+    """
+    candidates = []
+    for feed in candidate_directories(Path(app_root)):
+        if feed.is_symlink() or not feed.is_dir():
+            continue
+        containers = (feed, feed / 'runs')
+        for container in containers:
+            if container.is_symlink() or not container.is_dir():
+                continue
+            try:
+                children = list(container.iterdir())
+            except OSError:
+                continue
+            for run_dir in children:
+                if run_dir.is_symlink() or not run_dir.is_dir():
+                    continue
+                report_path = run_dir / 'RUN_REPORT.json'
+                try:
+                    if report_path.is_symlink() or not report_path.is_file():
+                        continue
+                    stat = report_path.stat()
+                    if not (0 < stat.st_size <= 300_000):
+                        continue
+                    raw = report_path.read_bytes()
+                    digest = hashlib.sha256(raw).hexdigest()
+                    if digest == seen_sha:
+                        continue
+                    report = json.loads(raw.decode('utf-8'))
+                    if (not isinstance(report, dict) or
+                            report.get('schema') != 'r125-local-plan-one-shot-v1' or
+                            report.get('status') != 'B143_SOURCE_CANDIDATE_ART_HOLD' or
+                            report.get('sourceVerified') is not True or
+                            report.get('constructionApproved') is not False or
+                            type(report.get('worldWrites')) is not int or report['worldWrites'] != 0 or
+                            type(report.get('worldContacts')) is not int or report['worldContacts'] != 0 or
+                            type(report.get('attemptLimit')) is not int or report['attemptLimit'] != 1 or
+                            type(report.get('modelCallAttempts')) is not int or report['modelCallAttempts'] != 1):
+                        continue
+                    required = ('REQUEST_ORIGINAL.txt', 'MODEL_RESPONSE_ORIGINAL.txt',
+                                'SOURCE_DIAGNOSIS.json', 'B143_SOURCE_REVIEW_ONLY.json')
+                    if any((run_dir / name).is_symlink() or not (run_dir / name).is_file()
+                           for name in required):
+                        continue
+                    model = str(report.get('model') or 'V11')[:24]
+                    candidates.append((stat.st_mtime_ns, run_dir, digest, model))
+                except (OSError, UnicodeError, ValueError, TypeError):
+                    continue
+    if not candidates:
+        return None
+    _, path, digest, model = max(candidates, key=lambda item: item[0])
+    return path, digest, 'R125 ' + model
+
+
 def sync_v11_github_ready_source(app_root: Path, *, opener=None) -> bool:
     """Fetch only V11's explicitly published compatible SOURCE, never code.
 

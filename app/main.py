@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from app.core import (
     BASELINE_SHA, DEFAULT_BRANCH, EngineManager, StudioError, ModelCancelled,
-    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, verify_loaded_model, run_bridge, atomic_json, expand_generated_canvas_bounds
+    ask_llm, branch_sha, compatibility_check, llm_models, unload_local_model, verify_loaded_model, run_bridge, atomic_json, expand_generated_canvas_bounds, node_binary
 )
 from app.preview import VoxelPreview
 from app.native_viewer import NativeViewerError, NativeVoxelPreview, native_dependencies_available
@@ -25,7 +25,14 @@ from app.preferences import read_local_choice, save_local_choice
 from app.project_io import (export_verified_source, save_unapproved_draft,
                             read_unapproved_draft)
 from app.v11_source_import import read_external_b143_source
-from app.v11_watch import newest_v11_ready_source, sync_v11_github_ready_source
+from app.v11_watch import (newest_v11_ready_source, newest_v11_ready_run,
+                           sync_v11_github_ready_source)
+from app.v11_versions import V11Versions, latest_v11_commit
+from app.v11_run_import import read_run as read_v11_run
+from app.v11_studio_generation import (MODEL as V11_STUDIO_MODEL,
+                                       V11GenerationError,
+                                       run_new_generation as run_v11_studio_generation)
+from app.v11_review import read_review as read_v11_review
 from app.diagnostics import check_local_setup, readiness_text
 from app.education import import_b134_readback, parse_probe_coordinates, run_education_readonly
 from app.education_build import (build_payload, run_education_build,
@@ -49,6 +56,10 @@ class Studio(tk.Tk):
         self.minsize(1020, 840)
         self.configure(bg='#e9eef5')
         self.manager = EngineManager()
+        self.v11_versions = V11Versions(self.manager.root / 'v11-versions')
+        self._v11_latest_candidate = None
+        self._v11_run_ready = None
+        self._v11_seen_run_sha = ''
         self.pending_sha = None
         self.pending_events = queue.Queue()
         self.busy = False
@@ -93,6 +104,8 @@ class Studio(tk.Tk):
         self.model = tk.StringVar(value=model_saved)
         self.branch = tk.StringVar(value=self.manager.state.get('tracked_branch', DEFAULT_BRANCH))
         self._make_ui()
+        from app.studio_ui_refresh import apply_studio_ui_refresh
+        apply_studio_ui_refresh(self)
         # The window manager must not silently discard an expensive, unsaved
         # local-model draft. Plain approved-project exits stay one click.
         self.protocol('WM_DELETE_WINDOW', self.request_close)
@@ -165,11 +178,31 @@ class Studio(tk.Tk):
                 except tk.TclError:pass
         # Free Tk Variable wrappers on the GUI thread rather than allowing
         # Python's GC to finalize them later from a local-AI worker thread.
+        variable_refs=[]
         for attr,value in tuple(self.__dict__.items()):
             if isinstance(value,tk.Variable):
+                variable_refs.append(value)
                 setattr(self,attr,None)
-        gc.collect()
+        # Native VTK/ImageTk can remove a Tcl callback while its Tk widget
+        # still retains the callback name. Filter only stale command names so
+        # Tk teardown cannot fail by deleting them a second time.
+        try:
+            live_commands=set(self.tk.splitlist(self.tk.call('info','commands')))
+            widgets=[self]
+            while widgets:
+                widget=widgets.pop()
+                widgets.extend(widget.winfo_children())
+                commands=getattr(widget,'_tclCommands',None)
+                if commands is not None:
+                    widget._tclCommands=[name for name in commands if name in live_commands]
+        except tk.TclError:
+            pass
         super().destroy()
+        # Keep Tcl Variable trace commands alive until Tk has removed each
+        # widget's registered commands; releasing them first double-deletes
+        # trace commands on shutdown in the native preview path.
+        variable_refs.clear()
+        gc.collect()
 
     def _inherit_preview_state(self, viewer):
         """Copy only the display state, never SOURCE/history/construction data."""
@@ -292,7 +325,7 @@ class Studio(tk.Tk):
             new_view.on_scene_changed = None
             new_view.set_detail(self.detail_mode.get())
             new_view.show(old.scene)
-            if isinstance(new_view, NativeVoxelPreview):
+            if isinstance(new_view, NativeVoxelPreview) and hasattr(new_view, 'set_edit_scope'):
                 new_view.on_cell_picked = self._on_edit_cell_picked
                 new_view.set_edit_scope(self.edit_scope)
             new_view.angle, new_view.elevation = old.angle, old.elevation
@@ -466,22 +499,32 @@ class Studio(tk.Tk):
         title = ttk.Frame(header, style='App.TFrame')
         title.pack(side='left', fill='x', expand=True)
         ttk.Label(title, text='MAB Studio', style='PageTitle.TLabel').pack(anchor='w')
-        tk.Label(title, text='日本語で設計する  ·  ローカルAI  ·  Minecraft Education',
-                 font=('Yu Gothic UI', 10), fg=c['muted'], bg=c['bg']).pack(anchor='w')
+        tk.Label(title, text='ローカルAI設計 · SOURCEを確認してから保存',
+                 font=('Yu Gothic UI', 9), fg=c['muted'], bg=c['bg']).pack(anchor='w')
         ttk.Button(header, text='保存した建築', command=self.browse_saved_designs,
                    style='Quiet.TButton').pack(side='right', padx=(7, 0))
         ttk.Button(header, text='詳細設定・接続診断', command=self._open_advanced,
                    style='Quiet.TButton').pack(side='right')
-        body = ttk.Frame(root, style='App.TFrame')
+        # Resizable workspace: the preview owns most of the width while the
+        # assistant remains a compact, user-adjustable right dock.
+        body = tk.PanedWindow(root, orient='horizontal', bg='#e2e7ed',
+                              borderwidth=0, sashwidth=7, sashrelief='flat',
+                              showhandle=False, opaqueresize=True)
         body.pack(fill='both', expand=True)
-        body.columnconfigure(0, minsize=320, weight=0)
-        body.columnconfigure(1, weight=1)
-        body.rowconfigure(0, weight=1)
-        left = ttk.Frame(body, style='Panel.TFrame', padding=(18, 11, 18, 10), width=345)
-        right = ttk.Frame(body, style='Panel.TFrame', padding=(14, 14, 14, 13))
-        left.grid(row=0, column=0, sticky='nsew', padx=(0, 13))
+        right = ttk.Frame(body, style='Panel.TFrame', padding=(12, 10, 10, 9))
+        left = ttk.Frame(body, style='Panel.TFrame', padding=(12, 10, 12, 9), width=360)
         left.pack_propagate(False)
-        right.grid(row=0, column=1, sticky='nsew')
+        body.add(right, minsize=520, stretch='always')
+        body.add(left, minsize=330, stretch='never')
+        self._workspace_panes = body
+        body.bind('<Configure>', lambda _e: self.after_idle(
+            lambda: body.sash_place(0, max(500, min(int(body.winfo_width() * .65),
+                                                        body.winfo_width() - 340)), 0))
+                  if not getattr(self, '_workspace_sash_initialized', False) else None,
+                  add='+')
+        body.after(80, lambda: (body.sash_place(
+            0, max(500, min(int(body.winfo_width() * .65), body.winfo_width() - 340)), 0),
+            setattr(self, '_workspace_sash_initialized', True)))
         left.columnconfigure(0, weight=1)
 
         # Packing the action bar FIRST reserves space at the bottom of the
@@ -492,15 +535,16 @@ class Studio(tk.Tk):
         self._creation_actions = ttk.Frame(left, style='Panel.TFrame')
         self._creation_actions.pack(side='bottom', fill='x')
 
-        ttk.Label(left, text='AIモデル', style='Section.TLabel').pack(anchor='w')
-        ttk.Label(left, text='モデルは事前ロードが必要（自動起動しません）',
-                  style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
-        self.provider_box = ttk.Combobox(left, textvariable=self.llm_provider,
+        self._model_controls = ttk.Frame(left, style='Panel.TFrame')
+        ttk.Label(self._model_controls, text='AIモデル', style='Section.TLabel').pack(anchor='w')
+        ttk.Label(self._model_controls, text='使用するモデルを選択',
+                  style='Muted.TLabel').pack(anchor='w', pady=(2, 6))
+        self.provider_box = ttk.Combobox(self._model_controls, textvariable=self.llm_provider,
                               values=('Ollama', 'LM Studio'), state='readonly')
         self.provider_box.pack(fill='x')
         self.provider_box.bind('<<ComboboxSelected>>', lambda _: self._provider_changed())
-        mrow = ttk.Frame(left, style='Panel.TFrame')
-        mrow.pack(fill='x', pady=(8, 6))
+        mrow = ttk.Frame(self._model_controls, style='Panel.TFrame')
+        mrow.pack(fill='x', pady=(6, 5))
         mrow.columnconfigure(0, weight=1)
         self.model_box = ttk.Combobox(mrow, textvariable=self.model)
         self.model_box.grid(row=0, column=0, sticky='ew', padx=(0, 5))
@@ -508,27 +552,43 @@ class Studio(tk.Tk):
         self.models_btn = ttk.Button(mrow, text='更新', command=self.refresh_models,
                                      style='Quiet.TButton')
         self.models_btn.grid(row=0, column=1)
-        self.unload_btn = ttk.Button(left, text='選択モデルをアンロード（メモリ解放）',
+        self.unload_btn = ttk.Button(self._model_controls, text='選択モデルをアンロード',
                                      command=self.unload_selected_model,
                                      style='Quiet.TButton')
-        self.unload_btn.pack(anchor='w', pady=(0, 10))
-        ttk.Separator(left).pack(fill='x', pady=(2, 8))
+        self.unload_btn.pack(anchor='w', pady=(0, 6))
+        self._model_expanded = False
+        self._model_toggle = ttk.Button(left, text='AIモデル・接続  ▾',
+                                        command=self._toggle_model_controls,
+                                        style='Quiet.TButton')
+        self._model_toggle.pack(fill='x', pady=(0, 7))
+        self._model_summary = ttk.Label(left, textvariable=self.model, style='Muted.TLabel')
+        self._model_summary.pack(anchor='w', pady=(0, 7))
 
-        ttk.Label(left, text='どんな建築を作りたい？', style='Section.TLabel').pack(anchor='w')
-        ttk.Label(left, text='日本語で自由に指示できます', style='Muted.TLabel').pack(anchor='w', pady=(2, 9))
-        self.prompt = tk.Text(left, height=8, wrap='word', font=('Yu Gothic UI', 11),
+        ttk.Label(left, text='建築アシスタント', style='Section.TLabel').pack(anchor='w')
+        self.prompt_context_label = ttk.Label(
+            left, text='新規設計：日本語で建築を指示',
+            style='Muted.TLabel', wraplength=320)
+        self.prompt_context_label.pack(anchor='w', pady=(2, 6))
+        self.prompt_mode = tk.StringVar(value='new')
+        mode_row = ttk.Frame(left, style='Panel.TFrame')
+        mode_row.pack(fill='x', pady=(0, 5))
+        ttk.Radiobutton(mode_row, text='新しい建築', value='new',
+                        variable=self.prompt_mode).pack(side='left')
+        ttk.Radiobutton(mode_row, text='表示中を修正', value='revise',
+                        variable=self.prompt_mode).pack(side='left', padx=(10, 0))
+        self.prompt = tk.Text(left, height=5, wrap='word', font=('Yu Gothic UI', 10),
                               relief='flat', borderwidth=0, bg='#f5f8fd', fg=c['ink'],
                               padx=12, pady=12, insertbackground=c['ink'],
                               highlightbackground=c['line'], highlightcolor=c['accent'],
                               highlightthickness=1, undo=True)
-        self.prompt.pack(fill='both', expand=True, pady=(0, 8))
-        self.prompt.insert('1.0', '未来的な4階建てのビルを作って。窓がたくさんあるように。')
-        self.generate_btn = ttk.Button(self._creation_actions, text='AIで建築を設計する',
+        self.prompt.pack(fill='x', expand=False, pady=(0, 6))
+        self.generate_btn = ttk.Button(self._creation_actions, text='新しい建築を設計',
                                        command=self.generate, style='Primary.TButton')
         self.generate_btn.pack(fill='x', pady=(0, 3))
-        ttk.Label(self._creation_actions,
-                  text='SOURCE不合格時はAIが1回自動修正（最大2回推論）',
-                  style='Muted.TLabel').pack(anchor='w', pady=(0, 6))
+        self._creation_note = ttk.Label(self._creation_actions,
+                  text='生成ボタンでローカルAIへ1回送信します。結果は未承認案として表示し、保存は別操作です。',
+                  style='Muted.TLabel', wraplength=320)
+        self._creation_note.pack(anchor='w', pady=(0, 5))
         self.repair_generation_btn = ttk.Button(
             self._creation_actions, text='検証不合格のAI案を修正（1回）',
             command=self.repair_failed_generation)
@@ -540,13 +600,13 @@ class Studio(tk.Tk):
                                      command=self.show_sample, style='Quiet.TButton')
         self.sample_btn.pack(anchor='w')
         self.import_v11_btn = ttk.Button(
-            self._creation_actions, text='V11のSOURCE/成果物JSONを読み込む',
+            self._creation_actions, text='SOURCEを開く',
             command=self.import_external_v11_source, style='Quiet.TButton')
-        self.import_v11_btn.pack(anchor='w', pady=(3, 0))
+        self.import_v11_btn.pack(fill='x', pady=(3, 0))
         self.open_draft_btn = ttk.Button(
             self._creation_actions, text='保存した未承認案を開く',
             command=self.open_saved_unapproved_draft, style='Quiet.TButton')
-        self.open_draft_btn.pack(anchor='w', pady=(3, 0))
+        self.open_draft_btn.pack(fill='x', pady=(3, 0))
         self.v11_ready_btn = ttk.Button(
             self._creation_actions, text='V11の新しい建築案を確認',
             command=self.import_latest_v11_source, style='Quiet.TButton')
@@ -555,6 +615,7 @@ class Studio(tk.Tk):
         # Keyboard alternative when Windows display scaling limits visible space.
         # ttk.Button.invoke() respects its disabled state, including during AI work.
         self.prompt.bind('<Control-Return>', self._submit_prompt_shortcut)
+        self.prompt.bind('<Control-Shift-Return>', self._submit_prompt_shortcut)
         # Construction is already labelled disabled in the status bar;
         # repeating a multi-line warning here used valuable vertical space.
 
@@ -588,17 +649,6 @@ class Studio(tk.Tk):
                    style='Quiet.TButton').pack(side='left', padx=(8, 0))
         detail_box.bind('<<ComboboxSelected>>', lambda _: self.preview.set_detail(self.detail_mode.get()))
         ttk.Label(tools, text='SOURCE検証・3D編集・Education施工', style='Muted.TLabel').pack(side='right')
-        # Keep the construction button visible without shrinking the creation prompt
-        # on small or high-DPI screens. The advanced panel has the manual XYZ entry.
-        placement = ttk.Frame(right, style='Panel.TFrame')
-        placement.pack(fill='x', pady=(0, 8))
-        ttk.Checkbutton(placement, text='プレイヤーの近くに建築',
-                        variable=self.use_player_position).pack(side='left')
-        self.edu_btn = ttk.Button(placement, text='Minecraft Educationに建てる',
-                                  command=self.start_education_build,
-                                  style='Primary.TButton', state='disabled')
-        self.edu_btn.pack(side='right')
-
         # One-click camera directions for reviewing different facades/floors.
         # Pure view state; no new SOURCE computation, history, or world writes.
         camera_bar = ttk.Frame(right, style='Panel.TFrame')
@@ -610,7 +660,7 @@ class Studio(tk.Tk):
         for name in VoxelPreview.VIEWS:
             button = ttk.Button(self._camera_controls, text=name,
                                 command=lambda selected=name: self.preview.set_view(selected),
-                                style='Quiet.TButton')
+                                style='Quiet.TButton', width=4)
             self.camera_buttons[name] = button
         self._camera_hint = ttk.Label(camera_bar, text='F：全体表示', style='Muted.TLabel')
 
@@ -704,9 +754,19 @@ class Studio(tk.Tk):
                                        style='Muted.TLabel')
         self.section_scale.configure(state='disabled')
         self.caption = tk.StringVar(value='建築のプレビューがここに表示されます')
-        ttk.Label(right, textvariable=self.caption, style='Muted.TLabel',
-                  wraplength=750).pack(anchor='w', pady=(3, 0))
+        ttk.Separator(left).pack(fill='x', pady=(8, 6))
+        ttk.Label(left, text='対象・処理結果', style='Muted.TLabel').pack(anchor='w')
+        self._assistant_caption_text = tk.StringVar(value='建築のプレビューがここに表示されます')
+        self._assistant_caption = ttk.Label(left, textvariable=self._assistant_caption_text,
+                                             style='Muted.TLabel', wraplength=320,
+                                             justify='left')
+        self._assistant_caption.pack(fill='x', anchor='w', pady=(2, 5))
         self.status = tk.StringVar(value='準備中')
+        self._assistant_status_text = tk.StringVar(value='準備中')
+        self._assistant_status = ttk.Label(left, textvariable=self._assistant_status_text,
+                                            style='Muted.TLabel', wraplength=320,
+                                            justify='left')
+        self._assistant_status.pack(fill='x', anchor='w')
         statusbar = ttk.Frame(root, style='App.TFrame')
         statusbar.pack(fill='x', pady=(12, 0))
         self.cancel_btn = ttk.Button(statusbar, text='生成をキャンセル',
@@ -734,6 +794,30 @@ class Studio(tk.Tk):
         self.engine_state = tk.StringVar(value='エンジンを確認中')
         ttk.Label(advanced, text='MABエンジン', style='Section.TLabel').pack(anchor='w')
         ttk.Label(advanced, textvariable=self.engine_state, style='Muted.TLabel').pack(anchor='w', pady=3)
+        ttk.Separator(advanced).pack(fill='x', pady=(5, 8))
+        ttk.Label(advanced, text='V11生成版（隔離候補）', style='Section.TLabel').pack(anchor='w')
+        self.v11_version_state = tk.StringVar(value='未確認 / Studio生成経路へ未接続')
+        ttk.Label(advanced, textvariable=self.v11_version_state, style='Muted.TLabel',
+                  wraplength=720, justify='left').pack(anchor='w', pady=(2, 5))
+        v11_update_row = ttk.Frame(advanced, style='Panel.TFrame')
+        v11_update_row.pack(fill='x', pady=(0, 8))
+        self.v11_check_btn = ttk.Button(v11_update_row, text='V11最新版を確認',
+                                        command=self.check_v11_update)
+        self.v11_check_btn.pack(side='left', padx=(0, 6))
+        self.v11_install_btn = ttk.Button(v11_update_row, text='最新候補を隔離取得',
+                                          command=self.install_v11_candidate, state='disabled')
+        self.v11_install_btn.pack(side='left', padx=(0, 6))
+        self.v11_rollback_btn = ttk.Button(v11_update_row, text='前の候補へ戻す',
+                                           command=self.rollback_v11_candidate, state='disabled')
+        self.v11_rollback_btn.pack(side='left')
+        v11_review_row = ttk.Frame(advanced, style='Panel.TFrame')
+        v11_review_row.pack(fill='x', pady=(0, 5))
+        ttk.Button(v11_review_row, text='保存済みV11 runをレビュー表示',
+                   command=self.open_v11_review).pack(side='left')
+        ttk.Label(v11_review_row, text='検証済みV11コンパイラで再照合。正式B143合格・承認・保存・施工とは分離。',
+                  style='Muted.TLabel', wraplength=520).pack(side='left', padx=(8, 0))
+        ttk.Label(advanced, text='候補コードは実行しません。通常V11実行監視の接続が確立するまで生成未接続です。',
+                  style='Muted.TLabel', wraplength=720).pack(anchor='w', pady=(0, 6))
         self.install_btn = ttk.Button(advanced, text='確認済みB143を導入', command=self.install_baseline)
         self.install_btn.pack(fill='x', pady=(5, 6))
         branchrow = ttk.Frame(advanced)
@@ -762,6 +846,12 @@ class Studio(tk.Tk):
                         variable=self.fast_revision_mode).pack(anchor='w', pady=(0, 8))
         ttk.Separator(advanced).pack(fill='x', pady=(1, 14))
         ttk.Label(advanced, text='地形・Minecraft Education', style='Section.TLabel').pack(anchor='w')
+        self.edu_btn = ttk.Button(advanced, text='Minecraft Educationに建てる',
+                                  command=self.start_education_build,
+                                  style='Primary.TButton', state='disabled')
+        self.edu_btn.pack(fill='x', pady=(8, 4))
+        ttk.Checkbutton(advanced, text='プレイヤーの近くに建築',
+                        variable=self.use_player_position).pack(anchor='w', pady=(0, 6))
         terrainbar = ttk.Frame(advanced)
         terrainbar.pack(fill='x', pady=(9, 6))
         ttk.Label(terrainbar, text='予定位置 XYZ').pack(side='left')
@@ -781,18 +871,31 @@ class Studio(tk.Tk):
         self.edu_stop_btn = ttk.Button(educationbar, text='読取待機を停止',
                                        command=self.stop_education_readonly, state='disabled')
         self.edu_stop_btn.pack(side='left')
-        ttk.Label(advanced, text='建築ボタンはメイン画面にあります。予定位置XYZを原点にします。',
+        ttk.Label(advanced, text='予定位置XYZを原点にします。施工は採用済みARTのみ有効です。',
                   style='Muted.TLabel').pack(anchor='w')
         ttk.Button(advanced, text='閉じる', command=self._advanced.place_forget).pack(side='right', pady=(10, 0))
 
     def _submit_prompt_shortcut(self, _event):
-        self.generate_btn.invoke()
+        # Dispatch only to the action selected in the visible mode control.
+        if self.prompt_mode.get() == 'revise':
+            self.revise_btn.invoke()
+        else:
+            self.generate_btn.invoke()
         return 'break'
+
+    def _toggle_model_controls(self):
+        if self._model_expanded:
+            self._model_controls.pack_forget()
+            self._model_toggle.configure(text='AIモデル・接続  ▾')
+        else:
+            self._model_controls.pack(fill='x', before=self._model_toggle)
+            self._model_toggle.configure(text='AIモデル・接続  ▴')
+        self._model_expanded = not self._model_expanded
 
     def _on_preview_width(self, event):
         # This is a view-only layout switch. Never recompute or mutate SOURCE.
         if event.widget is not None:
-            self._set_compact_layout(event.width < 735)
+            self._set_compact_layout(event.width < 700)
 
     def _set_compact_layout(self, compact: bool):
         if self._compact_layout is compact:
@@ -1006,10 +1109,70 @@ class Studio(tk.Tk):
         self.check_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
         self.rollback_btn.configure(state='normal' if not self.busy and self.pending_revision is None else 'disabled')
         self.apply_btn.configure(state='normal' if self.pending_sha and not self.busy and self.pending_revision is None else 'disabled')
+        self._update_v11_version_label()
         if hasattr(self, 'cancel_btn'):
             self.cancel_btn.configure(state='normal' if self.busy and self._active_cancel_event is not None
                                       and not self._active_cancel_event.is_set() else 'disabled')
         self._refresh_buttons()
+
+    def _update_v11_version_label(self):
+        if not hasattr(self, 'v11_version_state'):
+            return
+        idle = not self.busy and self.pending_revision is None
+        try:
+            state = self.v11_versions.status()
+            latest = self._v11_latest_candidate
+            lines = ['StudioのV11実行版: 未接続（B143ローカル生成とは別）']
+            if latest:
+                lines.append(f"最新検出: {latest['version']} / {latest['sha'][:12]}…")
+            else:
+                lines.append('最新検出: 未確認')
+            if state['selected']:
+                version = state['selected_version'] or '版情報なし'
+                lines.append(f"隔離候補: {version} / {state['selected'][:12]}…")
+            else:
+                lines.append('隔離候補: なし')
+            lines.append('生成接続: 未接続。候補コードは実行せず、採用・施工にも使いません。')
+            self.v11_version_state.set('\n'.join(lines))
+            self.v11_check_btn.configure(state='normal' if idle else 'disabled')
+            self.v11_install_btn.configure(state='normal' if idle and latest and
+                latest['sha'] != state['selected'] else 'disabled')
+            self.v11_rollback_btn.configure(state='normal' if idle and state['previous'] else 'disabled')
+        except (OSError, ValueError, TypeError):
+            self.v11_version_state.set('V11候補状態を確認できません / 生成未接続')
+            self.v11_check_btn.configure(state='normal' if idle else 'disabled')
+            self.v11_install_btn.configure(state='disabled')
+            self.v11_rollback_btn.configure(state='disabled')
+
+    def check_v11_update(self):
+        if self.busy or self.pending_revision is not None:
+            return
+        def done(candidate):
+            self._v11_latest_candidate = candidate
+            self._update_v11_version_label()
+            self.status.set('V11最新候補を検出しました。互換性・生成接続とは別に隔離取得できます。')
+        self._start('V11の最新研究HEADを確認中（コードは取得・実行しません）',
+                    latest_v11_commit, done, quiet=True)
+
+    def install_v11_candidate(self):
+        if self.busy or self.pending_revision is not None or not self._v11_latest_candidate:
+            return
+        candidate = dict(self._v11_latest_candidate)
+        def done(path):
+            self._update_v11_version_label()
+            self.status.set('V11候補を隔離キャッシュへ取得しました。Studioの生成経路は未接続です。')
+        self._start('V11候補をSHA固定で隔離取得・構造確認中（実行なし）',
+                    lambda: self.v11_versions.install_candidate(
+                        candidate['sha'], idle=True, version=candidate['version']), done)
+
+    def rollback_v11_candidate(self):
+        if self.busy or self.pending_revision is not None:
+            return
+        def done(sha):
+            self._update_v11_version_label()
+            self.status.set('隔離されたV11候補の選択を前版へ戻しました。生成接続は未接続です。')
+        self._start('隔離V11候補を前版へ戻し中（実行版・B143は変更なし）',
+                    lambda: self.v11_versions.rollback_candidate(idle=True), done)
 
     def _start(self, title, fn, callback=None, quiet=False, cancel_event=None):
         if self.busy:
@@ -1044,6 +1207,17 @@ class Studio(tk.Tk):
                 item=self.pending_events.get_nowait()
                 kind,title,result,callback,quiet=item[:5]
                 cancel_event=item[5] if len(item)>5 else None
+                if kind=='dispatch':
+                    acknowledged=item[6] if len(item)>6 else None
+                    if (cancel_event is not None and
+                            self._active_cancel_event is cancel_event and
+                            not cancel_event.is_set()):
+                        self._active_cancel_event=None
+                        self.cancel_btn.configure(state='disabled')
+                        self.status.set('ローカルAIへの1回送信を開始します。所有監視・停止確認まで処理を続けます。')
+                    if acknowledged is not None:
+                        acknowledged.set()
+                    continue
                 if kind=='progress':
                     # A cancelled request can enqueue progress just before a new
                     # request begins. Ignore that stale message, not just the
@@ -1651,8 +1825,14 @@ class Studio(tk.Tk):
                              name='MABStudio-V11-readonly-feed', daemon=True).start()
         try:
             ready = newest_v11_ready_source(self.manager.root, self._v11_seen_sha)
+            run_ready = newest_v11_ready_run(self.manager.root, self._v11_seen_run_sha)
             self._v11_ready = ready
-            if ready:
+            self._v11_run_ready = run_ready
+            if run_ready:
+                self.v11_ready_btn.configure(text='R125生成結果を固定B143で確認: ' + run_ready[2])
+                if not self.v11_ready_btn.winfo_manager():
+                    self.v11_ready_btn.pack(anchor='w', pady=(3, 0))
+            elif ready:
                 self.v11_ready_btn.configure(text='V11の新しい案を確認: ' + ready[2][:18])
                 if not self.v11_ready_btn.winfo_manager():
                     self.v11_ready_btn.pack(anchor='w', pady=(3, 0))
@@ -1664,6 +1844,8 @@ class Studio(tk.Tk):
         self._v11_watch_after = self.after(120000, self._check_v11_ready_source)
 
     def import_latest_v11_source(self):
+        if self._v11_run_ready:
+            return self.import_latest_v11_run()
         ready = self._v11_ready
         if not ready or self.busy or self.pending_revision is not None:
             return
@@ -1684,6 +1866,128 @@ class Studio(tk.Tk):
             self._v11_ready = None
             self.v11_ready_btn.pack_forget()
         self._import_v11_filename(str(ready[0]), on_imported=on_loaded)
+
+    def import_latest_v11_run(self):
+        """Review a completed V11 report through the existing ready-feed button."""
+        ready = self._v11_run_ready
+        if not ready or self.busy or self.pending_revision is not None:
+            return
+        engine = self.manager.active_path
+        if engine is None:
+            messagebox.showwarning('固定B143未導入', 'V11結果の受入には確認済みB143が必要です。')
+            return
+        if not self._confirm_replace_failed_generation():
+            return
+        try:
+            previous = self.history.head()
+            expected_head_id = previous['revisionId'] if previous else None
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('履歴保護', '保存履歴を確認できません: ' + str(exc))
+            return
+        engine_sha = self.manager.active_sha
+
+        def work():
+            import hashlib
+            report_path = ready[0] / 'RUN_REPORT.json'
+            if report_path.is_symlink() or hashlib.sha256(report_path.read_bytes()).hexdigest() != ready[1]:
+                raise StudioError('V11実行レポートが監視後に変わりました。次回確認まで保留します')
+            result = read_v11_run(
+                ready[0], load_design=read_external_b143_source,
+                compile_design=lambda design: run_bridge(engine, design))
+            if result['reportSha256'] != ready[1]:
+                raise StudioError('V11実行レポートが読み込み中に置き換わりました')
+            return result
+
+        def done(result):
+            if self.manager.active_sha != engine_sha:
+                raise StudioError('固定B143が受入中に変わりました。V11候補を破棄しました')
+            report = result['report']
+            self._hold_generated_candidate(
+                result['design'], result['scene'], 'V11_R125_CANDIDATE',
+                str(report['model']), expected_head_id)
+            # Keep private provenance attached to the in-memory proposal only.
+            # The source handoff and all original V11 output files stay in place.
+            self.pending_revision['v11Run'] = {
+                'directory': str(ready[0]), 'reportSha256': result['reportSha256'],
+                'requestSha256': report['requestSha256'],
+                'originalSha256': report['originalSha256'],
+                'sourceSha256': report['sourceSha256'],
+                'geometrySha256': report['geometrySha256'],
+                'provenance': result['provenance'],
+            }
+            self._v11_seen_run_sha = ready[1]
+            self._v11_run_ready = None
+            self.v11_ready_btn.pack_forget()
+            self.caption.set('V11 R125の新規生成候補 | 固定B143合格 | 未承認・未保存。')
+            self.status.set('V11の要求・原回答・SOURCE診断を同じ実行フォルダに保持。'
+                            'Studio側で固定B143を再検証しました。承認・履歴登録・ART施工は未実施。')
+        self._start('V11実行結果の証跡照合・固定B143再検証中', work, done)
+
+    def open_v11_review(self):
+        """Open a saved V11 run in a separate read-only VTK review window."""
+        if self.busy:
+            return
+        if not native_dependencies_available():
+            messagebox.showwarning('VTKレビューを開けません',
+                'V11レビュー専用表示にはネイティブVTKとPillowが必要です。'
+                '通常プロジェクトの3D状態は変更していません。', parent=self)
+            return
+        initial = Path.home() / 'Documents' / 'Codex'
+        filename = filedialog.askdirectory(
+            title='保存済みV11 R125 runフォルダを選択（レビュー専用）',
+            initialdir=str(initial if initial.is_dir() else Path.home()))
+        if not filename:
+            return
+        run_dir = Path(filename)
+
+        def work():
+            return read_v11_review(run_dir, expected_model='qwen3:14b')
+
+        def done(result):
+            self._show_v11_review(result)
+
+        self._start('保存済みV11 SOURCEをレビュー専用コンパイラで照合中',
+                    work, done)
+
+    def _show_v11_review(self, result):
+        """Render a review scene in an isolated Toplevel; never set Studio state."""
+        if (result.get('status') != 'V11_REVIEW_ONLY'
+                or result.get('formalB143Verified') is not False
+                or result.get('constructionApproved') is not False
+                or result.get('artAdopted') is not False):
+            raise StudioError('V11レビュー専用の安全ラベルが一致しません')
+        popup = tk.Toplevel(self)
+        popup.title('V11レビュー専用 — 固定B143未合格・施工不可')
+        popup.geometry('1040x760')
+        popup.minsize(760, 560)
+        panel = ttk.Frame(popup, padding=10)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='V11 REVIEW ONLY  |  固定B143未合格  |  ART未採用  |  施工不可',
+                  style='Section.TLabel').pack(anchor='w')
+        ttk.Label(panel,
+                  text=('V11生成元の実行SHAは保存レポートに記録されていません。'
+                        '下記レビュー用コンパイラでSOURCE/geometry SHAを再照合しました。'),
+                  style='Muted.TLabel', wraplength=980).pack(anchor='w', pady=(3, 6))
+        details = ('報告モデル: ' + result['model'] +
+                   '  |  レビューコンパイラ: ' + result['compilerCommit'][:12] +
+                   '  |  SOURCE: ' + result['sourceSha256'][:16] +
+                   '  |  geometry: ' + result['geometrySha256'][:16])
+        ttk.Label(panel, text=details, style='Muted.TLabel', wraplength=980).pack(anchor='w', pady=(0, 8))
+        viewport = ttk.Frame(panel)
+        viewport.pack(fill='both', expand=True)
+        preview = NativeVoxelPreview(viewport)
+        preview.pack(fill='both', expand=True)
+        preview.show(result['reviewScene'])
+
+        def close_review():
+            try:
+                preview.destroy()
+            finally:
+                popup.destroy()
+        popup.protocol('WM_DELETE_WINDOW', close_review)
+        # Keep explicit references until the reviewer closes the Toplevel.
+        popup._v11_review_preview = preview
+        popup._v11_review_result = result
 
     def import_external_v11_source(self):
         """Open an external B143 design as a NEW unapproved project proposal.
@@ -1785,6 +2089,15 @@ class Studio(tk.Tk):
         if not prompt or not model:
             messagebox.showwarning('入力不足','日本語指示とローカルLLMモデルを選んでください。')
             return
+        if self.prompt_mode.get() == 'new':
+            if provider != 'Ollama' or model != V11_STUDIO_MODEL:
+                messagebox.showwarning(
+                    'V11新規生成のモデル設定',
+                    '新しい建築はV11の承認・監視付き入口を使います。'
+                    'Ollama / qwen3:14b を選択してください。')
+                return
+            self._generate_v11_studio_new(prompt, model)
+            return
         self._remember_model_choice()
         try:
             existing = self.history.head()
@@ -1859,6 +2172,78 @@ class Studio(tk.Tk):
                                                expected_head_id, source_note=note)
         self._start('ローカルAIで設計・必要なら1回修正・MAB SOURCE検証中',work,done,
                     cancel_event=cancel_event)
+
+    def _generate_v11_studio_new(self, prompt, model):
+        """Route every Studio new-building action through the pinned V11 owner.
+
+        There is deliberately no fallback to ask_llm/direct Ollama here.
+        Revision remains a separate, later integration path.
+        """
+        engine = self.manager.active_path
+        if not engine:
+            messagebox.showwarning('未導入', '固定B143エンジンを導入してください。')
+            return
+        try:
+            previous = self.history.head()
+            expected_head_id = previous['revisionId'] if previous else None
+        except (StudioError, OSError, ValueError) as exc:
+            messagebox.showerror('建築履歴の保護',
+                '現在の保存履歴を確認できないため生成を開始しません: ' + str(exc))
+            return
+        if not self._confirm_replace_failed_generation():
+            return
+        engine_sha = self.manager.active_sha
+        cancel_event = threading.Event()
+
+        def work():
+            receipt, run_dir = run_v11_studio_generation(
+                node_exe=node_binary(), prompt=prompt, model=model,
+                cancel_event=cancel_event,
+                on_execution_start=lambda: self._wait_for_v11_dispatch(cancel_event))
+            result = read_v11_run(
+                run_dir, load_design=read_external_b143_source,
+                compile_design=lambda design: run_bridge(engine, design),
+                expected_prompt=prompt, expected_model=model)
+            report = result['report']
+            if (report.get('requestSha256') != receipt.get('briefSha256') or
+                    report.get('sourceSha256') != receipt.get('sourceSha256') or
+                    report.get('geometrySha256') != receipt.get('geometrySha256')):
+                raise V11GenerationError('V11_RECEIPT_SOURCE_SHA_MISMATCH')
+            return receipt, run_dir, result
+
+        def done(value):
+            if self.manager.active_sha != engine_sha:
+                raise StudioError('固定B143が受入中に変わりました。V11候補を破棄しました')
+            receipt, run_dir, result = value
+            self._hold_generated_candidate(
+                result['design'], result['scene'], 'V11_R125_STUDIO', model,
+                expected_head_id)
+            self.pending_revision['v11Run'] = {
+                'directory': str(run_dir),
+                'reportSha256': result['reportSha256'],
+                'receiptSha256': __import__('hashlib').sha256(
+                    json.dumps(receipt, ensure_ascii=False, sort_keys=True,
+                               separators=(',', ':')).encode('utf-8')).hexdigest(),
+                'requestSha256': result['report']['requestSha256'],
+                'originalSha256': result['report']['originalSha256'],
+                'sourceSha256': result['report']['sourceSha256'],
+                'geometrySha256': result['report']['geometrySha256'],
+                'provenance': result['provenance'],
+            }
+            self.caption.set('V11 R125新規生成 | 固定B143合格 | 未承認・未保存。')
+            self.status.set('V11の完了receipt、原回答、SOURCEを照合し、固定B143で再検証しました。'
+                            '候補は3D表示中です。保存・ART採用・施工は行っていません。')
+
+        self._start('V11承認・監視付き新規生成、receipt照合、固定B143再検証中',
+                    work, done, cancel_event=cancel_event)
+
+    def _wait_for_v11_dispatch(self, cancel_event):
+        """Disable cancellation before handing the request to the owned runner."""
+        acknowledged = threading.Event()
+        self.pending_events.put(('dispatch', 'V11 owned run', None, None, True,
+                                 cancel_event, acknowledged))
+        if not acknowledged.wait(timeout=10):
+            raise V11GenerationError('STUDIO_DISPATCH_UI_ACK_TIMEOUT')
 
     def _hold_generated_candidate(self, design, scene, provider, model, expected_head_id,
                                   source_note=''):

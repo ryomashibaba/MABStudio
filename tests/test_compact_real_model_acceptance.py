@@ -13,18 +13,19 @@ from tests.test_local_llm_flow import DESIGN
 
 def test_first_design_compact_transport_does_not_change_real_b143_contract(monkeypatch):
     assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems'] == 160
-    assert core.MAX_MODEL_ELEMENTS == 18
+    assert core.MAX_MODEL_ELEMENTS == 24
     with fake_lm_stream('normal') as (url, posted):
         monkeypatch.setattr(core, 'LM_STUDIO_BASE', url)
         assert core.ask_llm('LM Studio', 'gemma-4-26b-a4b-it-qat',
                             '未来的な4階建てのビルを作って、窓をたくさん') == DESIGN
         assert len(posted) == 1
         schema = posted[0]['response_format']['json_schema']['schema']
-        assert schema['properties']['elements']['maxItems'] == 18
+        assert schema['properties']['elements']['maxItems'] == 24
         assert schema['properties']['title']['maxLength'] == 48
         assert schema['properties']['brief']['maxLength'] == 120
         prompt = posted[0]['messages'][0]['content']
-        assert '4階建てなら4階を保つ' in prompt
+        assert '4階建てなら4つの階' in prompt
+        assert '円筒コア、曲面屋根、ドーム、リング状設備' in prompt
         assert '窓を1個ずつ' in prompt
 
 

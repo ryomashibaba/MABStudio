@@ -62,7 +62,7 @@ def test_sse_assembles_chunks_without_reasoning_content(monkeypatch):
                             on_progress=notices.append,timeout=1)==DESIGN
         assert len(seen)==1
         assert seen[0]['stream'] is True
-        assert seen[0]['response_format']['json_schema']['schema']['properties']['elements']['maxItems']==18
+        assert seen[0]['response_format']['json_schema']['schema']['properties']['elements']['maxItems']==24
 
 
 def test_cancel_closes_local_stream_and_never_retries(monkeypatch):
@@ -193,7 +193,7 @@ def test_qwen38_requests_nonthinking_without_changing_model_load(monkeypatch):
 
 def test_model_generation_schema_does_not_change_mab_contract():
     assert core.B143_JSON_SCHEMA['properties']['elements']['maxItems']==160
-    assert core.MODEL_GENERATION_SCHEMA['properties']['elements']['maxItems']==18
+    assert core.MODEL_GENERATION_SCHEMA['properties']['elements']['maxItems']==24
     assert core.MODEL_GENERATION_SCHEMA['properties']['title']['maxLength']==48
     assert core.MODEL_GENERATION_SCHEMA['properties']['brief']['maxLength']==120
     assert core.B143_JSON_SCHEMA['properties']['brief']['maxLength']==500

@@ -245,7 +245,7 @@ class VoxelPreview(tk.Canvas):
                      '高精細（15,000）': 15000,
                      '全体メッシュ（境界面）': None}
     def __init__(self, master, **kw):
-        super().__init__(master, bg='#101b2b', highlightthickness=0, **kw)
+        super().__init__(master, bg='#f2f5f8', highlightthickness=0, **kw)
         self.scene = None
         self.angle, self.elevation = self.VIEWS['斜め']
         self.zoom = 1.0
@@ -297,7 +297,9 @@ class VoxelPreview(tk.Canvas):
             self._pan(e)
         elif self.pressed_at:
             x, y, angle, elevation = self.pressed_at
-            self.angle = angle + (e.x-x)*0.009
+            # Match the native viewer so a rightward drag moves the near side
+            # of the model rightward on screen.
+            self.angle = angle - (e.x-x)*0.009
             self.elevation = max(-math.radians(89), min(math.radians(89),
                                   elevation + (e.y-y)*0.006))
             self.draw()
@@ -421,7 +423,7 @@ class VoxelPreview(tk.Canvas):
             for xyz in corners:
                 coords.extend(proj(*xyz))
             self.create_polygon(*coords,fill=shade(color,light),
-                                outline='#243c55' if self.show_edges else '',
+                                outline='#65758a' if self.show_edges else '',
                                 width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー  {len(points):,}セル'
         label+=f' | 境界面メッシュ {total_faces:,}面'
@@ -432,14 +434,14 @@ class VoxelPreview(tk.Canvas):
             label+='（描画上限・一部省略。GPUで全体を確認）'
         elif render_mode == 'coarse':
             label+='（高速表示・重なりはGPUで確認）'
-        self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
-        self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#91a4c4',anchor='e')
+        self.create_rectangle(0,0,w,29,fill='#e9edf2',outline='')
+        self.create_text(13,15,text=label,fill='#17212b',anchor='w',font=('Segoe UI',10))
+        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#526174',anchor='e')
 
     def draw(self):
         self.delete('all')
         w, h = max(1, self.winfo_width()), max(1, self.winfo_height())
-        self.create_text(w//2,h//2,fill='#91a4c4',text='生成した建築のプレビューがここに表示されます' if not self.scene else '描画中...')
+        self.create_text(w//2,h//2,fill='#526174',text='生成した建築のプレビューがここに表示されます' if not self.scene else '描画中...')
         if not self.scene:
             return
         pts = visible_section(self.scene.get('primitives') or [], self.section_level,
@@ -501,7 +503,7 @@ class VoxelPreview(tk.Canvas):
                 coords=[]
                 for xyz in corners: coords.extend(proj(*xyz))
                 self.create_polygon(*coords,fill=shade(color,light),
-                                    outline='#243c55' if self.show_edges else '',
+                                    outline='#65758a' if self.show_edges else '',
                                     width=.6 if self.show_edges else 0, tags=('geometry',))
         label=self.scene.get('previewLabel') or f'3D SOURCEプレビュー   {total:,}表示セル'
         if self.section_level is not None:
@@ -509,6 +511,6 @@ class VoxelPreview(tk.Canvas):
             label+=f' | {self.section_axis.upper()}{op}{self.section_level} 断面（仮想切断面）'
         if skipped:
             label+=f'  |  簡易描画（可視セル {len(visible):,}/{len(visible)+skipped:,}）'
-        self.create_rectangle(0,0,w,29,fill='#192a40',outline='')
-        self.create_text(13,15,text=label,fill='#e4efff',anchor='w',font=('Segoe UI',10))
-        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#91a4c4',anchor='e')
+        self.create_rectangle(0,0,w,29,fill='#e9edf2',outline='')
+        self.create_text(13,15,text=label,fill='#17212b',anchor='w',font=('Segoe UI',10))
+        self.create_text(w-12,h-10,text='ドラッグ：回転 / Shift・右ドラッグ：移動 / ホイール：拡大 / ダブルクリック：全体',fill='#526174',anchor='e')

@@ -83,7 +83,9 @@ def test_initial_prompt_prioritizes_connected_architectural_access():
     assert '外部から入口までの床・段差をつなぐ' in guidance
     assert '床と階段で上下階を接続' in guidance
     assert '装飾より入口・動線・採光を優先' in guidance
-    assert '最大18要素以内' in guidance
+    assert '最大24要素まで' in guidance
+    assert 'boxだけで構成せず' in guidance
+    assert '4つの階が外観から判別' in guidance
 
 
 def test_initial_prompt_limits_small_building_scale_and_solid_obstructions():
@@ -94,7 +96,7 @@ def test_initial_prompt_limits_small_building_scale_and_solid_obstructions():
     assert '高さを変えた複数段' in guidance
     assert 'bounds.heightはセル数' in guidance
     assert 'Y=heightを含めない' in guidance
-    assert '最大18要素以内' in guidance
+    assert '最大24要素まで' in guidance
 
 
 def test_failure_diagnostics_do_not_record_model_content_or_autofix():

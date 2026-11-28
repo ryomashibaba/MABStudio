@@ -707,8 +707,10 @@ Minecraftコマンド、ワールド座標、URLは出力しない。
 """
 
 INITIAL_GENERATION_GUIDANCE = """【初回設計】
-まず短く完結させる。10～14要素を目安とし、最大18要素以内で建築意図を表現する。
-外観のシルエット、建築的特徴、複数階の床と入口を優先する。4階建てなら4階を保つ。
+短く完結させるが単純な箱の寄せ集めにしない。通常は18～24要素を使い、最大24要素まで建築意図を表現する。
+最初に建物の外形・階構成・特徴的な屋根や上部構造を決める。正面/側面の壁を巨大な箱1個で済ませず、複数の量塊を段違いに重ね、セットバック、張り出し、庇、柱、塔状コアなどで輪郭に変化をつける。窓・帯・床をまとめすぎて特徴を消さない。
+boxだけで構成せず、意図に合うellipsoidまたはcylinderを少なくとも1要素、主要なシルエットを作る位置に使う。円筒コア、曲面屋根、ドーム、リング状設備など形の意味が分かる造形を優先し、色替えだけを造形差として扱わない。材質数を増やすより形状と凹凸で個性を出す。
+外観のシルエット、建築的特徴、複数階の床と入口を優先する。4階建てなら4つの階が外観から判別できる床線・窓帯・段差を設け、各階を省略しない。
 人が使う建物では、入口のcutを実際の外壁と交差させ、外部から入口までの床・段差をつなぐ。窓も外壁を貫く開口として配置し、必要なら開口にガラスを重ねる。複数階を設ける場合は床と階段で上下階を接続し、柱・設備シャフトを動線として扱わない。要素数に余裕がないときは装飾より入口・動線・採光を優先する。
 「小さな」建物はboundsも控えめにし、幅・奥行12～24、高さ8～18セル程度を目安とする（大きさの指定がなければ32×24×32を避ける）。cutは対象壁の実際の外面を見定め、壁厚を貫通させる。書棚・家具は歩行域を塞ぐ大きな塊にせず、階段は高さを変えた複数段で上下階をつなぐ。特徴的な屋根は厚い全面板にせず、庇や段違いを使う。
 窓列や装飾帯はbox/cut/shellでまとめ、同種の窓を1個ずつ書き並べない。
@@ -793,7 +795,7 @@ DEFAULT_OUTPUT_TOKENS = 6400
 MAX_OUTPUT_TOKENS = 8000
 # A complete B143 source is still verified by the pinned MAB engine. The output
 # grammar only bounds the FIRST proposal so a normal building fits in one reply.
-MAX_MODEL_ELEMENTS = 18
+MAX_MODEL_ELEMENTS = 24
 # Compact output is a first-proposal transport boundary, not a new MAB
 # architecture engine. Full B143 source (including richer revisions) is still
 # checked by the unchanged pinned MAB validate/compile/verify functions.

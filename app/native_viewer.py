@@ -183,6 +183,42 @@ def interactive_frame_size(width: int, height: int, dragging: bool) -> tuple[int
     return max(1, round(width * .72)), max(1, round(height * .72))
 
 
+def camera_fit_distance(bounds: tuple[int, int, int, int, int, int],
+                        direction: tuple[float, float, float],
+                        right: tuple[float, float, float],
+                        up: tuple[float, float, float],
+                        aspect: float, *, fov_degrees: float = 34.0,
+                        margin: float = .90) -> float:
+    """Fit all eight SOURCE bounds corners to the perspective viewport.
+
+    A circumscribed sphere wastes space for long or shallow buildings. Fit the
+    actual oriented bounds in camera space while keeping a small crop margin.
+    """
+    if not 0.0 < margin < 1.0 or aspect <= 0.0:
+        raise ValueError('Invalid camera fit parameters')
+    half = ((bounds[1]-bounds[0])*.5,
+            (bounds[3]-bounds[2])*.5,
+            (bounds[5]-bounds[4])*.5)
+    tangent_y = math.tan(math.radians(fov_degrees)*.5)
+    tangent_x = tangent_y * aspect
+
+    def dot(a, b):
+        return sum(a[i]*b[i] for i in range(3))
+
+    required = 0.0
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            for sz in (-1, 1):
+                corner = (sx*half[0], sy*half[1], sz*half[2])
+                depth = dot(corner, direction)
+                horizontal = abs(dot(corner, right))
+                vertical = abs(dot(corner, up))
+                required = max(required,
+                               depth + horizontal/(tangent_x*margin),
+                               depth + vertical/(tangent_y*margin))
+    return max(6.0, required)
+
+
 def normal_shade(normal: tuple[int, int, int]) -> float:
     # Intentionally *different* from the old flat palette renderer:
     # directional sun/sky lighting over six side-specific visible surfaces.
@@ -223,7 +259,7 @@ class NativeVoxelPreview(tk.Frame):
     DETAIL_LIMITS = VoxelPreview.DETAIL_LIMITS
 
     def __init__(self, master, **kw):
-        super().__init__(master, bg='#101a2a', **kw)
+        super().__init__(master, bg='#f2f5f8', **kw)
         self._vtk = _vtk_runtime()
         self.scene = None
         self.cut_level = None
@@ -260,8 +296,8 @@ class NativeVoxelPreview(tk.Frame):
         self.on_cell_picked = None
         self._render = self._vtk['vtkRenderer']()
         self._render.GradientBackgroundOn()
-        self._render.SetBackground(0.065, 0.105, 0.19)
-        self._render.SetBackground2(0.15, 0.24, 0.36)
+        self._render.SetBackground(0.91, 0.935, 0.96)
+        self._render.SetBackground2(0.985, 0.99, 1.0)
         self._window = self._vtk['vtkRenderWindow']()
         self._window.SetOffScreenRendering(True)
         self._window.SetMultiSamples(4)
@@ -285,7 +321,7 @@ class NativeVoxelPreview(tk.Frame):
             light.SetColor(*color)
             light.SetIntensity(intensity)
             self._render.AddLight(light)
-        self._image = tk.Label(self, bg='#101a2a', bd=0, highlightthickness=0,
+        self._image = tk.Label(self, bg='#f2f5f8', bd=0, highlightthickness=0,
                                takefocus=True, cursor='fleur')
         self._image.pack(fill='both', expand=True)
         self._image.bind('<Configure>', lambda _: self._schedule(55, coalesce=True))
@@ -368,7 +404,9 @@ class NativeVoxelPreview(tk.Frame):
         if mode == 'pan':
             self.pan_x, self.pan_y = px + e.x-x, py + e.y-y
         else:
-            self.angle = angle + (e.x-x)*.009
+            # Keep the grabbed near-side feature under the pointer: screen X
+            # motion is opposite the camera azimuth's positive rotation.
+            self.angle = angle - (e.x-x)*.009
             self.elevation = max(-math.radians(88.5), min(math.radians(88.5),
                                  elevation + (e.y-y)*.007))
         # Coalesce, do NOT debounce: frequent pointer events must not starve
@@ -506,7 +544,7 @@ class NativeVoxelPreview(tk.Frame):
         except (GPUViewerError, NativeViewerError) as exc:
             self._photo = None
             self._image.configure(text=f'3D表示を安全に停止しました: {exc}', fg='#ecbec6',
-                                  image='', bg='#101a2a')
+                                  image='', bg='#f2f5f8')
             self._bounds = None
             return
         self._surfaces = faces
@@ -725,8 +763,8 @@ class NativeVoxelPreview(tk.Frame):
         floor_mapper.SetInputConnection(ground.GetOutputPort())
         floor_actor = v['vtkActor']()
         floor_actor.SetMapper(floor_mapper)
-        floor_actor.GetProperty().SetColor(.14,.22,.30)
-        floor_actor.GetProperty().SetOpacity(.50)
+        floor_actor.GetProperty().SetColor(.72,.78,.84)
+        floor_actor.GetProperty().SetOpacity(.32)
         floor_actor.GetProperty().LightingOff()
         self._render.AddActor(floor_actor)
         self._floor_actors.append(floor_actor)
@@ -792,22 +830,20 @@ class NativeVoxelPreview(tk.Frame):
             self._photo = None
             self._image.configure(text='表示するSOURCE建築がありません' if not self.scene else
                                   'この断面には表示セルがありません', image='',
-                                  bg='#101a2a', fg='#b4cee4')
+                                  bg='#f2f5f8', fg='#526174')
             return
         b = self._bounds
-        size_x, size_y, size_z = b[1]-b[0], b[3]-b[2], b[5]-b[4]
-        radius = math.sqrt(size_x*size_x+size_y*size_y+size_z*size_z)*.5
         fov = math.radians(34.0)
         aspect = max(.15, w/max(1,h))
-        # Bounding-sphere fit in the *narrower* viewport dimension.
-        effective_half_angle = math.atan(math.tan(fov/2)*min(1.0,aspect))
-        distance = max(6.0, radius*1.16/math.sin(effective_half_angle))
         direction = (math.sin(self.angle)*math.cos(self.elevation), math.sin(self.elevation),
                      math.cos(self.angle)*math.cos(self.elevation))
         # Physical panning: right and camera-up axes, in world units.
         right = (math.cos(self.angle), 0, -math.sin(self.angle))
         up = (-math.sin(self.elevation)*math.sin(self.angle), math.cos(self.elevation),
               -math.sin(self.elevation)*math.cos(self.angle))
+        distance = camera_fit_distance(b, direction, right, up, aspect,
+                                       fov_degrees=math.degrees(fov))
+        radius = math.sqrt((b[1]-b[0])**2 + (b[3]-b[2])**2 + (b[5]-b[4])**2)*.5
         pixel_world = (2 * math.tan(math.radians(34/2)) * distance /
                        max(1, h) / self.zoom)
         target = tuple(-right[i]*self.pan_x*pixel_world + up[i]*self.pan_y*pixel_world for i in range(3))
@@ -840,7 +876,7 @@ class NativeVoxelPreview(tk.Frame):
             self._photo.paste(bitmap)
         else:
             self._photo = self._vtk['ImageTk'].PhotoImage(bitmap, master=self._image)
-        self._image.configure(image=self._photo, text='', bg='#101a2a')
+        self._image.configure(image=self._photo, text='', bg='#f2f5f8')
         presented = time.perf_counter()
         self._rendered_size = rw, rh
         self._photo_size = w, h
