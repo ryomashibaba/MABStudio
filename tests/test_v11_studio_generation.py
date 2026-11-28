@@ -199,8 +199,66 @@ def test_cancel_after_post_free_preparation_starts_no_v11_post(monkeypatch):
     monkeypatch.setattr(bridge, '_run_json', lambda *a, **k: calls.append(a))
     with pytest.raises(V11GenerationError, match='CANCELLED_BEFORE_STUDIO_NEW_POST'):
         bridge.run_new_generation(node_exe='node.exe', prompt=prompt,
+                                  bounded=True,
                                   cancel_event=cancel_event)
     assert calls == []
+
+
+def test_bounded_studio_mode_uses_bounded_cli_and_unproven_receipt(monkeypatch):
+    import app.v11_studio_generation as bridge
+
+    prompt = '水辺に小さな観測資料館を設計してください。'
+    brief_sha = hashlib.sha256(prompt.encode('utf-8')).hexdigest()
+    request_sha = 'e' * 64
+    calls = []
+    run_dir_exists = False
+    with tempfile.TemporaryDirectory(
+            prefix='v11-studio-bounded-',
+            dir=Path(default_private_module()).parents[1]) as temp:
+        parent = Path(temp)
+        monkeypatch.setattr(bridge, 'private_run_parent', lambda: parent)
+        monkeypatch.setattr(bridge, 'prepare_new_request', lambda **_kwargs: ({
+            'schema': 'r125-studio-new-request-v1', 'mode': 'new',
+            'headSha': V11_HEAD, 'model': MODEL,
+            'endpoint': 'http://127.0.0.1:11435/v1/chat/completions',
+            'maxOutputTokens': 4096, 'briefSha256': brief_sha,
+            'requestSha256': request_sha, 'modelPostCount': 0,
+        }, parent / 'private-run', {'MAB_HEAD': V11_HEAD}))
+
+        def fake_runner(argv, *, env, cwd):
+            calls.append((list(argv), dict(env), Path(cwd)))
+            out_dir = Path(argv[-1])
+            out_dir.mkdir()
+            return 0, {
+                'schema': 'r125-studio-owned-result-v1', 'mode': 'new',
+                'status': 'SOURCE_READY_REVIEW_ONLY', 'headSha': V11_HEAD,
+                'model': MODEL, 'modelDigest': MODEL_DIGEST,
+                'briefSha256': brief_sha, 'requestSha256': request_sha,
+                'modelPostCount': 1, 'automaticRetries': 0,
+                'loadedModelObserved': True, 'unloadConfirmed': True,
+                'ownedServiceStopConfirmed': True, 'monitorStopConfirmed': True,
+                'projectLockReleased': True, 'sourceVerified': True,
+                'sourceSha256': '2' * 64, 'geometrySha256': '3' * 64,
+                'worldContacts': 0, 'worldWrites': 0, 'constructionApproved': False,
+                'executionAllowed': False, 'artStatus': 'NOT_REVIEWED',
+                'resourceMode': 'BOUNDED_REAL_REQUEST_TRIAL',
+                'resourceSafetyCertified': False, 'inferenceMemoryPeakCalibrated': False,
+                'resourceEvidenceSha256': '4' * 64, 'runPath': str(out_dir),
+            }
+
+        monkeypatch.setattr(bridge, '_run_json', fake_runner)
+        receipt, run_dir = bridge.run_new_generation(
+            node_exe='node.exe', prompt=prompt, model=MODEL, bounded=True,
+            repo=default_v11_repo(), private_module=default_private_module(),
+            strata_repo=default_strata_repo())
+        run_dir_exists = run_dir.is_dir()
+
+    assert len(calls) == 1
+    assert calls[0][0][2] == '--studio-new-bounded'
+    assert calls[0][1]['MAB_R125_STUDIO_NEW_APPROVAL'].endswith(V11_HEAD)
+    assert receipt['resourceSafetyCertified'] is False
+    assert receipt['inferenceMemoryPeakCalibrated'] is False
+    assert run_dir_exists
 
 
 def test_completed_v11_run_enters_existing_source_candidate_path(monkeypatch):
@@ -217,8 +275,10 @@ def test_completed_v11_run_enters_existing_source_candidate_path(monkeypatch):
                 'report': report, 'reportSha256': 'd' * 64,
                 'provenance': 'V11_REPORT_NOT_INDEPENDENTLY_ATTESTED'}
     run_dir = Path('private-v11-run')
+    generation_calls = []
     monkeypatch.setattr(main, 'run_v11_studio_generation',
-                        lambda **_kwargs: (receipt, run_dir))
+                        lambda **kwargs: (generation_calls.append(kwargs) or
+                                          (receipt, run_dir)))
 
     def read_run(directory, **kwargs):
         assert directory == run_dir
@@ -231,7 +291,9 @@ def test_completed_v11_run_enters_existing_source_candidate_path(monkeypatch):
     monkeypatch.setattr(main, 'run_bridge', lambda _engine, design: {'compiled': design})
     studio = object.__new__(main.Studio)
     studio.manager = SimpleNamespace(active_path=Path('pinned-b143'), active_sha='engine-sha')
-    studio.history = SimpleNamespace(head=lambda: None)
+    studio.history = SimpleNamespace(
+        head=lambda: None,
+        commit=lambda *_args, **_kwargs: pytest.fail('unapproved SOURCE entered Studio history'))
     studio._confirm_replace_failed_generation = lambda: True
     shown = []
 
@@ -248,6 +310,10 @@ def test_completed_v11_run_enters_existing_source_candidate_path(monkeypatch):
 
     assert shown == [(imported['design'], imported['scene'],
                       'V11_R125_STUDIO', MODEL, None)]
+    assert len(generation_calls) == 1
+    assert generation_calls[0]['prompt'] == prompt
+    assert generation_calls[0]['model'] == MODEL
+    assert generation_calls[0]['bounded'] is True
     assert studio.pending_revision['v11Run']['directory'] == str(run_dir)
     assert studio.pending_revision['v11Run']['sourceSha256'] == 'a' * 64
 

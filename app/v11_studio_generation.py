@@ -171,7 +171,7 @@ def _is_sha(value: object) -> bool:
 
 
 def validate_source_ready_receipt(receipt: dict, *, request: dict,
-                                  out_dir: Path) -> Path:
+                                  out_dir: Path, bounded: bool = False) -> Path:
     """Accept only a completed, unloaded, single-post V11 receipt."""
     expected = {
         'schema': RECEIPT_SCHEMA, 'mode': 'new', 'status': 'SOURCE_READY_REVIEW_ONLY',
@@ -190,6 +190,17 @@ def validate_source_ready_receipt(receipt: dict, *, request: dict,
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise V11GenerationError('V11_RECEIPT_GATE: ' + key)
+    if bounded:
+        bounded_expected = {
+            'resourceMode': 'BOUNDED_REAL_REQUEST_TRIAL',
+            'resourceSafetyCertified': False,
+            'inferenceMemoryPeakCalibrated': False,
+        }
+        for key, value in bounded_expected.items():
+            if receipt.get(key) != value:
+                raise V11GenerationError('V11_BOUNDED_RECEIPT_GATE: ' + key)
+        if not _is_sha(receipt.get('resourceEvidenceSha256')):
+            raise V11GenerationError('V11_BOUNDED_EVIDENCE_SHA_INVALID')
     if not _is_sha(receipt.get('sourceSha256')) or not _is_sha(receipt.get('geometrySha256')):
         raise V11GenerationError('V11_RECEIPT_SHA_INVALID')
     reported_path = Path(receipt.get('runPath', ''))
@@ -206,6 +217,7 @@ def validate_source_ready_receipt(receipt: dict, *, request: dict,
 def run_new_generation(*, node_exe: str, prompt: str, model: str = MODEL,
                        repo: Path | None = None, private_module: Path | None = None,
                        strata_repo: Path | None = None,
+                       bounded: bool = False,
                        cancel_event=None, on_execution_start=None) -> tuple[dict, Path]:
     """Prepare and invoke the exact V11 Studio entry, with no legacy fallback."""
     repo = Path(repo or default_v11_repo())
@@ -228,12 +240,14 @@ def run_new_generation(*, node_exe: str, prompt: str, model: str = MODEL,
     if cancel_event is not None and cancel_event.is_set():
         env.pop('MAB_R125_STUDIO_NEW_APPROVAL', None)
         raise V11GenerationError('CANCELLED_BEFORE_STUDIO_NEW_POST')
-    code, receipt = _run_json([node_exe, str(script), '--studio-new',
+    mode = '--studio-new-bounded' if bounded else '--studio-new'
+    code, receipt = _run_json([node_exe, str(script), mode,
                                prepared['requestSha256'], '--model', model,
                                '--prompt', prompt, '--out', str(out_dir)],
                               env=env, cwd=repo)
     if code != 0:
         reason = str(receipt.get('reason') or receipt.get('status') or 'V11_RUN_HELD')
         raise V11GenerationError('V11_STUDIO_RUN_HELD: ' + reason)
-    validate_source_ready_receipt(receipt, request=prepared, out_dir=out_dir)
+    validate_source_ready_receipt(receipt, request=prepared, out_dir=out_dir,
+                                  bounded=bounded)
     return receipt, out_dir

@@ -2198,6 +2198,7 @@ class Studio(tk.Tk):
         def work():
             receipt, run_dir = run_v11_studio_generation(
                 node_exe=node_binary(), prompt=prompt, model=model,
+                bounded=True,
                 cancel_event=cancel_event,
                 on_execution_start=lambda: self._wait_for_v11_dispatch(cancel_event))
             result = read_v11_run(
