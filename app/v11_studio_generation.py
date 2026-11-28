@@ -13,7 +13,7 @@ from pathlib import Path
 import subprocess
 import uuid
 
-V11_HEAD = '85a6f4cc7805f40eb9a86ce5e4d15f7ff6d4b9a4'
+V11_HEAD = 'ca5053aa82e03e360487745a5ed98aa289264a41'
 V11_BRANCH = 'research/r125-v6-readonly-facade-diagnostic-20261111'
 MODEL = 'qwen3:14b'
 MODEL_DIGEST = 'bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8'
